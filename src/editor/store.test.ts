@@ -55,10 +55,10 @@ function setup(count: number) {
 describe('EditorStore', () => {
   it('notifies committed changes and skips no-ops', () => {
     const { editor, changes } = setup(5);
-    editor.dispatch((s) => setBorder(s, 4));
-    editor.dispatch((s) => setBorder(s, 4));
+    editor.dispatch((s) => setBorder(s, 0.004));
+    editor.dispatch((s) => setBorder(s, 0.004));
     expect(changes).toEqual([{ transient: false, restored: false }]);
-    expect(editor.getState().canvas.border).toBe(4);
+    expect(editor.getState().canvas.borderFraction).toBe(0.004);
   });
 
   it('shuffle uses a new seed each time', () => {
@@ -125,7 +125,7 @@ describe('EditorStore', () => {
     const { editor, timers } = setup(DEFER_ASSIGNMENT_ABOVE + 1);
     const start = editor.getState();
     editor.dragVariation(0.05);
-    editor.dispatch((s) => setBorder(s, 2));
+    editor.dispatch((s) => setBorder(s, 0.002));
     expect(timers).toHaveLength(0);
     expect(editor.isDragging()).toBe(false);
     expect(editor.getState().assignment).toEqual(

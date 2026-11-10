@@ -32,6 +32,7 @@ export {
 } from './render';
 export {
   arrange,
+  borderAt,
   clearArrangementCache,
   createEditorState,
   cropOf,
@@ -39,6 +40,7 @@ export {
   DEFAULT_VARIATION,
   forgetPhotos,
   isAssignmentCached,
+  MAX_BORDER_FRACTION,
   MAX_CANVAS_SIDE,
   MAX_PHOTO_ASPECT,
   randomSeed,
@@ -52,6 +54,7 @@ export {
   setVariation,
   shuffle,
   validateEditorState,
+  type BorderAt,
   type CanvasSettings,
   type CreateOptions,
   type CropMap,

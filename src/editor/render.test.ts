@@ -190,7 +190,7 @@ describe('renderCollage', () => {
   });
 
   it('uses the background colour and scales the border with the output', () => {
-    const styled = setBorder(setBackground(state, '#102030'), 40);
+    const styled = setBorder(setBackground(state, '#102030'), 40 / 1080);
     const ctx = recorder();
     const full = renderCollage(
       ctx,
@@ -217,7 +217,7 @@ describe('renderCollage', () => {
   });
 
   it('clamps a border too large for the output instead of throwing', () => {
-    const huge = setBorder(state, 5000);
+    const huge = setBorder(state, 0.25);
     expect(() =>
       renderCollage(recorder(), huge, { width: 200, height: 113 }, () => null),
     ).not.toThrow();

@@ -36,6 +36,14 @@
  *   assignment and crops refer to photos by id (and assignment's seeded
  *   variety hashes the id), then validateEditorState and `restore`.
  *
+ * Behaviour #10 should decide deliberately (documented, not yet chosen):
+ *
+ * - `restore` during an import excludes photos already imported that the
+ *   snapshot does not name: they stay in the tray, unticked, with no notice.
+ * - A tray sync (a toggle, or an import finishing) that lands mid-drag
+ *   commits the partial drag, so one physical drag can then give two
+ *   committed states.
+ *
  * Each notification says whether the change is `transient` (a step of a dial
  * drag that will be followed by a commit), committed, or a restore. One user
  * gesture gives exactly one committed notification; an action that changes
@@ -167,7 +175,7 @@ export class EditorStore {
 
   /**
    * Applies a pure action and commits the result: for example
-   * `editor.dispatch((s) => setBorder(s, 12))`. Ends any dial drag first
+   * `editor.dispatch((s) => setBorder(s, 0.01))`. Ends any dial drag first
    * (so the drag is committed with it). If neither the action nor a drag
    * changed anything, nobody is notified.
    */

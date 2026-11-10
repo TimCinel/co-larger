@@ -140,12 +140,18 @@ describe('DialInput: one commit per gesture', () => {
     expect(editor.getState().variation).toBe(0.25);
   });
 
-  it('Escape mid-drag commits once at the dial’s value', () => {
+  it('Escape mid-drag is not an end event: the drag goes on and commits once on release', () => {
     const { editor, dial, frame, commits } = setup();
     dial.move(0.1);
     frame();
-    dial.end(0.1); // Escape
-    dial.end(0.1); // later blur
+    // Escape: no call (controls.ts does not listen for it). The pointer is
+    // still down, so the user keeps dragging.
+    dial.move(0.3);
+    frame();
+    expect(commits()).toBe(0);
+    dial.end(0.3); // pointerup
+    dial.end(0.3); // change
+    dial.end(0.3); // later blur
     expect(commits()).toBe(1);
     expect(editor.isDragging()).toBe(false);
   });

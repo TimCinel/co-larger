@@ -7,9 +7,9 @@
  * 2D context methods are used, so it works on an HTMLCanvasElement, an
  * OffscreenCanvas or a recording fake in tests.
  */
-import { maxBorder, placeLayout, type Tile } from '../layout';
+import { placeLayout, type Tile } from '../layout';
 import { coverSource } from './crop';
-import { cropOf, type EditorState } from './state';
+import { borderAt, cropOf, type EditorState } from './state';
 
 /** An image ready to draw, with its size in pixels. */
 export interface DrawableImage {
@@ -87,11 +87,11 @@ const MAX_RATIO_ERROR = Math.log(1.019);
 
 /**
  * Where each tile goes when `state` is drawn at `size` pixels: the state's
- * plan placed at that size, with the border scaled from canvas pixels to
- * output pixels and every edge snapped to whole pixels (so neighbouring
+ * plan placed at that size, with the border (a fraction of the shorter
+ * side) in whole pixels at that size and every edge snapped to whole pixels (so neighbouring
  * tiles share an edge exactly and no background shows through
- * anti-aliasing seams). The border is clamped so that every tile keeps at
- * least one pixel.
+ * anti-aliasing seams). The border drawn is borderAt(...).effective: the
+ * requested border, clamped so that every tile keeps at least one pixel.
  */
 export function tilesFor(state: EditorState, size: RenderSize): Tile[] {
   const width = Math.round(size.width);
@@ -104,11 +104,9 @@ export function tilesFor(state: EditorState, size: RenderSize): Tile[] {
   ) {
     return [];
   }
-  const scale = width / state.canvas.width;
-  const wanted = state.canvas.border * scale;
   const border =
-    wanted > 0
-      ? Math.min(wanted, maxBorder(state.plan, width, height, { snap: true }))
+    state.canvas.borderFraction > 0
+      ? borderAt(state, { width, height }).effective
       : 0;
   return placeLayout(state.plan, { width, height, border, snap: true });
 }

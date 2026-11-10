@@ -42,6 +42,7 @@ import {
   assignPhotos,
   maxBorder,
   placeLayout,
+  planAspectLimit,
   planLayout,
   validateAssignment,
   validatePlan,
@@ -58,17 +59,26 @@ export interface CanvasSettings {
   /** Output height in whole pixels, 1 to MAX_CANVAS_SIDE. */
   readonly height: number;
   /**
-   * Outer margin and gap between tiles, in output pixels. Never more than
-   * the arrangement allows (`maxBorder` with snapping, so every tile keeps
-   * at least one pixel): setBorder clamps it, and so does every re-roll,
-   * because the safe maximum depends on the arrangement. The border control
-   * (#6) should offer the tighter `maxBorderForAspect` limit and re-clamp
-   * after each re-roll. The renderer scales it with the output size.
+   * Outer margin and gap between tiles, as a fraction of the canvas's
+   * shorter side (0 to MAX_BORDER_FRACTION): 0.01 on a 1920 × 1080 canvas
+   * is 10.8 px. A fraction keeps the border the same physical width when
+   * only the pixel size changes (another DPI at the same paper size, #7),
+   * and makes it independent of the output resolution.
+   *
+   * This is the border the user asked for, and no action other than
+   * setBorder changes it. What is drawn is clamped to what the current
+   * arrangement allows (see borderAt), so re-rolls, drags and size changes
+   * never lose the user's setting. The border control (#6) can show both
+   * with borderAt, and may want to offer the tighter `maxBorderForAspect`
+   * limit.
    */
-  readonly border: number;
+  readonly borderFraction: number;
   /** Shown in the border and gaps: a lower-case `#rrggbb` colour. */
   readonly background: string;
 }
+
+/** The largest border: a quarter of the canvas's shorter side. */
+export const MAX_BORDER_FRACTION = 0.25;
 
 /** The largest canvas side accepted, in pixels (export tops out at 7016). */
 export const MAX_CANVAS_SIDE = 20000;
@@ -92,7 +102,7 @@ export const MAX_PHOTO_ASPECT = 1000;
 export const DEFAULT_CANVAS: CanvasSettings = Object.freeze({
   width: 1920,
   height: 1080,
-  border: 0,
+  borderFraction: 0,
   background: '#ffffff',
 });
 
@@ -143,7 +153,7 @@ export function createEditorState(options: CreateOptions = {}): EditorState {
   const photos = [...(options.photos ?? [])];
   const arrangement = arrange(canvas, photos, variation, seed);
   return {
-    canvas: clampBorder(canvas, arrangement.plan),
+    canvas,
     variation,
     seed,
     photos,
@@ -190,12 +200,7 @@ export function setVariation(
   if (v === state.variation) return state;
   if (options.keepAssignment) {
     const plan = planFor(state.canvas, state.photos.length, v, state.seed);
-    return {
-      ...state,
-      variation: v,
-      plan,
-      canvas: clampBorder(state.canvas, plan),
-    };
+    return { ...state, variation: v, plan };
   }
   return reroll(state, { variation: v });
 }
@@ -261,22 +266,55 @@ export function setCanvasSize(
     return state;
   }
   if (sameRatio(canvas.width / canvas.height, state.plan.aspect)) {
-    return { ...state, canvas: clampBorder(canvas, state.plan) };
+    return { ...state, canvas };
   }
   return reroll(state, { canvas });
 }
 
 /**
- * Sets the border in output pixels, clamped to what the current arrangement
- * allows (see CanvasSettings.border). Never re-rolls.
+ * Sets the border, as a fraction of the canvas's shorter side (0 to
+ * MAX_BORDER_FRACTION), exactly as asked: it is clamped only when drawn
+ * (see borderAt). Never re-rolls.
  */
-export function setBorder(state: EditorState, border: number): EditorState {
-  const canvas = clampBorder(
-    checkCanvas({ ...state.canvas, border }),
-    state.plan,
-  );
-  if (canvas.border === state.canvas.border) return state;
+export function setBorder(
+  state: EditorState,
+  borderFraction: number,
+): EditorState {
+  const canvas = checkCanvas({ ...state.canvas, borderFraction });
+  if (canvas.borderFraction === state.canvas.borderFraction) return state;
   return { ...state, canvas };
+}
+
+/** The border in pixels at one output size. */
+export interface BorderAt {
+  /** What the user asked for: the fraction times the shorter side. */
+  readonly requested: number;
+  /** What is drawn: `requested`, clamped to `max` (whole pixels). */
+  readonly effective: number;
+  /**
+   * The largest border at which every tile of the current arrangement keeps
+   * at least one pixel (`maxBorder` with snapping); Infinity when empty.
+   */
+  readonly max: number;
+}
+
+/**
+ * The border at `size` (default: the canvas's own pixel size): requested,
+ * drawn and the current maximum, in pixels at that size. The renderer draws
+ * `effective`; the settings UI (#6) can show all three.
+ */
+export function borderAt(
+  state: EditorState,
+  size: { readonly width: number; readonly height: number } = state.canvas,
+): BorderAt {
+  const width = Math.round(size.width);
+  const height = Math.round(size.height);
+  const requested = state.canvas.borderFraction * Math.min(width, height);
+  const max =
+    state.plan.root === null || width < 1 || height < 1
+      ? Infinity
+      : maxBorder(state.plan, width, height, { snap: true });
+  return { requested, effective: Math.min(Math.round(requested), max), max };
 }
 
 /** Sets the background colour (`#rrggbb`, any case). Never re-rolls. */
@@ -385,14 +423,17 @@ export interface ValidateOptions {
  * in a prototype-less object. Throws a RangeError unless:
  *
  * - the canvas is whole pixels from 1 to MAX_CANVAS_SIDE, the background is
- *   `#rrggbb` (any case; normalised to lower case), and the border is within
- *   what the arrangement allows;
+ *   `#rrggbb` (any case; normalised to lower case), and the border fraction
+ *   is 0 to MAX_BORDER_FRACTION;
  * - the variation is 0..1 and the seed a non-negative safe integer;
  * - every photo has a unique, non-empty string id and an aspect within
  *   1:MAX_PHOTO_ASPECT and MAX_PHOTO_ASPECT:1;
  * - the plan is well-formed, matches the photo count, variation and seed and
- *   (within RATIO_TOLERANCE) the canvas ratio, and gives every tile at least
- *   one pixel at the canvas size;
+ *   (within RATIO_TOLERANCE) the canvas ratio, and keeps every tile within
+ *   the planner's own aspect limit (planAspectLimit), which every plan
+ *   planLayout makes satisfies, so a tampered plan cannot hide tiles by
+ *   squashing them to nothing. The rule depends only on the plan, so any
+ *   state the actions produce validates, however small the canvas;
  * - the assignment places every photo exactly once;
  * - every crop is in range and names a known photo (see ValidateOptions).
  */
@@ -406,7 +447,7 @@ export function validateEditorState(
   const checkedCanvas = checkCanvas({
     width: canvas.width as number,
     height: canvas.height as number,
-    border: canvas.border as number,
+    borderFraction: canvas.borderFraction as number,
     background: canvas.background as string,
   });
   if (typeof variation !== 'number' || !(variation >= 0 && variation <= 1)) {
@@ -448,21 +489,21 @@ export function validateEditorState(
     throw new RangeError('plan does not match the variation and seed');
   }
   if (checkedPlan.root !== null) {
+    // Placed in its own ratio with no border, every tile of a plan from
+    // planLayout is within planAspectLimit (measured to float precision).
+    const limit =
+      planAspectLimit(checkedPlan.aspect, 1, checkedPlan.count) *
+      (1 + PLAN_ASPECT_SLACK);
     const tiles = placeLayout(checkedPlan, {
-      width: checkedCanvas.width,
-      height: checkedCanvas.height,
-      snap: true,
+      width: checkedPlan.aspect,
+      height: 1,
     });
-    if (tiles.some((tile) => tile.width < 1 || tile.height < 1)) {
-      throw new RangeError('plan has tiles smaller than a pixel');
-    }
-    if (
-      checkedCanvas.border >
-      maxBorder(checkedPlan, checkedCanvas.width, checkedCanvas.height, {
-        snap: true,
-      })
-    ) {
-      throw new RangeError('border is too large for the arrangement');
+    for (const tile of tiles) {
+      const long = Math.max(tile.width, tile.height);
+      const short = Math.min(tile.width, tile.height);
+      if (!(short > 0) || long / short > limit) {
+        throw new RangeError('plan has tiles squashed beyond the aspect limit');
+      }
     }
   }
 
@@ -522,19 +563,11 @@ function reroll(
     next.variation,
     next.seed,
   );
-  return {
-    ...next,
-    ...arrangement,
-    canvas: clampBorder(next.canvas, arrangement.plan),
-  };
+  return { ...next, ...arrangement };
 }
 
-/** `canvas` with its border clamped so `plan` keeps every tile >= 1 px. */
-function clampBorder(canvas: CanvasSettings, plan: LayoutPlan): CanvasSettings {
-  if (canvas.border === 0 || plan.root === null) return canvas;
-  const limit = maxBorder(plan, canvas.width, canvas.height, { snap: true });
-  return canvas.border > limit ? { ...canvas, border: limit } : canvas;
-}
+/** Floating-point slack on the plan aspect limit when validating. */
+const PLAN_ASPECT_SLACK = 1e-6;
 
 function planFor(
   canvas: CanvasSettings,
@@ -632,7 +665,7 @@ function cropsFrom(keys: readonly string[], from: CropMap): CropMap {
 }
 
 function checkCanvas(canvas: CanvasSettings): CanvasSettings {
-  const { width, height, border } = canvas;
+  const { width, height, borderFraction } = canvas;
   for (const side of [width, height]) {
     if (!Number.isInteger(side) || side < 1 || side > MAX_CANVAS_SIDE) {
       throw new RangeError(
@@ -641,10 +674,12 @@ function checkCanvas(canvas: CanvasSettings): CanvasSettings {
     }
   }
   if (
-    typeof border !== 'number' ||
-    !(border >= 0 && border <= MAX_CANVAS_SIDE)
+    typeof borderFraction !== 'number' ||
+    !(borderFraction >= 0 && borderFraction <= MAX_BORDER_FRACTION)
   ) {
-    throw new RangeError('border must be a non-negative number');
+    throw new RangeError(
+      `border must be a fraction from 0 to ${String(MAX_BORDER_FRACTION)}`,
+    );
   }
   const background =
     typeof canvas.background === 'string'
@@ -653,7 +688,7 @@ function checkCanvas(canvas: CanvasSettings): CanvasSettings {
   if (!/^#[0-9a-f]{6}$/.test(background)) {
     throw new RangeError('background must be a #rrggbb colour');
   }
-  return { width, height, border, background };
+  return { width, height, borderFraction, background };
 }
 
 function checkSeed(seed: number): number {

@@ -38,7 +38,8 @@ export class DialInput {
 
   /**
    * The gesture ended at `value`: on `change`, `pointerup`,
-   * `pointercancel`, `lostpointercapture`, `blur` or Escape. Commits once.
+   * `pointercancel`, `lostpointercapture` or `blur`. Commits once. (Not on
+   * Escape: the pointer may still be down, so the drag would carry on.)
    */
   end(value: number): void {
     this.frames.cancel('dial');

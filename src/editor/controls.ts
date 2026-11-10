@@ -78,9 +78,9 @@ export function createLayoutControls(
   ]) {
     dial.addEventListener(type, end);
   }
-  dial.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') end();
-  });
+  // Escape is deliberately not an end event: a native range input does not
+  // cancel on Escape, and with the pointer still down the drag would carry
+  // on and commit a second time on release.
 
   const sync = (): void => {
     const state = editor.getState();

@@ -253,7 +253,7 @@ async function checkEditor(p: Page): Promise<void> {
   );
   // Control: with a border, the background does show (and nothing re-rolls).
   const before = await arrangementOf(p);
-  await editorAction(p, 'setBorder', 12);
+  await editorAction(p, 'setBorder', 0.011);
   await waitDrawn(p);
   const withBorder = await countColour(p, [255, 0, 255]);
   check(
@@ -580,6 +580,20 @@ async function checkEditorContracts(p: Page): Promise<void> {
     'three arrow-key presses commit three times',
     keys === 3,
     `${String(keys)} commits`,
+  );
+
+  const escaped = await commitsDuring(async () => {
+    await p.mouse.move(at(0.3), y);
+    await p.mouse.down();
+    await p.mouse.move(at(0.6), y, { steps: 5 });
+    await p.keyboard.press('Escape');
+    await p.mouse.move(at(0.8), y, { steps: 5 });
+    await p.mouse.up();
+  });
+  check(
+    'Escape mid-drag: the drag carries on and commits exactly once',
+    escaped === 1,
+    `${String(escaped)} commits`,
   );
 
   const cancelled = await commitsDuring(async () => {

@@ -16,6 +16,7 @@ import {
   cropOf,
   DEFAULT_CANVAS,
   forgetPhotos,
+  borderAt,
   rearrange,
   setBackground,
   setBorder,
@@ -25,9 +26,11 @@ import {
   setVariation,
   shuffle,
   validateEditorState,
+  MAX_BORDER_FRACTION,
   MAX_CANVAS_SIDE,
   type EditorState,
 } from './state';
+import { tilesFor } from './render';
 
 const ASPECTS = [4 / 3, 3 / 4, 1, 16 / 9, 2 / 3, 3 / 2];
 function makePhotos(count: number, prefix = 'p'): PhotoShape[] {
@@ -48,7 +51,7 @@ describe('createEditorState', () => {
     expect(state.canvas).toEqual({
       width: 1920,
       height: 1080,
-      border: 0,
+      borderFraction: 0,
       background: '#ffffff',
     });
     expect(state.variation).toBe(0.5);
@@ -89,7 +92,7 @@ describe('createEditorState', () => {
     expect(() => createEditorState({ canvas: { background: 'red' } })).toThrow(
       RangeError,
     );
-    expect(() => createEditorState({ canvas: { border: -1 } })).toThrow(
+    expect(() => createEditorState({ canvas: { borderFraction: -1 } })).toThrow(
       RangeError,
     );
   });
@@ -167,8 +170,8 @@ describe('re-roll rules', () => {
   });
 
   it('border and background changes never re-roll', () => {
-    const bordered = setBorder(base, 12);
-    expect(bordered.canvas.border).toBe(12);
+    const bordered = setBorder(base, 0.01);
+    expect(bordered.canvas.borderFraction).toBe(0.01);
     expect(bordered.plan).toBe(base.plan);
     expect(bordered.assignment).toBe(base.assignment);
 
@@ -220,7 +223,7 @@ describe('re-roll rules', () => {
     setVariation(base, 1);
     setPhotos(base, photos.slice(2));
     setCanvasSize(base, 500, 700);
-    setBorder(base, 3);
+    setBorder(base, 0.003);
     setBackground(base, '#123456');
     setCrop(base, 'p1', { zoom: 3 });
     forgetPhotos(base, ['p1']);
@@ -329,7 +332,7 @@ describe('serialisation', () => {
   const photos = makePhotos(15);
   let state = createEditorState({ seed: 77, photos, variation: 0.8 });
   state = setCrop(state, 'p2', { x: 0.1, y: 0.9, zoom: 2.5 });
-  state = setBorder(setBackground(state, '#202020'), 6);
+  state = setBorder(setBackground(state, '#202020'), 0.005);
 
   it('round-trips through JSON', () => {
     const text = JSON.stringify(state);
@@ -386,7 +389,7 @@ describe('serialisation', () => {
 describe('no-op actions return the same state', () => {
   const photos = makePhotos(8);
   let base = createEditorState({ seed: 21, photos, variation: 0.4 });
-  base = setCrop(setBorder(base, 4), 'p1', { zoom: 2 });
+  base = setCrop(setBorder(base, 0.004), 'p1', { zoom: 2 });
 
   it('for every action given its current value', () => {
     expect(shuffle(base, base.seed)).toBe(base);
@@ -397,7 +400,7 @@ describe('no-op actions return the same state', () => {
     expect(setPhotos(base, [...photos].reverse())).toBe(base);
     expect(forgetPhotos(base, ['nope'])).toBe(base);
     expect(setCanvasSize(base, 1920, 1080)).toBe(base);
-    expect(setBorder(base, 4)).toBe(base);
+    expect(setBorder(base, 0.004)).toBe(base);
     expect(setBackground(base, '#FFFFFF')).toBe(base);
     expect(setCrop(base, 'p1', { zoom: 2 })).toBe(base);
     expect(setCrop(base, 'p2', {})).toBe(base);
@@ -472,23 +475,93 @@ describe('canvas ratio tolerance', () => {
   });
 });
 
-describe('border clamping', () => {
-  const base = createEditorState({ seed: 8, photos: makePhotos(30) });
+describe('border: stored as asked, clamped only when drawn', () => {
+  const photos = makePhotos(102);
+  const base = setBorder(
+    createEditorState({ seed: 8, photos, variation: 0.5 }),
+    0.05, // 54 px on 1920 × 1080: more than many arrangements allow
+  );
 
-  it('setBorder clamps to what the arrangement allows', () => {
-    const limit = maxBorder(base.plan, 1920, 1080, { snap: true });
-    expect(setBorder(base, 15000).canvas.border).toBe(limit);
+  it('setBorder takes a fraction of the shorter side, 0 to MAX_BORDER_FRACTION', () => {
+    expect(borderAt(setBorder(base, 0.01)).requested).toBeCloseTo(10.8, 9);
+    expect(setBorder(base, MAX_BORDER_FRACTION).canvas.borderFraction).toBe(
+      MAX_BORDER_FRACTION,
+    );
+    expect(() => setBorder(base, -0.01)).toThrow(RangeError);
+    expect(() => setBorder(base, MAX_BORDER_FRACTION + 0.01)).toThrow(
+      RangeError,
+    );
+    expect(() => setBorder(base, Number.NaN)).toThrow(RangeError);
   });
 
-  it('a re-roll re-clamps the border', () => {
-    const wide = setBorder(base, 15000);
-    const varied = setVariation(wide, 1);
-    const limit = maxBorder(varied.plan, 1920, 1080, { snap: true });
-    expect(varied.canvas.border).toBeLessThanOrEqual(limit);
+  it('the drawn border never exceeds the plan’s maximum', () => {
+    let state = base;
+    for (let seed = 0; seed < 20; seed++) {
+      state = shuffle(state, seed);
+      for (const size of [
+        { width: 1920, height: 1080 },
+        { width: 640, height: 360 },
+        { width: 96, height: 54 },
+      ]) {
+        const b = borderAt(state, size);
+        expect(b.effective).toBeLessThanOrEqual(
+          maxBorder(state.plan, size.width, size.height, { snap: true }),
+        );
+        expect(b.effective).toBeLessThanOrEqual(Math.round(b.requested));
+        expect(() => tilesFor(state, size)).not.toThrow();
+      }
+    }
   });
 
-  it('rejects a negative border', () => {
-    expect(() => setBorder(base, -1)).toThrow(RangeError);
+  it('a drag commits the same border whatever path it took', () => {
+    const click = setVariation(base, 0.6);
+    let dragged = base;
+    for (const v of [0.7, 0.85, 1, 0.9, 0.75, 0.6]) {
+      dragged = setVariation(dragged, v, { keepAssignment: v !== 0.6 });
+    }
+    dragged = rearrange(dragged);
+    expect(JSON.stringify(dragged)).toBe(JSON.stringify(click));
+    expect(dragged.canvas.borderFraction).toBe(0.05);
+  });
+
+  it('repeated shuffles leave the stored border unchanged', () => {
+    let state = base;
+    for (let seed = 1; seed <= 40; seed++) {
+      state = shuffle(state, seed);
+      expect(state.canvas.borderFraction).toBe(0.05);
+    }
+    // And the drawn border is the most the current plan allows.
+    const b = borderAt(state);
+    expect(b.effective).toBe(Math.min(Math.round(b.requested), b.max));
+  });
+
+  it('a DPI round trip leaves the border unchanged, in physical terms', () => {
+    // A4 landscape: 300 dpi, 72 dpi, back to 300 dpi.
+    let a4 = setBorder(
+      createEditorState({
+        seed: 2,
+        photos: makePhotos(12),
+        canvas: { width: 3508, height: 2480 },
+      }),
+      80 / 2480,
+    );
+    const before = borderAt(a4);
+    a4 = setCanvasSize(a4, 842, 595);
+    expect(borderAt(a4).requested).toBeCloseTo(80 * (595 / 2480), 9);
+    a4 = setCanvasSize(a4, 3508, 2480);
+    expect(a4.canvas.borderFraction).toBe(80 / 2480);
+    expect(borderAt(a4)).toEqual(before);
+  });
+
+  it('no action other than setBorder changes it', () => {
+    let state = base;
+    state = setPhotos(state, photos.slice(0, 5));
+    state = setPhotos(state, photos);
+    state = setCanvasSize(state, 1080, 1920);
+    state = setCanvasSize(state, 3, 2);
+    state = setVariation(state, 0);
+    state = forgetPhotos(state, ['p1']);
+    expect(state.canvas.borderFraction).toBe(0.05);
   });
 });
 
@@ -510,7 +583,7 @@ describe('crops are prototype-safe', () => {
 
 describe('validateEditorState on untrusted input', () => {
   let state = createEditorState({ seed: 77, photos: makePhotos(6) });
-  state = setCrop(setBorder(state, 6), 'p2', { x: 0.1, zoom: 2 });
+  state = setCrop(setBorder(state, 0.005), 'p2', { x: 0.1, zoom: 2 });
   const json = (): Record<string, any> =>
     JSON.parse(JSON.stringify(state)) as Record<string, any>;
   const rejects = (mutate: (s: Record<string, any>) => void): void => {
@@ -539,16 +612,27 @@ describe('validateEditorState on untrusted input', () => {
     });
   });
 
-  it('rejects a border beyond what the arrangement allows', () => {
+  it('rejects a border outside 0..MAX_BORDER_FRACTION', () => {
     rejects((s) => {
-      s.canvas.border = 1e9;
+      s.canvas.borderFraction = 1e9;
     });
     rejects((s) => {
-      s.canvas.border = 900;
+      s.canvas.borderFraction = MAX_BORDER_FRACTION * 1.01;
     });
     rejects((s) => {
-      s.canvas.border = -1;
+      s.canvas.borderFraction = -0.01;
     });
+    rejects((s) => {
+      s.canvas.borderFraction = '0.01';
+    });
+  });
+
+  it('accepts any legal border, even above what the arrangement can draw', () => {
+    const value = json();
+    value.canvas.borderFraction = MAX_BORDER_FRACTION;
+    expect(validateEditorState(value).canvas.borderFraction).toBe(
+      MAX_BORDER_FRACTION,
+    );
   });
 
   it('rejects non-integer, negative or huge seeds', () => {
