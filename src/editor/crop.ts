@@ -30,8 +30,8 @@ export interface Crop {
 /** Centred, filling the tile: the crop every photo starts with. */
 export const DEFAULT_CROP: Crop = Object.freeze({ x: 0.5, y: 0.5, zoom: 1 });
 
-/** The largest zoom a crop may have. */
-export const MAX_ZOOM = 10;
+/** The largest zoom a crop may have (5x the "cover" size). */
+export const MAX_ZOOM = 5;
 
 /**
  * Returns `crop` with the focal point clamped to the photo (0..1) and the
@@ -113,6 +113,102 @@ export function coverSource(
   const sx = clamp(x * imageWidth - sw / 2, 0, imageWidth - sw);
   const sy = clamp(y * imageHeight - sh / 2, 0, imageHeight - sh);
   return { sx, sy, sw, sh };
+}
+
+/** The shape of the photo and of the tile it is shown in, in any units. */
+export interface CropGeometry {
+  readonly imageWidth: number;
+  readonly imageHeight: number;
+  readonly tileWidth: number;
+  readonly tileHeight: number;
+}
+
+/**
+ * The part of the photo a tile shows at `zoom`, as fractions of the photo's
+ * width and height (the same rectangle {@link coverSource} computes).
+ */
+export function visibleFractions(
+  geometry: CropGeometry,
+  zoom: number,
+): { readonly fw: number; readonly fh: number } | null {
+  const { imageWidth, imageHeight, tileWidth, tileHeight } = geometry;
+  const rect = coverSource(imageWidth, imageHeight, tileWidth, tileHeight, {
+    x: 0.5,
+    y: 0.5,
+    zoom,
+  });
+  return rect ? { fw: rect.sw / imageWidth, fh: rect.sh / imageHeight } : null;
+}
+
+/**
+ * The crop as {@link coverSource} will use it: the focal point moved to the
+ * nearest one at which the tile is exactly centred on it (so the visible
+ * region's centre, which is what the user sees). Storing crops in this form
+ * means a drag back from an edge responds at once, with no dead zone made of
+ * out-of-range stored values. Zoom is clamped to 1..MAX_ZOOM. Returns the
+ * default for invalid geometry.
+ */
+export function fitCrop(geometry: CropGeometry, crop: Partial<Crop>): Crop {
+  const { x, y, zoom } = normaliseCrop(crop);
+  const visible = visibleFractions(geometry, zoom);
+  if (!visible) return DEFAULT_CROP;
+  return {
+    x: clamp(x, visible.fw / 2, 1 - visible.fw / 2),
+    y: clamp(y, visible.fh / 2, 1 - visible.fh / 2),
+    zoom,
+  };
+}
+
+/**
+ * Pans: the photo moves by (`dx`, `dy`) tile pixels (the direction the
+ * pointer moved), so the point of the photo that was under the pointer stays
+ * under it. The result is fitted, so it never exposes empty space.
+ */
+export function panCrop(
+  geometry: CropGeometry,
+  crop: Crop,
+  dx: number,
+  dy: number,
+): Crop {
+  const from = fitCrop(geometry, crop);
+  const visible = visibleFractions(geometry, from.zoom);
+  if (!visible || !Number.isFinite(dx) || !Number.isFinite(dy)) return from;
+  return fitCrop(geometry, {
+    x: from.x - (dx * visible.fw) / geometry.tileWidth,
+    y: from.y - (dy * visible.fh) / geometry.tileHeight,
+    zoom: from.zoom,
+  });
+}
+
+/**
+ * Zooms to `zoom` (clamped to 1..MAX_ZOOM) about the point (`px`, `py`) of
+ * the tile, given as fractions of the tile (0.5, 0.5 is its centre): the
+ * point of the photo under it stays under it, as far as the edges of the
+ * photo allow.
+ */
+export function zoomCropAt(
+  geometry: CropGeometry,
+  crop: Crop,
+  zoom: number,
+  px: number,
+  py: number,
+): Crop {
+  const from = fitCrop(geometry, crop);
+  const before = visibleFractions(geometry, from.zoom);
+  const target = normaliseCrop({ zoom: Number.isFinite(zoom) ? zoom : 1 }).zoom;
+  const after = visibleFractions(geometry, target);
+  if (!before || !after) return from;
+  const fx = Number.isFinite(px) ? clamp(px, 0, 1) : 0.5;
+  const fy = Number.isFinite(py) ? clamp(py, 0, 1) : 0.5;
+  // The photo point under the pointer, then the focal point that keeps it
+  // there at the new zoom.
+  const ux = from.x - before.fw / 2 + fx * before.fw;
+  const uy = from.y - before.fh / 2 + fy * before.fh;
+  return fitCrop(geometry, {
+    x: ux - fx * after.fw + after.fw / 2,
+    y: uy - fy * after.fh + after.fh / 2,
+    zoom: target,
+  });
 }
 
 function clamp(value: number, min: number, max: number): number {

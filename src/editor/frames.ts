@@ -9,12 +9,15 @@
  * (see GestureInput) has its own kind, so two controls never replace each
  * other's queued step.
  */
-export type FrameTask = 'photos' | 'dial' | 'border' | 'background' | 'render';
+export type FrameTask =
+  'photos' | 'dial' | 'border' | 'background' | 'crop' | 'zoom' | 'render';
 const ORDER: readonly FrameTask[] = [
   'photos',
   'dial',
   'border',
   'background',
+  'crop',
+  'zoom',
   'render',
 ];
 

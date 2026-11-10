@@ -29,6 +29,8 @@ import {
 } from './selection';
 import { swapTiles, type EditorState } from './state';
 import type { EditorStore } from './store';
+import type { FrameScheduler } from './frames';
+import { createTileCrop } from './tile-crop';
 import type { CollageView } from './view';
 
 export interface TileSelectionOptions {
@@ -36,6 +38,8 @@ export interface TileSelectionOptions {
   readonly view: CollageView;
   readonly editor: EditorStore;
   readonly photos: Pick<PhotoStore, 'getPhoto' | 'setIncluded'>;
+  /** Coalesces the crop gestures' redraws into frames. */
+  readonly frames: Pick<FrameScheduler, 'request' | 'cancel'>;
   /**
    * Where keyboard focus goes if the collage becomes empty while the canvas
    * has it (the canvas is hidden then, and focus would fall to the page).
@@ -113,7 +117,25 @@ export function createTileSelection(
   const pending = doc.createElement('div');
   pending.className = 'tile-menu-pending';
   pending.append(hint, cancelButton);
-  menu.append(actions, pending);
+  const crop = createTileCrop({
+    doc,
+    view,
+    editor,
+    photos,
+    frames: options.frames,
+    selected: () => {
+      if (selection.kind === 'idle') return null;
+      const tile = tileOf(selection.photoId);
+      return tile
+        ? {
+            photoId: selection.photoId,
+            tile,
+            swapping: selection.kind === 'swapping',
+          }
+        : null;
+    },
+  });
+  menu.append(actions, crop.controls, pending);
 
   const live = doc.createElement('span');
   live.className = 'sr-only';
@@ -262,6 +284,7 @@ export function createTileSelection(
 
     menu.hidden = tile === null;
     actions.hidden = selection.kind !== 'selected';
+    crop.controls.hidden = selection.kind !== 'selected';
     pending.hidden = selection.kind !== 'swapping';
     if (tile && picked !== null) {
       const name = photos.getPhoto(picked)?.file.name ?? 'photo';
@@ -286,9 +309,13 @@ export function createTileSelection(
     selection = next;
     if (next.kind !== 'idle') focusedId = next.photoId;
     arrangement = editor.getState();
+    crop.flush();
     refresh();
+    crop.refresh();
     if (next.kind === 'selected') {
-      announce(`${describe(next.photoId)}. Tab for Swap and Remove.`);
+      announce(
+        `${describe(next.photoId)}. Tab for Swap, Remove, Zoom and Reset. Shift and the arrow keys pan, plus and minus zoom.`,
+      );
     } else if (next.kind === 'swapping') {
       announce(
         `Swap ${describe(next.photoId)}. Move to another tile and press Enter, or Escape to cancel.`,
@@ -322,6 +349,8 @@ export function createTileSelection(
   // --- Pointer ---
   canvas.addEventListener('click', (event) => {
     keyboardMode = false;
+    // The click that ends a pan is not a click on the tile.
+    if (crop.consumeClick()) return;
     const hit = view.tileAtClientPoint(event.clientX, event.clientY);
     // A click in a gap or the border changes nothing.
     if (hit) {
@@ -371,8 +400,9 @@ export function createTileSelection(
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const last = view.lastRender();
     if (!last || last.tiles.length === 0) return;
+    if (crop.handleKey(event)) return;
     const direction = ARROWS[event.key];
-    if (direction) {
+    if (direction && !event.shiftKey) {
       event.preventDefault();
       keyboardMode = true;
       const from = focusedId === null ? null : tileOf(focusedId);

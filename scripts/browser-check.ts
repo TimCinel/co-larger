@@ -1,7 +1,7 @@
 /**
  * Local real-browser check for photo import (issue #4), the editor canvas
  * (issue #5), the canvas settings and page layout (issue #6) and physical
- * canvas sizes (issue #7), and tile selection, Swap and Remove (issue #8).
+ * canvas sizes (issue #7), tile selection, Swap and Remove (issue #8), and tile crop (issue #9).
  * Not run in
  * CI: it needs
  * a locally installed Chrome. Decoding, EXIF handling and drag and drop cannot
@@ -11,6 +11,7 @@
  *   node scripts/browser-check.ts --screenshot    # also rewrite docs/screenshots/issue-6-*.png
  *   node scripts/browser-check.ts --physical-screenshot  # and docs/screenshots/issue-7-*.png
  *   node scripts/browser-check.ts --selection-screenshot  # and docs/screenshots/issue-8-*.png
+ *   node scripts/browser-check.ts --crop-screenshot  # and docs/screenshots/issue-9-*.png
  *   node scripts/browser-check.ts --tray-screenshot  # and docs/screenshots/photo-tray.png
  *   node scripts/browser-check.ts --dir <folder>  # also import a folder of real
  *                                                  # photos and report timing
@@ -2954,6 +2955,824 @@ async function checkSelection(
   await ctx.close();
 }
 
+// --- Tile crop: zoom and pan (issue #9) ----------------------------------------
+
+const CROP_MODULE = '/src/editor/crop.ts';
+
+interface SyntheticPhoto {
+  name: string;
+  mimeType: string;
+  buffer: Buffer;
+}
+
+/**
+ * Generated JPEGs, made in the page: gradients in blue-green hues, and a red
+ * disc at (0.78, 0.35) of the photo named `marker.jpg`. No photo contains
+ * magenta, so magenta in a tile can only be the canvas background.
+ */
+async function makeSyntheticPhotos(
+  p: Page,
+  count: number,
+  size = 1,
+): Promise<SyntheticPhoto[]> {
+  const encoded = await p.evaluate(
+    async ({ count, size }) => {
+      const out: { name: string; data: string }[] = [];
+      for (let i = 0; i < count; i++) {
+        const marker = i === 0;
+        const [w, h] = marker
+          ? [1200, 800]
+          : ([
+              [900, 600],
+              [600, 900],
+              [800, 800],
+              [1200, 500],
+              [500, 1000],
+            ][i % 5] as number[]);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(w! * size);
+        canvas.height = Math.round(h! * size);
+        const ctx = canvas.getContext('2d')!;
+        ctx.scale(size, size);
+        const g = ctx.createLinearGradient(0, 0, w!, h!);
+        g.addColorStop(0, `hsl(${String(120 + ((i * 29) % 140))} 60% 55%)`);
+        g.addColorStop(1, `hsl(${String(150 + ((i * 29) % 110))} 60% 25%)`);
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, w!, h!);
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.font = 'bold 72px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(String(i), w! / 2, h! / 2 + 24);
+        if (marker) {
+          ctx.fillStyle = '#ff0000';
+          ctx.beginPath();
+          ctx.arc(w! * 0.78, h! * 0.35, 70, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        const blob = await new Promise<Blob>((res) => {
+          canvas.toBlob((b) => {
+            res(b!);
+          }, 'image/jpeg');
+        });
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let bin = '';
+        for (const b of bytes) bin += String.fromCharCode(b);
+        out.push({
+          name: marker ? 'marker.jpg' : `plain-${String(i)}.jpg`,
+          data: btoa(bin),
+        });
+      }
+      return out;
+    },
+    { count, size },
+  );
+  return encoded.map((e) => ({
+    name: e.name,
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from(e.data, 'base64'),
+  }));
+}
+
+async function checkCrop(
+  browser: import('playwright-core').Browser,
+): Promise<void> {
+  const ctx = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+  });
+  const p = await ctx.newPage();
+  await p.goto(origin);
+  await p.waitForSelector('.tray');
+  await p.setInputFiles('input[type=file]', await makeSyntheticPhotos(p, 6));
+  await p.waitForFunction(
+    () => (window as any).__app.editor.getState().photos.length === 6,
+  );
+  await waitDrawn(p);
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__log = [];
+    w.__app.editor.subscribe((s: any, c: { transient: boolean }) => {
+      if (c.transient) return;
+      const id = w.__app.store
+        .getPhotos()
+        .find((x: any) => x.file.name === 'marker.jpg').id;
+      w.__log.push({ seed: s.seed, crop: s.crops[id] ?? null });
+    });
+  });
+  const log = (): Promise<{ seed: number; crop: any }[]> =>
+    p.evaluate(() => (window as any).__log);
+  const resetLog = (): Promise<void> =>
+    p.evaluate(() => {
+      (window as any).__log.length = 0;
+    });
+  const commits = async (): Promise<number> => (await log()).length;
+  const markerId = await p.evaluate(
+    () =>
+      (window as any).__app.store
+        .getPhotos()
+        .find((x: any) => x.file.name === 'marker.jpg').id as string,
+  );
+  const cropOfMarker = (): Promise<{
+    x: number;
+    y: number;
+    zoom: number;
+  } | null> =>
+    p.evaluate(
+      (id) => (window as any).__app.editor.getState().crops[id] ?? null,
+      markerId,
+    );
+  const kind = (): Promise<string> =>
+    p.evaluate(() => (window as any).__app.selection.getSelection().kind);
+  /** The marker's tile (canvas pixels) and canvas rect (client pixels). */
+  const markerTile = (): Promise<{
+    slot: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    cx: number;
+    cy: number;
+    left: number;
+    top: number;
+    scale: number;
+  }> =>
+    p.evaluate((id) => {
+      const app = (window as any).__app;
+      const { tiles, state } = app.view.lastRender();
+      const slot = state.assignment.indexOf(id);
+      const t = tiles.find((t: any) => t.slot === slot);
+      const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+      const r = c.getBoundingClientRect();
+      const scale = r.width / c.width;
+      return {
+        slot,
+        x: t.x,
+        y: t.y,
+        width: t.width,
+        height: t.height,
+        cx: r.left + (t.x + t.width / 2) * scale,
+        cy: r.top + (t.y + t.height / 2) * scale,
+        left: r.left,
+        top: r.top,
+        scale,
+      };
+    }, markerId);
+  /** The photo point (fractions) under a client point, via coverSource. */
+  const photoPointAt = (
+    cx: number,
+    cy: number,
+  ): Promise<{ x: number; y: number }> =>
+    p.evaluate(
+      async ({ id, cx, cy, module }) => {
+        const { coverSource } = await import(/* @vite-ignore */ module);
+        const app = (window as any).__app;
+        const { tiles, state } = app.view.lastRender();
+        const slot = state.assignment.indexOf(id);
+        const t = tiles.find((t: any) => t.slot === slot);
+        const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+        const r = c.getBoundingClientRect();
+        const photo = app.store.getPhoto(id);
+        const crop = state.crops[id];
+        const src = coverSource(
+          photo.width,
+          photo.height,
+          t.width,
+          t.height,
+          crop,
+        );
+        const fx = ((cx - r.left) * (c.width / r.width) - t.x) / t.width;
+        const fy = ((cy - r.top) * (c.height / r.height) - t.y) / t.height;
+        return {
+          x: (src.sx + fx * src.sw) / photo.width,
+          y: (src.sy + fy * src.sh) / photo.height,
+        };
+      },
+      { id: markerId, cx, cy, module: CROP_MODULE },
+    );
+  /** Counts pixels in the marker's tile matching a colour test. */
+  const tilePixels = (
+    test: 'red' | 'magenta',
+  ): Promise<{ count: number; mx: number; my: number; w: number; h: number }> =>
+    p.evaluate(
+      ({ id, test }) => {
+        const app = (window as any).__app;
+        const { tiles, state } = app.view.lastRender();
+        const slot = state.assignment.indexOf(id);
+        const t = tiles.find((t: any) => t.slot === slot);
+        const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+        const x0 = Math.ceil(t.x);
+        const y0 = Math.ceil(t.y);
+        const w = Math.floor(t.x + t.width) - x0;
+        const h = Math.floor(t.y + t.height) - y0;
+        const d = c.getContext('2d')!.getImageData(x0, y0, w, h).data;
+        let count = 0;
+        let sx = 0;
+        let sy = 0;
+        for (let i = 0; i < d.length; i += 4) {
+          const [r, g, b] = [d[i]!, d[i + 1]!, d[i + 2]!];
+          const hit =
+            test === 'red'
+              ? r > 200 && g < 90 && b < 90
+              : r > 200 && g < 60 && b > 200;
+          if (hit) {
+            count++;
+            sx += (i / 4) % w;
+            sy += Math.floor(i / 4 / w);
+          }
+        }
+        return {
+          count,
+          mx: count ? sx / count / w : 0,
+          my: count ? sy / count / h : 0,
+          w,
+          h,
+        };
+      },
+      { id: markerId, test },
+    );
+  const canvasHash = (): Promise<string> =>
+    p.evaluate(() => {
+      const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+      const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+      let h = 0;
+      for (let i = 0; i < d.length; i += 7) h = (h * 31 + d[i]!) | 0;
+      return String(h);
+    });
+  const select = async (): Promise<void> => {
+    if ((await kind()) === 'selected') return;
+    const t = await markerTile();
+    await p.mouse.click(t.cx, t.cy);
+  };
+  const menu = p.locator('.tile-menu');
+  const slider = menu.getByRole('slider');
+  const resetBtn = menu.getByRole('button', { name: 'Reset' });
+  const sleep = (ms: number): Promise<void> => p.waitForTimeout(ms);
+
+  await select();
+  check(
+    'the marker photo is selected and the menu has Zoom and Reset',
+    (await kind()) === 'selected' &&
+      (await slider.isVisible()) &&
+      (await resetBtn.isVisible()),
+  );
+
+  // A click without movement is not a crop gesture.
+  await resetLog();
+  let t = await markerTile();
+  await p.mouse.move(t.cx, t.cy);
+  await p.mouse.down();
+  await p.mouse.move(t.cx + 2, t.cy + 1);
+  await p.mouse.up();
+  await sleep(100);
+  check(
+    'a click on the selected tile (even with 2 px of jitter) deselects it with 0 commits',
+    (await kind()) === 'idle' && (await commits()) === 0,
+    `${await kind()} ${String(await commits())}`,
+  );
+
+  // A drag on an unselected tile does not pan it.
+  const hashBefore = await canvasHash();
+  await p.mouse.move(t.cx, t.cy);
+  await p.mouse.down();
+  await p.mouse.move(t.cx + 40, t.cy + 30, { steps: 5 });
+  await p.mouse.up();
+  await sleep(100);
+  check(
+    'dragging an unselected tile does not pan it: 0 commits, crop unchanged',
+    (await commits()) === 0 &&
+      (await cropOfMarker()) === null &&
+      (await canvasHash()) === hashBefore,
+  );
+  await select();
+
+  // Wheel: zoom about the pointer, one commit per burst.
+  t = await markerTile();
+  const px = Math.round(t.cx + t.width * t.scale * 0.25);
+  const py = Math.round(t.cy - t.height * t.scale * 0.2);
+  const grabbed0 = await photoPointAt(px, py);
+  await resetLog();
+  await p.mouse.move(px, py);
+  for (let i = 0; i < 6; i++) {
+    await p.mouse.wheel(0, -80);
+    await sleep(20);
+  }
+  await sleep(500);
+  const zoomed = await cropOfMarker();
+  const grabbed1 = await photoPointAt(px, py);
+  check(
+    'a wheel burst over the selected tile zooms it, as exactly one commit',
+    zoomed !== null && zoomed.zoom > 1.5 && (await commits()) === 1,
+    JSON.stringify({ zoomed, commits: await commits() }),
+  );
+  check(
+    'the wheel zooms about the pointer: the photo point under it stays put',
+    Math.abs(grabbed1.x - grabbed0.x) < 1e-3 &&
+      Math.abs(grabbed1.y - grabbed0.y) < 1e-3,
+    JSON.stringify({ grabbed0, grabbed1 }),
+  );
+  check(
+    'the tile stays selected after wheel zoom',
+    (await kind()) === 'selected',
+  );
+  await resetLog();
+  await p.mouse.wheel(0, -60);
+  await sleep(500);
+  await p.mouse.wheel(0, -60);
+  await sleep(500);
+  check(
+    'two wheel bursts a moment apart are two commits',
+    (await commits()) === 2,
+    String(await commits()),
+  );
+
+  // Pan: drag inside the selected tile.
+  await resetLog();
+  t = await markerTile();
+  const startX = t.cx;
+  const startY = t.cy;
+  const pointBefore = await photoPointAt(startX, startY);
+  const pixelsBefore = await canvasHash();
+  await p.mouse.move(startX, startY);
+  await p.mouse.down();
+  await p.mouse.move(startX + 12, startY + 8, { steps: 4 });
+  await p.mouse.move(startX + 25, startY + 14, { steps: 6 });
+  await p.mouse.up();
+  await sleep(300);
+  const pointAfter = await photoPointAt(startX + 25, startY + 14);
+  check(
+    'dragging the selected tile pans it: pixels move, one commit',
+    (await canvasHash()) !== pixelsBefore && (await commits()) === 1,
+    String(await commits()),
+  );
+  check(
+    'the point grabbed stays under the pointer',
+    Math.abs(pointAfter.x - pointBefore.x) < 1e-3 &&
+      Math.abs(pointAfter.y - pointBefore.y) < 1e-3,
+    JSON.stringify({ pointBefore, pointAfter }),
+  );
+  check(
+    'the click that ends a drag does not deselect',
+    (await kind()) === 'selected',
+  );
+
+  // Wheel scrolls nothing over the selected tile, and behaves normally elsewhere.
+  const prevented = await p.evaluate(
+    ({ over, away }) => {
+      const fire = (x: number, y: number): boolean => {
+        const target = document.elementFromPoint(x, y)!;
+        const e = new WheelEvent('wheel', {
+          deltaY: 1,
+          clientX: x,
+          clientY: y,
+          bubbles: true,
+          cancelable: true,
+        });
+        target.dispatchEvent(e);
+        return e.defaultPrevented;
+      };
+      return { over: fire(over.x, over.y), away: fire(away.x, away.y) };
+    },
+    { over: { x: startX, y: startY }, away: { x: 5, y: 5 } },
+  );
+  await sleep(400); // the synthetic wheel above started a burst: let it end
+  check(
+    'a wheel over the selected tile is cancelled; elsewhere it is not',
+    prevented.over && !prevented.away,
+    JSON.stringify(prevented),
+  );
+  const otherTile = await p.evaluate((id) => {
+    const app = (window as any).__app;
+    const { tiles, state } = app.view.lastRender();
+    const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    const r = c.getBoundingClientRect();
+    const t = tiles.find((t: any) => state.assignment[t.slot] !== id);
+    return {
+      x: r.left + ((t.x + t.width / 2) * r.width) / c.width,
+      y: r.top + ((t.y + t.height / 2) * r.height) / c.height,
+    };
+  }, markerId);
+  const otherPrevented = await p.evaluate(({ x, y }) => {
+    const e = new WheelEvent('wheel', {
+      deltaY: 1,
+      clientX: x,
+      clientY: y,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.elementFromPoint(x, y)!.dispatchEvent(e);
+    return e.defaultPrevented;
+  }, otherTile);
+  check(
+    'a wheel over another (unselected) tile is not cancelled',
+    !otherPrevented,
+  );
+
+  // Reset.
+  await resetLog();
+  await resetBtn.click();
+  await sleep(100);
+  check(
+    'Reset restores the default crop as one commit',
+    (await cropOfMarker()) === null && (await commits()) === 1,
+  );
+  await resetBtn.click();
+  await sleep(100);
+  check('Reset when already default is 0 commits', (await commits()) === 1);
+
+  // Zoom slider.
+  await resetLog();
+  const box = (await slider.boundingBox())!;
+  await p.mouse.move(box.x + 4, box.y + box.height / 2);
+  await p.mouse.down();
+  await p.mouse.move(box.x + box.width * 0.5, box.y + box.height / 2, {
+    steps: 6,
+  });
+  await p.mouse.move(box.x + box.width * 0.75, box.y + box.height / 2, {
+    steps: 6,
+  });
+  await p.mouse.up();
+  await sleep(200);
+  const sliderCrop = await cropOfMarker();
+  check(
+    'dragging the zoom slider zooms the tile as exactly one commit',
+    sliderCrop !== null && sliderCrop.zoom > 2 && (await commits()) === 1,
+    JSON.stringify({ sliderCrop, commits: await commits() }),
+  );
+  check(
+    'the slider shows the stored zoom',
+    Math.abs(Number(await slider.inputValue()) - sliderCrop!.zoom) < 0.02,
+  );
+  check(
+    'the tile stays selected after the slider drag',
+    (await kind()) === 'selected',
+  );
+
+  // Keyboard: Tab order and Shift+arrows.
+  await resetBtn.click();
+  await p.locator('.collage-canvas').focus();
+  await resetLog();
+  await p.keyboard.press('Equal');
+  await p.keyboard.press('Equal');
+  await p.keyboard.press('Shift+ArrowRight');
+  await p.keyboard.press('Shift+ArrowRight');
+  await sleep(500);
+  const keyed = await cropOfMarker();
+  check(
+    'Shift+arrows and + on the focused canvas pan and zoom the selected tile (one commit per burst)',
+    keyed !== null &&
+      keyed.zoom > 1.2 &&
+      keyed.x > 0.5 &&
+      (await commits()) === 1,
+    JSON.stringify({ keyed, commits: await commits() }),
+  );
+  await p.locator('.collage-canvas').focus();
+  const order: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    await p.keyboard.press('Tab');
+    order.push(
+      await p.evaluate(() => {
+        const a = document.activeElement as HTMLElement;
+        return a.tagName === 'INPUT' ? 'slider' : a.textContent.trim();
+      }),
+    );
+  }
+  check(
+    'Tab from the canvas reaches Swap, Remove, the zoom slider and Reset',
+    order.join() === 'Swap,Remove,slider,Reset',
+    order.join(),
+  );
+  // The slider by keyboard: one commit per key press.
+  await slider.focus();
+  await resetLog();
+  await p.keyboard.press('ArrowRight');
+  await sleep(100);
+  check(
+    'the zoom slider changes by keyboard, one commit per key press',
+    (await commits()) === 1,
+    String(await commits()),
+  );
+  await resetBtn.click();
+
+  // No empty space, ever: a magenta background, dragged and zoomed hard.
+  await editorAction(p, 'setBackground', '#ff00ff');
+  await editorAction(p, 'setBorder', 0.01);
+  await waitDrawn(p);
+  await select();
+  let exposed = 0;
+  let sawPhoto = true;
+  const scan = async (): Promise<void> => {
+    await sleep(60);
+    const m = await tilePixels('magenta');
+    exposed += m.count;
+    sawPhoto = sawPhoto && m.w > 0;
+  };
+  t = await markerTile();
+  await p.mouse.move(t.cx, t.cy);
+  for (let i = 0; i < 12; i++) {
+    await p.mouse.wheel(0, -200);
+    await sleep(15);
+  }
+  await scan();
+  for (const [dx, dy] of [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+    [1, 1],
+    [-1, -1],
+    [1, -1],
+    [-1, 1],
+  ] as const) {
+    t = await markerTile();
+    await p.mouse.move(t.cx, t.cy);
+    await p.mouse.down();
+    await p.mouse.move(t.cx + dx * 3000, t.cy + dy * 3000, { steps: 8 });
+    await scan();
+    await p.mouse.up();
+    await sleep(40);
+    await select();
+    await scan();
+  }
+  // Zoom out and in at the corners of the tile, then drag at the corner.
+  for (const [fx, fy] of [
+    [0.02, 0.02],
+    [0.98, 0.02],
+    [0.02, 0.98],
+    [0.98, 0.98],
+  ] as const) {
+    t = await markerTile();
+    const x = t.cx + (fx - 0.5) * t.width * t.scale;
+    const y = t.cy + (fy - 0.5) * t.height * t.scale;
+    await p.mouse.move(x, y);
+    await p.mouse.wheel(0, 3000);
+    await sleep(40);
+    await scan();
+    await p.mouse.wheel(0, -3000);
+    await sleep(40);
+    await scan();
+    await p.mouse.wheel(0, 3000);
+    await sleep(40);
+    await scan();
+  }
+  const finalZoom = await cropOfMarker();
+  check(
+    'magenta background: dragging and zooming hard never exposes it inside the tile',
+    exposed === 0 && sawPhoto,
+    `${String(exposed)} magenta pixels; zoom ${JSON.stringify(finalZoom)}`,
+  );
+  check(
+    'zoom never goes below cover or above the limit (5x)',
+    finalZoom === null || (finalZoom.zoom >= 1 && finalZoom.zoom <= 5),
+  );
+  await editorAction(p, 'setBackground', '#ffffff');
+  await editorAction(p, 'setBorder', 0);
+  await waitDrawn(p);
+  await p.mouse.click(5, 790);
+  await resetLog();
+  await select();
+  await resetBtn.click();
+
+  // Crops survive Shuffle: centred on the same subject in its new tile.
+  await editorAction(p, 'setCrop', markerId, { x: 0.78, y: 0.35, zoom: 3 });
+  await waitDrawn(p);
+  await resetLog();
+  const shapes = new Set<string>();
+  let shuffleOk = true;
+  let detail = '';
+  for (let i = 0; i < 8; i++) {
+    await p.getByRole('button', { name: 'Shuffle' }).click();
+    await waitDrawn(p);
+    const tile = await markerTile();
+    shapes.add((tile.width / tile.height).toFixed(2));
+    const red = await tilePixels('red');
+    // The marker is the focal point: visible, and near the middle unless the
+    // photo's edge pushed the view (it is 22% from the right edge at zoom 3).
+    const ok =
+      red.count > 50 &&
+      red.mx > 0.15 &&
+      red.mx < 0.85 &&
+      red.my > 0.15 &&
+      red.my < 0.85;
+    if (!ok) shuffleOk = false;
+    detail += ` ${tile.width}x${tile.height}:${String(red.count)}@${red.mx.toFixed(2)},${red.my.toFixed(2)}`;
+  }
+  const cropAfterShuffle = await cropOfMarker();
+  check(
+    'after Shuffle a cropped photo is still centred on the same subject (8 shuffles, marker visible in its new tile)',
+    shuffleOk && shapes.size >= 3 && cropAfterShuffle?.zoom === 3,
+    `${String(shapes.size)} tile shapes;${detail}`,
+  );
+
+  // Swap into a differently shaped tile.
+  await p.getByRole('button', { name: 'Shuffle' }).click();
+  await waitDrawn(p);
+  const target = await p.evaluate((id) => {
+    const app = (window as any).__app;
+    const { tiles, state } = app.view.lastRender();
+    const mine = tiles.find((t: any) => state.assignment[t.slot] === id);
+    const ratio = mine.width / mine.height;
+    let best: any = null;
+    let bestDiff = 0;
+    for (const t of tiles) {
+      if (t === mine) continue;
+      const diff = Math.abs(Math.log(t.width / t.height / ratio));
+      if (diff > bestDiff) {
+        bestDiff = diff;
+        best = t;
+      }
+    }
+    const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    const r = c.getBoundingClientRect();
+    return {
+      x: r.left + ((best.x + best.width / 2) * r.width) / c.width,
+      y: r.top + ((best.y + best.height / 2) * r.height) / c.height,
+      diff: bestDiff,
+    };
+  }, markerId);
+  await select();
+  await resetLog();
+  const shapeBefore = await markerTile();
+  await menu.getByRole('button', { name: 'Swap' }).click();
+  // A drag on the pending tile does nothing, and swap still works after it.
+  t = await markerTile();
+  const hashPending = await canvasHash();
+  await p.mouse.move(t.cx, t.cy);
+  await p.mouse.down();
+  await p.mouse.move(t.cx + 30, t.cy + 20, { steps: 5 });
+  await p.mouse.up();
+  await sleep(100);
+  const afterPendingDrag = await kind();
+  check(
+    'a drag on the tile while a swap is pending is ignored (0 commits, crop unchanged)',
+    (await commits()) === 0 &&
+      (await canvasHash()) === hashPending &&
+      afterPendingDrag !== 'selected',
+    `${afterPendingDrag} ${String(await commits())}`,
+  );
+  if (afterPendingDrag === 'idle') {
+    // A click ending the drag cancels the pending swap, as a click on the
+    // same tile always did: start the swap again.
+    await select();
+    await menu.getByRole('button', { name: 'Swap' }).click();
+  }
+  await p.mouse.click(target.x, target.y);
+  await waitDrawn(p);
+  const shapeAfter = await markerTile();
+  const redAfterSwap = await tilePixels('red');
+  check(
+    'swap still works: one commit, and the photo moved to a differently shaped tile',
+    (await commits()) === 1 &&
+      shapeAfter.slot !== shapeBefore.slot &&
+      Math.abs(
+        Math.log(
+          shapeAfter.width /
+            shapeAfter.height /
+            (shapeBefore.width / shapeBefore.height),
+        ),
+      ) > 0.05,
+    `${String(await commits())} commits, shape diff ${String(target.diff)}`,
+  );
+  check(
+    'after a swap into a differently shaped tile the photo is still centred on the same subject',
+    redAfterSwap.count > 50 &&
+      redAfterSwap.mx > 0.15 &&
+      redAfterSwap.mx < 0.85 &&
+      redAfterSwap.my > 0.15 &&
+      redAfterSwap.my < 0.85 &&
+      (await cropOfMarker())?.zoom === 3,
+    `${String(redAfterSwap.count)} red px @ ${redAfterSwap.mx.toFixed(2)},${redAfterSwap.my.toFixed(2)}`,
+  );
+
+  // A pending wheel burst commits before another action does.
+  await select();
+  await resetLog();
+  t = await markerTile();
+  await p.mouse.move(t.cx, t.cy);
+  await p.mouse.wheel(0, -100);
+  await sleep(40);
+  await p.getByRole('button', { name: 'Shuffle' }).click();
+  await sleep(300);
+  const order2 = await log();
+  check(
+    'a wheel burst still pending is committed before the next action (Shuffle): two commits, crop first',
+    order2.length === 2 &&
+      order2[0]!.seed !== order2[1]!.seed &&
+      order2[0]!.crop.zoom > 3,
+    JSON.stringify(order2),
+  );
+  if (process.argv.includes('--crop-screenshot')) {
+    mkdirSync(join(root, 'docs', 'screenshots'), { recursive: true });
+    await p.mouse.click(5, 790);
+    await editorAction(p, 'setCrop', markerId, { x: 0.5, y: 0.5, zoom: 1 });
+    // Shuffle until the marker is visible at cover in a good-sized tile.
+    for (let i = 0; i < 30; i++) {
+      await p.getByRole('button', { name: 'Shuffle' }).click();
+      await waitDrawn(p);
+      const tile = await markerTile();
+      const red = await tilePixels('red');
+      if (red.count > 500 && tile.width > 300) break;
+    }
+    await select();
+    await p.screenshot({
+      path: join(root, 'docs', 'screenshots', 'issue-9-before.png'),
+    });
+    t = await markerTile();
+    const red = await tilePixels('red');
+    const zx = t.cx + (red.mx - 0.5) * t.width * t.scale;
+    const zy = t.cy + (red.my - 0.5) * t.height * t.scale;
+    await p.mouse.move(zx, zy);
+    for (let i = 0; i < 5; i++) {
+      await p.mouse.wheel(0, -120);
+      await sleep(20);
+    }
+    await sleep(400);
+    await p.mouse.down();
+    await p.mouse.move(zx - 40, zy + 25, { steps: 6 });
+    await p.mouse.up();
+    await sleep(300);
+    await p.mouse.move(5, 790);
+    await p.screenshot({
+      path: join(root, 'docs', 'screenshots', 'issue-9-after.png'),
+    });
+  }
+  await ctx.close();
+}
+
+/** Panning and zooming a big tile with 100 photos in the collage. */
+async function checkCropPerformance(
+  browser: import('playwright-core').Browser,
+): Promise<void> {
+  const ctx = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+  });
+  const p = await ctx.newPage();
+  await p.goto(origin);
+  await p.waitForSelector('.tray');
+  await p.setInputFiles(
+    'input[type=file]',
+    await makeSyntheticPhotos(p, 100, 1.5),
+  );
+  await p.waitForFunction(
+    () => (window as any).__app.editor.getState().photos.length === 100,
+    undefined,
+    { timeout: 60000 },
+  );
+  await waitDrawn(p, 60000);
+  await setDial(p, 1);
+  await waitDrawn(p, 60000);
+  const tile = await p.evaluate(() => {
+    const app = (window as any).__app;
+    const { tiles } = app.view.lastRender();
+    const t = [...tiles].sort(
+      (a: any, b: any) => b.width * b.height - a.width * a.height,
+    )[0];
+    const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    const r = c.getBoundingClientRect();
+    return {
+      x: r.left + ((t.x + t.width / 2) * r.width) / c.width,
+      y: r.top + ((t.y + t.height / 2) * r.height) / c.height,
+    };
+  });
+  await p.mouse.click(tile.x, tile.y);
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__frames = [];
+    let last = performance.now();
+    const loop = (now: number): void => {
+      w.__frames.push(now - last);
+      last = now;
+      if (!w.__stop) requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  });
+  await p.mouse.wheel(0, -600);
+  await p.waitForTimeout(100);
+  await p.mouse.move(tile.x, tile.y);
+  await p.mouse.down();
+  for (let i = 0; i < 90; i++) {
+    await p.mouse.move(
+      tile.x + Math.sin(i / 8) * 80,
+      tile.y + Math.cos(i / 8) * 60,
+    );
+  }
+  await p.mouse.up();
+  const frames = await p.evaluate(() => {
+    (window as any).__stop = true;
+    return [...((window as any).__frames as number[])].slice(2);
+  });
+  frames.sort((a, b) => a - b);
+  const median = frames[Math.floor(frames.length / 2)]!;
+  const p95 = frames[Math.floor(frames.length * 0.95)]!;
+  console.log(
+    `INFO  100 photos, pan and zoom of the largest tile: ${String(frames.length)} frames, median ${median.toFixed(1)} ms, p95 ${p95.toFixed(1)} ms`,
+  );
+  check(
+    'panning and zooming a large tile with 100 photos stays smooth (median frame under 25 ms)',
+    median < 25,
+    `median ${median.toFixed(1)} ms`,
+  );
+  await ctx.close();
+}
+
 /** The collage canvas's pixels. */
 function canvasPixels(p: Page): Promise<number[]> {
   return p.evaluate(() => {
@@ -3339,6 +4158,8 @@ await checkCanvasSettings(page);
 await checkPhysicalSizes(page);
 await checkPixelRatio(browser);
 await checkSelection(browser);
+await checkCrop(browser);
+await checkCropPerformance(browser);
 
 // 7a. Screenshots for issue #6 (synthetic images only), only when asked for:
 // a preset other than 16:9, a border, a background colour and the compact

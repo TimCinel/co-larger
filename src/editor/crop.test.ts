@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { coverSource, normaliseCrop, type SourceRect } from './crop';
+import {
+  coverSource,
+  DEFAULT_CROP,
+  fitCrop,
+  isDefaultCrop,
+  MAX_ZOOM,
+  normaliseCrop,
+  panCrop,
+  visibleFractions,
+  zoomCropAt,
+  type Crop,
+  type CropGeometry,
+  type SourceRect,
+} from './crop';
 
 function expectInside(rect: SourceRect, width: number, height: number): void {
   const eps = 1e-9;
@@ -90,7 +103,7 @@ describe('coverSource', () => {
     for (const [w, h] of sizes) {
       for (const [tw, th] of tiles) {
         for (const x of [0, 0.13, 0.5, 0.97, 1]) {
-          for (const zoom of [1, 1.7, 10]) {
+          for (const zoom of [1, 1.7, 5]) {
             const rect = coverSource(w, h, tw, th, { x, y: 1 - x, zoom });
             expect(rect).not.toBeNull();
             const r = rect as SourceRect;
@@ -139,6 +152,213 @@ describe('normaliseCrop', () => {
       y: 0.5,
       zoom: 1,
     });
-    expect(normaliseCrop({ zoom: 50 }).zoom).toBe(10);
+    expect(normaliseCrop({ zoom: 50 }).zoom).toBe(5);
+  });
+});
+
+describe('pan and zoom maths', () => {
+  // A small deterministic generator, so failures reproduce.
+  let seed = 12345;
+  const rand = (): number => {
+    seed = (seed * 1664525 + 1013904223) % 4294967296;
+    return seed / 4294967296;
+  };
+  const between = (lo: number, hi: number): number => lo + (hi - lo) * rand();
+  const randomGeometry = (): CropGeometry => ({
+    imageWidth: Math.exp(between(Math.log(50), Math.log(8000))),
+    imageHeight: Math.exp(between(Math.log(50), Math.log(8000))),
+    tileWidth: Math.exp(between(Math.log(5), Math.log(2000))),
+    tileHeight: Math.exp(between(Math.log(5), Math.log(2000))),
+  });
+  const randomCrop = (): Crop => ({
+    x: rand(),
+    y: rand(),
+    zoom: between(1, MAX_ZOOM),
+  });
+  /** The photo point (fractions) under tile point (px, py), via coverSource. */
+  const photoPointAt = (
+    g: CropGeometry,
+    crop: Crop,
+    px: number,
+    py: number,
+  ): { x: number; y: number } => {
+    const r = coverSource(
+      g.imageWidth,
+      g.imageHeight,
+      g.tileWidth,
+      g.tileHeight,
+      crop,
+    ) as SourceRect;
+    return {
+      x: (r.sx + px * r.sw) / g.imageWidth,
+      y: (r.sy + py * r.sh) / g.imageHeight,
+    };
+  };
+  const inBounds = (g: CropGeometry, c: Crop): boolean => {
+    const r = coverSource(
+      g.imageWidth,
+      g.imageHeight,
+      g.tileWidth,
+      g.tileHeight,
+      c,
+    ) as SourceRect;
+    expectInside(r, g.imageWidth, g.imageHeight);
+    return c.zoom >= 1 && c.zoom <= MAX_ZOOM;
+  };
+
+  it('keeps the grabbed point under the pointer while the edges allow', () => {
+    for (let i = 0; i < 300; i++) {
+      const g = randomGeometry();
+      const crop = fitCrop(g, randomCrop());
+      const dx = between(-0.2, 0.2) * g.tileWidth;
+      const dy = between(-0.2, 0.2) * g.tileHeight;
+      const next = panCrop(g, crop, dx, dy);
+      // Where the pointer was: the photo point there must now be under
+      // (pointer + movement), unless the edge stopped the photo.
+      const px = 0.5;
+      const py = 0.5;
+      const grabbed = photoPointAt(g, crop, px, py);
+      const after = photoPointAt(
+        g,
+        next,
+        px + dx / g.tileWidth,
+        py + dy / g.tileHeight,
+      );
+      const moved = next.x !== crop.x || next.y !== crop.y;
+      if (!moved) continue;
+      const visible = visibleFractions(g, crop.zoom) as {
+        fw: number;
+        fh: number;
+      };
+      // On an axis that was not stopped by an edge the point is exact.
+      const freeX =
+        next.x - crop.x === -(dx * visible.fw) / g.tileWidth ||
+        Math.abs(next.x - crop.x + (dx * visible.fw) / g.tileWidth) < 1e-9;
+      const freeY =
+        Math.abs(next.y - crop.y + (dy * visible.fh) / g.tileHeight) < 1e-9;
+      if (freeX) expect(after.x).toBeCloseTo(grabbed.x, 9);
+      if (freeY) expect(after.y).toBeCloseTo(grabbed.y, 9);
+    }
+  });
+
+  it('pans by exactly the pointer movement on a simple case', () => {
+    const g = {
+      imageWidth: 400,
+      imageHeight: 400,
+      tileWidth: 100,
+      tileHeight: 100,
+    };
+    // Zoom 2: the tile shows 200 source px, so 100 tile px = 200 source px.
+    const next = panCrop(g, { x: 0.5, y: 0.5, zoom: 2 }, 10, -5);
+    expect(next.x).toBeCloseTo(0.5 - 0.05, 12);
+    expect(next.y).toBeCloseTo(0.5 + 0.025, 12);
+  });
+
+  it('keeps the point under the pointer fixed when zooming about it', () => {
+    for (let i = 0; i < 500; i++) {
+      const g = randomGeometry();
+      const crop = fitCrop(g, randomCrop());
+      const px = rand();
+      const py = rand();
+      const zoom = between(1, MAX_ZOOM);
+      const next = zoomCropAt(g, crop, zoom, px, py);
+      expect(next.zoom).toBeCloseTo(zoom, 12);
+      const before = photoPointAt(g, crop, px, py);
+      const after = photoPointAt(g, next, px, py);
+      // Exact unless a photo edge intervened; then the region only moved
+      // inward, never outward. Check the exact case when interior.
+      const vb = visibleFractions(g, crop.zoom) as { fw: number; fh: number };
+      const va = visibleFractions(g, next.zoom) as { fw: number; fh: number };
+      const ux = before.x - px * va.fw;
+      const uy = before.y - py * va.fh;
+      if (ux >= 0 && ux + va.fw <= 1) expect(after.x).toBeCloseTo(before.x, 9);
+      if (uy >= 0 && uy + va.fh <= 1) expect(after.y).toBeCloseTo(before.y, 9);
+      expect(vb.fw).toBeGreaterThan(0);
+    }
+  });
+
+  it('always stays inside the photo and within the zoom limits', () => {
+    for (let i = 0; i < 1000; i++) {
+      const g = randomGeometry();
+      let crop = randomCrop();
+      expect(inBounds(g, fitCrop(g, crop))).toBe(true);
+      crop = panCrop(g, crop, between(-5000, 5000), between(-5000, 5000));
+      expect(inBounds(g, crop)).toBe(true);
+      crop = zoomCropAt(
+        g,
+        crop,
+        between(-3, 12),
+        between(-1, 2),
+        between(-1, 2),
+      );
+      expect(inBounds(g, crop)).toBe(true);
+    }
+  });
+
+  it('never zooms below cover or above the limit', () => {
+    const g = {
+      imageWidth: 400,
+      imageHeight: 300,
+      tileWidth: 100,
+      tileHeight: 100,
+    };
+    expect(zoomCropAt(g, DEFAULT_CROP, 0.1, 0.3, 0.3).zoom).toBe(1);
+    expect(zoomCropAt(g, DEFAULT_CROP, 99, 0.3, 0.3).zoom).toBe(MAX_ZOOM);
+  });
+
+  it('has no dead zone: dragging back from an edge responds at once', () => {
+    const g = {
+      imageWidth: 400,
+      imageHeight: 300,
+      tileWidth: 100,
+      tileHeight: 100,
+    };
+    let crop: Crop = { x: 0.5, y: 0.5, zoom: 2 };
+    // Drag far past the left/top limit...
+    crop = panCrop(g, crop, 5000, 5000);
+    const atEdge = crop;
+    // ...then a 1px drag back changes the crop immediately.
+    const back = panCrop(g, crop, -1, -1);
+    expect(back.x).toBeGreaterThan(atEdge.x);
+    expect(back.y).toBeGreaterThan(atEdge.y);
+    // The stored focal point is the centre of the edge-most region.
+    const v = visibleFractions(g, 2) as { fw: number; fh: number };
+    expect(atEdge.x).toBeCloseTo(v.fw / 2, 12);
+    expect(atEdge.y).toBeCloseTo(v.fh / 2, 12);
+  });
+
+  it('fitting does not change what coverSource shows', () => {
+    for (let i = 0; i < 300; i++) {
+      const g = randomGeometry();
+      const crop = randomCrop();
+      const a = coverSource(
+        g.imageWidth,
+        g.imageHeight,
+        g.tileWidth,
+        g.tileHeight,
+        crop,
+      ) as SourceRect;
+      const b = coverSource(
+        g.imageWidth,
+        g.imageHeight,
+        g.tileWidth,
+        g.tileHeight,
+        fitCrop(g, crop),
+      ) as SourceRect;
+      expect(b.sx).toBeCloseTo(a.sx, 6);
+      expect(b.sy).toBeCloseTo(a.sy, 6);
+      expect(b.sw).toBeCloseTo(a.sw, 6);
+    }
+  });
+
+  it('resetting gives the default', () => {
+    expect(isDefaultCrop(DEFAULT_CROP)).toBe(true);
+    const g = {
+      imageWidth: 400,
+      imageHeight: 300,
+      tileWidth: 100,
+      tileHeight: 100,
+    };
+    expect(isDefaultCrop(zoomCropAt(g, DEFAULT_CROP, 1, 0.2, 0.2))).toBe(true);
   });
 });
