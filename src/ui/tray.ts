@@ -1,8 +1,11 @@
 import type { Photo, PhotoStore } from '../photos';
 
 /**
- * The tray: a toolbar ("N / M selected", add/remove all) and a grid of
- * thumbnails, each a toggle button showing whether the photo is included.
+ * The tray: a toolbar ("N / M selected", add/remove all, and a button to
+ * expand or collapse it) and the thumbnails, each a toggle button showing
+ * whether the photo is included. Collapsed (the default) the thumbnails are
+ * one scrolling row, so the collage keeps most of the page; expanded they
+ * wrap into a grid showing every photo.
  */
 export function createTray(doc: Document, store: PhotoStore): HTMLElement {
   const tray = doc.createElement('section');
@@ -30,10 +33,30 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
     store.setAllIncluded(false);
   });
 
-  toolbar.append(count, addAll, removeAll);
-
   const grid = doc.createElement('ul');
   grid.className = 'tray-grid';
+  grid.id = 'tray-grid';
+
+  const expand = doc.createElement('button');
+  expand.type = 'button';
+  expand.className = 'tray-expand';
+  expand.setAttribute('aria-controls', grid.id);
+  let expanded = false;
+  const showExpanded = (): void => {
+    tray.classList.toggle('expanded', expanded);
+    expand.setAttribute('aria-expanded', String(expanded));
+    expand.textContent = expanded ? 'Show one row' : 'Show all';
+    expand.title = expanded
+      ? 'Collapse the tray to a single row of photos'
+      : 'Expand the tray to show every photo';
+  };
+  expand.addEventListener('click', () => {
+    expanded = !expanded;
+    showExpanded();
+  });
+  showExpanded();
+
+  toolbar.append(count, addAll, removeAll, expand);
 
   const empty = doc.createElement('p');
   empty.className = 'tray-empty';
@@ -102,6 +125,7 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
     addAll.disabled = total === 0 || selected === total;
     removeAll.disabled = selected === 0;
     empty.hidden = total > 0;
+    expand.hidden = total === 0;
     grid.hidden = total === 0;
   }
 

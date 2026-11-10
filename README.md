@@ -6,9 +6,10 @@ never leave your machine: there is no backend.
 Unlike most collage makers, tile sizes are configurable, from uniform to a few
 very large "feature" photos among many small ones. See [spec.md](spec.md) for
 the planned scope. The app is at an early stage: you can add photos (file picker
-or drag and drop), choose which are included, and see them as a mosaic with a
-size-variation dial and Shuffle. Canvas settings, swap, crop, undo, export and
-save are not built yet.
+or drag and drop), choose which are included, see them as a mosaic with a
+size-variation dial and Shuffle, and set the canvas: a ratio preset, a custom
+size in pixels, the border and the background colour. Physical sizes, swap,
+crop, undo, export and save are not built yet.
 
 ## Development
 
@@ -58,6 +59,19 @@ decoded previews and thumbnails from a bounded `ImageCache`, and the export
 will call it with the originals. The cover-and-crop maths is `coverSource` in
 `crop.ts`. `npm run check:browser` also checks the collage, the dial and
 Shuffle; with `--dir` it reports frame times while dragging the dial.
+
+The canvas settings panel (`src/editor/canvas-controls.ts`, beside the collage)
+has ratio presets, a width and height in pixels with an aspect lock, a border
+slider and a background colour. Each preset sets the longer side to 1920 px
+(16:9 is 1920 × 1080, 1:1 is 1920 × 1920, 4:5 is 1536 × 1920). Sizes are
+checked by the pure functions in `canvas-settings.ts` (whole pixels, 1 to
+20000; bad input gets an inline message and is never applied). The border
+slider's maximum is the most the current arrangement allows (`borderAt`), so a
+re-roll can lower it; the stored border is what you asked for, and a note says
+when less is drawn. The slider and the colour picker use the same
+`GestureInput` as the dial (`gesture.ts`): one drag, click or key press gives
+exactly one committed change. The tray below the collage is one scrolling row
+of thumbnails; "Show all" expands it into a grid.
 
 The build uses relative asset URLs, so `dist/` can be hosted at the root of a
 domain or under any sub-path.

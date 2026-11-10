@@ -6,8 +6,10 @@ import {
   type ImportProgress,
 } from './photos';
 import {
+  createCanvasSettings,
   createCollageView,
   createLayoutControls,
+  createSizeReadout,
   EditorStore,
   FrameScheduler,
   type CollageView,
@@ -35,8 +37,9 @@ export interface App {
 
 /**
  * Renders the app into `root`, replacing its contents: a top bar with the
- * "Add photos" button and the layout controls, the main area with the
- * collage, and the tray below it.
+ * "Add photos" button, the output size and the layout controls; beside the
+ * canvas settings panel, the main area with the collage and the tray below
+ * it.
  */
 export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   const doc = root.ownerDocument;
@@ -93,7 +96,17 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
 
   const layoutControls = createLayoutControls(doc, editor, frames);
 
-  header.append(title, addButton, progress, announcer, input, layoutControls);
+  const sizeReadout = createSizeReadout(doc, editor);
+
+  header.append(
+    title,
+    sizeReadout,
+    addButton,
+    progress,
+    announcer,
+    input,
+    layoutControls,
+  );
 
   const notices = createNotices(doc);
 
@@ -121,7 +134,16 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
 
   // Notices sit in the tray, so they never cover the collage.
   tray.append(notices.element);
-  shell.append(header, main, tray);
+
+  // The collage and the tray share a column; the settings panel stands
+  // beside both, so the collage keeps the full height of the column.
+  const stage = doc.createElement('div');
+  stage.className = 'stage';
+  stage.append(main, tray);
+  const workspace = doc.createElement('div');
+  workspace.className = 'workspace';
+  workspace.append(stage, createCanvasSettings(doc, editor, frames));
+  shell.append(header, workspace);
   root.replaceChildren(shell);
 
   const addFiles = (files: File[], folders: string[] = []): void => {

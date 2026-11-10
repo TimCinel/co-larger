@@ -6,6 +6,7 @@ import {
   placeLayout,
   swapSlots,
   maxBorder,
+  maxBorderForAspect,
   validateAssignment,
   type PhotoShape,
 } from '../layout';
@@ -508,6 +509,12 @@ describe('border: stored as asked, clamped only when drawn', () => {
           maxBorder(state.plan, size.width, size.height, { snap: true }),
         );
         expect(b.effective).toBeLessThanOrEqual(Math.round(b.requested));
+        // ... nor the limit that keeps tiles within 3:1.
+        expect(b.max).toBeLessThanOrEqual(
+          maxBorderForAspect(state.plan, size.width, size.height, 3, {
+            snap: true,
+          }),
+        );
         expect(() => tilesFor(state, size)).not.toThrow();
       }
     }
