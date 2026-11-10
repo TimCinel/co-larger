@@ -36,6 +36,17 @@ export {
   placeLayout,
   type BorderLimitOptions,
 } from './place';
+export {
+  assignPhotos,
+  cropFraction,
+  PLACEMENT_NOISE,
+  swapSlots,
+  weightedCrop,
+  type AssignOptions,
+  type Assignment,
+  type PhotoShape,
+  type SlotShape,
+} from './assign';
 export { validatePlan } from './validate';
 export type {
   Axis,
