@@ -27,5 +27,20 @@ export default defineConfig(
       '@typescript-eslint/non-nullable-type-assertion-style': 'off',
     },
   },
+  {
+    // The local browser check drives a real page with untyped `evaluate`
+    // callbacks, where these rules only add noise.
+    files: ['scripts/**'],
+    rules: {
+      '@typescript-eslint/no-non-null-assertion': 'off',
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+      '@typescript-eslint/no-unsafe-call': 'off',
+      '@typescript-eslint/no-unsafe-argument': 'off',
+      '@typescript-eslint/restrict-template-expressions': 'off',
+      '@typescript-eslint/restrict-plus-operands': 'off',
+    },
+  },
   prettier,
 );

@@ -1,5 +1,12 @@
 :root {
-  color-scheme: light dark;
+  color-scheme: dark;
+  --bg: #121316;
+  --panel: #1b1d22;
+  --panel-border: #2c2f37;
+  --text: #e8e9ec;
+  --muted: #9a9ea8;
+  --accent: #4f8cff;
+  --accent-text: #fff;
   font-family:
     system-ui,
     -apple-system,
@@ -9,12 +16,274 @@
   line-height: 1.5;
 }
 
-body {
-  margin: 0;
+* {
+  box-sizing: border-box;
 }
 
-main {
-  max-width: 40rem;
-  margin: 0 auto;
-  padding: 4rem 1.5rem;
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: #2a2d35;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.35rem 0.8rem;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: #343843;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+button:focus-visible {
+  /* White ring over a dark halo: visible on the blue "included" border, on
+     dark and on light backgrounds alike. */
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px #000;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+button.primary:hover:not(:disabled) {
+  background: #6a9eff;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  position: relative;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.progress {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.progress[hidden] {
+  display: none;
+}
+
+.progress progress {
+  width: 10rem;
+  accent-color: var(--accent);
+}
+
+/* Toasts: overlaid, so a notice never moves or resizes the canvas. */
+.notices {
+  position: absolute;
+  top: 3.6rem;
+  right: 1rem;
+  z-index: 10;
+  width: min(30rem, calc(100% - 2rem));
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  pointer-events: none;
+}
+
+.notice {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  background: #3a2f17;
+  border: 1px solid #5a4824;
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 40%);
+  color: #f1d9a0;
+  font-size: 0.9rem;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.canvas-area {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.canvas-hint {
+  color: var(--muted);
+  margin: 0;
+  padding: 0 1rem;
+  text-align: center;
+}
+
+.drop-overlay {
+  display: none;
+}
+
+.shell.dragging .drop-overlay {
+  display: flex;
+  position: absolute;
+  inset: 0.75rem;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--accent);
+  border-radius: 12px;
+  background: rgb(79 140 255 / 14%);
+  font-size: 1.2rem;
+  pointer-events: none;
+}
+
+.tray {
+  flex: none;
+  max-height: 38vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-top: 1px solid var(--panel-border);
+}
+
+.tray-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 1rem;
+}
+
+.tray-count {
+  margin-right: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.tray-empty {
+  margin: 0;
+  padding: 0.5rem 1rem 1rem;
+  color: var(--muted);
+}
+
+.tray-empty[hidden],
+.tray-grid[hidden] {
+  display: none;
+}
+
+.tray-grid {
+  list-style: none;
+  margin: 0;
+  /* Room above and beside the first row for the focus ring (outside the
+     button, and the grid clips whatever overflows it). */
+  padding: 0.5rem 1rem 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  overflow-y: auto;
+}
+
+.tray-grid li {
+  /* Fixed row height of 5.5rem; width follows the photo's aspect ratio. */
+  height: 5.5rem;
+  width: calc(5.5rem * var(--aspect, 1));
+}
+
+.thumb {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background: #000;
+}
+
+.thumb.included {
+  border-color: var(--accent);
+}
+
+.thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.4;
+  transition: opacity 0.1s;
+}
+
+.thumb.included img {
+  opacity: 1;
+}
+
+.tick {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: rgb(0 0 0 / 45%);
+}
+
+.thumb.included .tick {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.thumb.included .tick::after {
+  content: '';
+  position: absolute;
+  left: 0.3rem;
+  top: 0.08rem;
+  width: 0.3rem;
+  height: 0.6rem;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
 }
