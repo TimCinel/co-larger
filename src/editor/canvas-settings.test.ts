@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   activePreset,
-  BORDER_STEP,
+  BORDER_SLIDER_MAX,
   borderRange,
   parseSide,
-  PRESET_LONG_SIDE,
+  DEFAULT_LONG_SIDE,
+  lockRatioFor,
   presetSize,
   RATIO_PRESETS,
+  type RatioPreset,
   resizeBySide,
 } from './canvas-settings';
 import {
@@ -22,6 +24,12 @@ const photos = Array.from({ length: 12 }, (_, i) => ({
   id: `p${String(i)}`,
   aspect: i % 2 ? 0.75 : 1.5,
 }));
+
+function byLabel(label: string): RatioPreset {
+  const found = RATIO_PRESETS.find((p) => p.label === label);
+  if (!found) throw new Error(`no preset ${label}`);
+  return found;
+}
 
 describe('ratio presets', () => {
   it('lists the eleven presets of the spec, in order', () => {
@@ -62,7 +70,7 @@ describe('ratio presets', () => {
     });
     for (const p of RATIO_PRESETS) {
       const { width, height } = presetSize(p);
-      expect(Math.max(width, height)).toBe(PRESET_LONG_SIDE);
+      expect(Math.max(width, height)).toBe(DEFAULT_LONG_SIDE);
       expect(Number.isInteger(width) && Number.isInteger(height)).toBe(true);
     }
   });
@@ -80,6 +88,39 @@ describe('ratio presets', () => {
     expect(activePreset(1920, 1000)).toBeNull();
     expect(activePreset(3508, 2480)).toBeNull(); // A4 is not a preset
     expect(activePreset(1920, 1070)).toBeNull();
+  });
+
+  it('presets keep the current long side instead of resetting it', () => {
+    const big = { width: 3840, height: 2160 };
+    const long = 3840;
+    expect(presetSize(byLabel('1:1'), long)).toEqual({
+      width: 3840,
+      height: 3840,
+    });
+    expect(presetSize(byLabel('9:16'), long)).toEqual({
+      width: 2160,
+      height: 3840,
+    });
+    // The active preset gives the size already there: a click changes nothing.
+    const active = byLabel('16:9');
+    expect(presetSize(active, Math.max(big.width, big.height))).toEqual(big);
+    let state = createEditorState({ seed: 4, photos, canvas: big });
+    const same = setCanvasSize(state, 3840, 2160);
+    expect(same).toBe(state);
+    // A4 landscape at 300 dpi keeps its 3508 px long side.
+    expect(presetSize(byLabel('4:3'), 3508)).toEqual({
+      width: 3508,
+      height: 2631,
+    });
+    // Extremes stay valid.
+    for (const l of [1, 2, 7, 20000]) {
+      for (const p of RATIO_PRESETS) {
+        const { width, height } = presetSize(p, l);
+        state = setCanvasSize(state, width, height);
+        expect(Math.max(width, height)).toBe(l);
+        expect(Math.min(width, height)).toBeGreaterThanOrEqual(1);
+      }
+    }
   });
 
   it('choosing presets resizes the canvas and re-lays out', () => {
@@ -198,6 +239,33 @@ describe('resizeBySide', () => {
     ).toEqual({ ok: true, width: 1000, height: 2 });
   });
 
+  it('lock at 5:7 uses the exact ratio, not the rounded pixel ratio', () => {
+    const cur = { width: 1371, height: 1920 };
+    expect(lockRatioFor(1371, 1920)).toBe(5 / 7);
+    expect(lockRatioFor(1920, 1000)).toBe(1920 / 1000);
+    const r = resizeBySide({
+      side: 'height',
+      text: '7000',
+      current: cur,
+      lock: true,
+      ratio: lockRatioFor(1371, 1920),
+    });
+    expect(r).toEqual({ ok: true, width: 5000, height: 7000 });
+  });
+
+  it('re-entering the current value changes nothing, even with the lock on', () => {
+    const cur = { width: 1371, height: 1920 };
+    expect(
+      resizeBySide({
+        side: 'width',
+        text: '1371',
+        current: cur,
+        lock: true,
+        ratio: 5 / 7,
+      }),
+    ).toEqual({ ok: true, ...cur });
+  });
+
   it('passes parse errors through', () => {
     const r = resizeBySide({
       side: 'height',
@@ -257,45 +325,71 @@ describe('resizeBySide', () => {
 });
 
 describe('borderRange', () => {
-  it('ends at the most the arrangement allows, in whole slider steps', () => {
+  it('has a fixed 0 to 10% scale whatever the arrangement', () => {
     for (let seed = 0; seed < 15; seed++) {
-      const state = shuffle(createEditorState({ seed: 1, photos }), seed);
+      const state = setBorder(
+        shuffle(createEditorState({ seed: 1, photos }), seed),
+        0.05,
+      );
       const range = borderRange(state);
-      expect(range.max).toBeGreaterThan(0);
-      expect(range.max).toBeLessThanOrEqual(MAX_BORDER_FRACTION);
-      expect(
-        Math.abs(range.max / BORDER_STEP - Math.round(range.max / BORDER_STEP)),
-      ).toBeLessThan(1e-6);
-      // At the slider's maximum, the border is drawn in full.
-      const full = borderRange(setBorder(state, range.max));
-      expect(full.limited).toBe(false);
-      expect(full.drawnPx).toBe(Math.round(full.requestedPx));
+      expect(range.scale).toBe(BORDER_SLIDER_MAX);
+      expect(range.scale).toBe(0.1);
+      // The thumb shows the request, wherever the maximum is.
+      expect(range.value).toBe(0.05);
+      expect(range.available).toBeGreaterThan(0);
+      expect(range.available).toBeLessThanOrEqual(MAX_BORDER_FRACTION);
     }
   });
 
-  it('keeps a request above the maximum, and says when less is drawn', () => {
+  it('what is available is drawn in full; beyond it less is drawn', () => {
+    const base = createEditorState({ seed: 1, photos });
+    const { available } = borderRange(base);
+    const at = borderRange(
+      setBorder(base, Math.floor(available * 1000) / 1000),
+    );
+    expect(at.limited).toBe(false);
+    const over = borderRange(setBorder(base, MAX_BORDER_FRACTION));
+    expect(over.limited).toBe(true);
+    expect(over.drawnPx).toBeLessThan(over.requestedPx);
+    expect(over.drawn).toBeCloseTo(available, 2);
+  });
+
+  it('keeps a request above the available part and above the scale', () => {
     const base = setBorder(createEditorState({ seed: 3, photos }), 0.2);
     const range = borderRange(base);
     expect(range.requested).toBe(0.2);
-    expect(range.max).toBeLessThan(0.2);
-    expect(range.value).toBe(range.max);
+    expect(range.value).toBe(BORDER_SLIDER_MAX);
     expect(range.limited).toBe(true);
     expect(range.drawnPx).toBeLessThan(range.requestedPx);
-    expect(range.drawn).toBeLessThanOrEqual(range.max + BORDER_STEP);
   });
 
-  it('a re-roll that changes the maximum never changes the request', () => {
+  it('a re-roll changes what is available, never the request or the thumb', () => {
     let state = setBorder(createEditorState({ seed: 3, photos }), 0.06);
-    const maxes = new Set<number>();
+    const available = new Set<number>();
     for (let seed = 10; seed < 40; seed++) {
       state = shuffle(state, seed);
       const range = borderRange(state);
-      maxes.add(range.max);
+      available.add(range.available);
       expect(range.requested).toBe(0.06);
-      expect(range.value).toBe(Math.min(0.06, range.max));
-      expect(range.limited).toBe(range.drawnPx < Math.round(range.requestedPx));
+      expect(range.value).toBe(0.06);
+      expect(range.limited).toBe(range.drawnPx < range.requestedPx);
     }
-    expect(maxes.size).toBeGreaterThan(1);
+    expect(available.size).toBeGreaterThan(1);
+  });
+
+  it('the label and the note use the same numbers (5000 x 5000, 25% asked)', () => {
+    const state = setBorder(
+      createEditorState({
+        seed: 2,
+        photos,
+        canvas: { width: 5000, height: 5000 },
+      }),
+      0.25,
+    );
+    const r = borderRange(state);
+    expect(r.requestedPx).toBe(1250);
+    expect(r.drawnPx / 5000).toBe(r.drawn);
+    expect(r.limited).toBe(true);
   });
 
   it('is not limited at no border, and allows the full range with no photos', () => {
@@ -303,7 +397,7 @@ describe('borderRange', () => {
       false,
     );
     const empty = borderRange(createEditorState());
-    expect(empty.max).toBe(MAX_BORDER_FRACTION);
+    expect(empty.available).toBe(MAX_BORDER_FRACTION);
     expect(empty.limited).toBe(false);
   });
 });

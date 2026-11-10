@@ -142,7 +142,9 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   stage.append(main, tray);
   const workspace = doc.createElement('div');
   workspace.className = 'workspace';
-  workspace.append(stage, createCanvasSettings(doc, editor, frames));
+  // The panel comes first in the DOM, so Tab reaches it before the tray's
+  // thumbnails; CSS (`order`) keeps it on the right.
+  workspace.append(createCanvasSettings(doc, editor, frames), stage);
   shell.append(header, workspace);
   root.replaceChildren(shell);
 

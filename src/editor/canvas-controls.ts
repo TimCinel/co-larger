@@ -10,8 +10,10 @@
  */
 import {
   activePreset,
+  BORDER_SLIDER_MAX,
   BORDER_STEP,
   borderRange,
+  lockRatioFor,
   presetSize,
   RATIO_PRESETS,
   resizeBySide,
@@ -20,12 +22,7 @@ import {
 } from './canvas-settings';
 import type { FrameScheduler } from './frames';
 import { GestureInput } from './gesture';
-import {
-  MAX_BORDER_FRACTION,
-  setBackground,
-  setBorder,
-  setCanvasSize,
-} from './state';
+import { setBackground, setBorder, setCanvasSize } from './state';
 import type { EditorStore } from './store';
 
 /** "1920 × 1080 px". */
@@ -95,8 +92,6 @@ export function createCanvasSettings(
     const button = doc.createElement('button');
     button.type = 'button';
     button.className = 'preset';
-    const size = presetSize(p);
-    button.title = `${p.label}: ${formatSize(size.width, size.height)}`;
     const icon = doc.createElement('span');
     icon.className = 'preset-icon';
     icon.setAttribute('aria-hidden', 'true');
@@ -105,8 +100,15 @@ export function createCanvasSettings(
     else icon.style.height = '1.2rem';
     button.append(icon, doc.createTextNode(p.label));
     button.addEventListener('click', () => {
-      clearMessage();
-      editor.dispatch((state) => setCanvasSize(state, size.width, size.height));
+      clearErrors();
+      // The ratio changes, the resolution (the longer side) does not.
+      editor.dispatch((state) => {
+        const { width, height } = presetSize(
+          p,
+          Math.max(state.canvas.width, state.canvas.height),
+        );
+        return setCanvasSize(state, width, height);
+      });
       syncFields();
     });
     presetButtons.set(p, button);
@@ -122,6 +124,7 @@ export function createCanvasSettings(
   message.className = 'field-message';
   message.id = 'size-message';
   message.setAttribute('role', 'alert');
+  message.style.whiteSpace = 'pre-line';
   message.hidden = true;
 
   const makeField = (side: Side, label: string): HTMLInputElement => {
@@ -168,18 +171,30 @@ export function createCanvasSettings(
   /** Fields the user has typed in and not yet committed. */
   const dirty = new Set<Side>();
 
-  function clearMessage(): void {
-    message.hidden = true;
-    message.textContent = '';
-    widthInput.removeAttribute('aria-invalid');
-    heightInput.removeAttribute('aria-invalid');
-    dirty.clear();
+  /** Each field's own error: committing one never clears the other's. */
+  const errors = new Map<Side, string>();
+
+  function showErrors(): void {
+    message.textContent = [...errors.values()].join('\n');
+    message.hidden = errors.size === 0;
+    for (const side of ['width', 'height'] as const) {
+      if (errors.has(side)) inputs[side].setAttribute('aria-invalid', 'true');
+      else inputs[side].removeAttribute('aria-invalid');
+    }
   }
 
-  function showMessage(side: Side, text: string): void {
-    message.textContent = text;
-    message.hidden = false;
-    inputs[side].setAttribute('aria-invalid', 'true');
+  /** Forgets one field's typed text and error. */
+  function clearSide(side: Side): void {
+    errors.delete(side);
+    dirty.delete(side);
+    showErrors();
+  }
+
+  /** Forgets both fields' typed text and errors. */
+  function clearErrors(): void {
+    errors.clear();
+    dirty.clear();
+    showErrors();
   }
 
   /** Commits what was typed into one field (Enter or blur). */
@@ -194,10 +209,11 @@ export function createCanvasSettings(
       ratio: lockRatio,
     });
     if (!result.ok) {
-      showMessage(side, result.message);
+      errors.set(side, result.message);
+      showErrors();
       return;
     }
-    clearMessage();
+    clearSide(side);
     applied = { width: result.width, height: result.height };
     editor.dispatch((state) =>
       setCanvasSize(state, result.width, result.height),
@@ -210,7 +226,8 @@ export function createCanvasSettings(
     const input = inputs[side];
     input.addEventListener('input', () => {
       dirty.add(side);
-      input.removeAttribute('aria-invalid');
+      errors.delete(side);
+      showErrors();
     });
     input.addEventListener('change', () => {
       commitSide(side);
@@ -219,14 +236,14 @@ export function createCanvasSettings(
       if (event.key === 'Enter') {
         commitSide(side);
       } else if (event.key === 'Escape') {
-        clearMessage();
+        clearSide(side);
         syncFields();
       }
     });
   }
   lock.addEventListener('change', () => {
     const { width, height } = editor.getState().canvas;
-    lockRatio = width / height;
+    lockRatio = lockRatioFor(width, height);
   });
 
   function syncFields(): void {
@@ -235,8 +252,8 @@ export function createCanvasSettings(
       // Changed from elsewhere (a preset, later paper sizes or undo): the
       // lock now keeps this size's ratio.
       applied = { width, height };
-      lockRatio = width / height;
-      clearMessage();
+      lockRatio = lockRatioFor(width, height);
+      clearErrors();
     }
     if (!dirty.has('width')) widthInput.value = String(width);
     if (!dirty.has('height')) heightInput.value = String(height);
@@ -256,7 +273,7 @@ export function createCanvasSettings(
   border.id = 'border';
   border.min = '0';
   border.step = String(BORDER_STEP);
-  border.max = String(MAX_BORDER_FRACTION);
+  border.max = String(BORDER_SLIDER_MAX);
   border.value = '0';
   const borderNote = doc.createElement('p');
   borderNote.className = 'field-note';
@@ -291,27 +308,38 @@ export function createCanvasSettings(
     borderGesture.end(border.valueAsNumber);
   });
 
+  /** "2.0% (22 px)": the label and the note are both made by this. */
+  const describeBorder = (fraction: number, px: number): string =>
+    `${percent(fraction)} (${String(px)} px)`;
+
   function showBorder(fraction: number): void {
     const { width, height } = editor.getState().canvas;
-    const px = Math.round(fraction * Math.min(width, height));
-    const text = `${percent(fraction)} (${String(px)} px)`;
+    const text = describeBorder(
+      fraction,
+      Math.round(fraction * Math.min(width, height)),
+    );
     borderValue.textContent = text;
     border.setAttribute('aria-valuetext', text);
   }
 
   function syncBorder(): void {
     const range = borderRange(editor.getState());
-    // Follow the state when it changes from elsewhere (a re-roll that
-    // changes the maximum, a new size, undo), but never fight a drag.
+    // The scale is fixed and the thumb shows what was asked for, so a
+    // re-roll never moves it. Follow the state when it changes from
+    // elsewhere (a new size, undo), but never fight a drag.
     if (!borderGesture.isBusy()) {
-      border.max = String(range.max);
       border.value = String(range.value);
-      showBorder(range.value);
+      showBorder(range.requested);
     }
+    // Shade the part of the track this arrangement cannot draw.
+    border.style.setProperty(
+      '--available',
+      String(Math.min(1, range.available / range.scale)),
+    );
     if (range.limited) {
       borderNote.textContent =
-        `Drawn at ${percent(range.drawn)} (${String(range.drawnPx)} px): the most this ` +
-        `arrangement allows. You asked for ${percent(range.requested)}.`;
+        `Drawn at ${describeBorder(range.drawn, range.drawnPx)}: the most this ` +
+        `arrangement allows. You asked for ${describeBorder(range.requested, range.requestedPx)}.`;
     }
     borderNote.hidden = !range.limited;
     border.classList.toggle('limited', range.limited);
@@ -395,8 +423,11 @@ export function createCanvasSettings(
   const sync = (): void => {
     const { width, height } = editor.getState().canvas;
     const active = activePreset(width, height);
+    const long = Math.max(width, height);
     for (const [p, button] of presetButtons) {
       button.setAttribute('aria-pressed', String(p === active));
+      const to = presetSize(p, long);
+      button.title = `${p.label}: ${formatSize(to.width, to.height)}`;
     }
     syncFields();
     syncBorder();
@@ -417,11 +448,14 @@ const SLIDER_END_EVENTS = [
 ];
 
 /**
- * Events that can end a gesture on a colour input: the picker is a popup, so
- * pointer events on the input say nothing about it. `change` fires when the
- * picker closes, after the last `input`.
+ * The event that ends a gesture on a colour input: `change`, which fires when
+ * the picker closes, after the last `input`. Not `blur`: the picker is a
+ * separate window on some platforms, so the input can lose and regain focus
+ * while it is open, and a blur would split one picking into two commits. If
+ * the picker closes on the colour it opened with, no `change` fires, and the
+ * uncommitted steps are committed by the next action anyway.
  */
-const PICKER_END_EVENTS = ['change', 'blur'];
+const PICKER_END_EVENTS = ['change'];
 
 /**
  * Calls `end` on each of `types` on `input`. Escape is deliberately not one:

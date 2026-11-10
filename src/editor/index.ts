@@ -5,11 +5,13 @@ export {
 } from './canvas-controls';
 export {
   activePreset,
+  BORDER_SLIDER_MAX,
   BORDER_STEP,
+  lockRatioFor,
   borderRange,
   parseSide,
   presetSize,
-  PRESET_LONG_SIDE,
+  DEFAULT_LONG_SIDE,
   RATIO_PRESETS,
   resizeBySide,
   type BorderRange,

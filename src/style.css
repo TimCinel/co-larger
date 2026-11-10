@@ -387,6 +387,8 @@ button.primary:hover:not(:disabled) {
 
 /* Canvas settings: a column beside the collage and the tray. */
 .settings {
+  /* After the stage in the page, but before it in the tab order. */
+  order: 2;
   flex: none;
   width: 15.5rem;
   overflow-y: auto;
@@ -536,8 +538,61 @@ button.primary:hover:not(:disabled) {
   accent-color: var(--accent);
 }
 
-.settings input[type='range'].limited {
-  accent-color: #d9a441;
+/* The border slider's fixed scale: the part of the track the current
+   arrangement cannot draw (beyond --available) is hatched. */
+.settings input#border {
+  appearance: none;
+  height: 1.25rem;
+  background: none;
+  --edge: calc(8px + (100% - 16px) * var(--available, 1));
+}
+
+.settings input#border::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+  background:
+    linear-gradient(to right, #4b5060 var(--edge), transparent var(--edge)),
+    repeating-linear-gradient(45deg, #8a6d2f 0 2px, #2a2d35 2px 5px);
+}
+
+.settings input#border::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background:
+    linear-gradient(to right, #4b5060 var(--edge), transparent var(--edge)),
+    repeating-linear-gradient(45deg, #8a6d2f 0 2px, #2a2d35 2px 5px);
+}
+
+.settings input#border::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: var(--accent);
+}
+
+.settings input#border::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: var(--accent);
+}
+
+.settings input#border.limited::-webkit-slider-thumb {
+  background: #d9a441;
+}
+
+.settings input#border.limited::-moz-range-thumb {
+  background: #d9a441;
+}
+
+.settings input#border:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 3px;
+  border-radius: 4px;
 }
 
 .swatches {

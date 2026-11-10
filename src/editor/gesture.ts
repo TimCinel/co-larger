@@ -12,10 +12,13 @@
  * commit at the value already committed changes nothing and notifies nobody:
  * however many of those events arrive, the gesture commits once.
  *
- * `end` also does nothing unless the control moved since the last `end`, so
- * an event that merely ends focus (a blur after tabbing through) never
- * commits the control's displayed value over a stored one it could not show
- * (a border above the current maximum, say).
+ * `end` commits only while this gesture has something to end: a step still
+ * waiting for its frame, or a drag the store has not committed. So an event
+ * that merely ends focus (a blur after tabbing through) never commits the
+ * control's displayed value over a stored one it could not show, and a
+ * commit that came from elsewhere meanwhile (Shuffle, a swatch) leaves
+ * nothing for a late end event to commit again. It is derived from the store,
+ * not remembered, so it cannot go stale.
  */
 import type { FrameScheduler, FrameTask } from './frames';
 
@@ -31,7 +34,6 @@ export interface GestureTarget<T> {
 
 export class GestureInput<T> {
   private pending: { readonly value: T } | null = null;
-  private moved = false;
 
   constructor(
     private readonly target: GestureTarget<T>,
@@ -42,7 +44,6 @@ export class GestureInput<T> {
 
   /** The control moved (`input`). Applied at most once per frame. */
   move(value: T): void {
-    this.moved = true;
     this.pending = { value };
     this.frames.request(this.kind, () => {
       this.pending = null;
@@ -57,9 +58,9 @@ export class GestureInput<T> {
    */
   end(value: T): void {
     this.frames.cancel(this.kind);
+    const hadPending = this.pending !== null;
     this.pending = null;
-    if (!this.moved) return;
-    this.moved = false;
+    if (!hadPending && !this.target.isDragging()) return;
     this.target.commit(value);
   }
 

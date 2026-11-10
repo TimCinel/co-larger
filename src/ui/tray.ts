@@ -71,6 +71,18 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
   }
   const items = new Map<string, Item>();
 
+  // The thumbnails are one tab stop (roving tabindex): Tab enters the tray
+  // at the current thumbnail, and the arrow keys move between them, so a
+  // tray of hundreds of photos does not take hundreds of Tab presses to
+  // cross. Enter and Space toggle the focused photo (they are buttons).
+  let activeId: string | null = null;
+  const setActive = (id: string | null): void => {
+    activeId = id;
+    for (const [itemId, item] of items) {
+      item.button.tabIndex = itemId === id ? 0 : -1;
+    }
+  };
+
   function createItem(photo: Photo): HTMLLIElement {
     const li = doc.createElement('li');
     const button = doc.createElement('button');
@@ -96,6 +108,10 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
       const current = store.getPhoto(photo.id);
       if (current) store.setIncluded(photo.id, !current.included);
     });
+    button.tabIndex = -1;
+    button.addEventListener('focus', () => {
+      if (activeId !== photo.id) setActive(photo.id);
+    });
     items.set(photo.id, { li, button, url });
     li.append(button);
     return li;
@@ -119,6 +135,11 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
       button.setAttribute('aria-pressed', String(photo.included));
       button.classList.toggle('included', photo.included);
     }
+    if (activeId === null || !items.has(activeId)) {
+      setActive(photos[0]?.id ?? null);
+    } else if (fresh.length > 0) {
+      setActive(activeId);
+    }
     const selected = store.getSelectedCount();
     const total = store.getTotalCount();
     count.textContent = `${String(selected)} / ${String(total)} selected`;
@@ -128,6 +149,45 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
     expand.hidden = total === 0;
     grid.hidden = total === 0;
   }
+
+  grid.addEventListener('keydown', (event) => {
+    const keys = [
+      'ArrowLeft',
+      'ArrowRight',
+      'ArrowUp',
+      'ArrowDown',
+      'Home',
+      'End',
+    ];
+    if (!keys.includes(event.key)) return;
+    const buttons = [...items.values()].map((item) => item.button);
+    const from = buttons.findIndex((b) => b === doc.activeElement);
+    if (from < 0) return;
+    let to = from;
+    if (event.key === 'ArrowLeft') to = from - 1;
+    else if (event.key === 'ArrowRight') to = from + 1;
+    else if (event.key === 'Home') to = 0;
+    else if (event.key === 'End') to = buttons.length - 1;
+    else {
+      // Up and Down: the nearest thumbnail in the next row (when expanded).
+      const here = buttons[from]?.getBoundingClientRect();
+      if (!here) return;
+      const down = event.key === 'ArrowDown';
+      let best = Infinity;
+      for (const [i, b] of buttons.entries()) {
+        const r = b.getBoundingClientRect();
+        const dy = down ? r.top - here.top : here.top - r.top;
+        if (dy < here.height / 2) continue;
+        const score = dy * 10000 + Math.abs(r.left - here.left);
+        if (score < best) {
+          best = score;
+          to = i;
+        }
+      }
+    }
+    event.preventDefault();
+    buttons[Math.max(0, Math.min(buttons.length - 1, to))]?.focus();
+  });
 
   store.subscribe(sync);
   sync();

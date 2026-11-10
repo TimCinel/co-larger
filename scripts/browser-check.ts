@@ -267,13 +267,14 @@ async function checkEditor(p: Page): Promise<void> {
 
   // Photos fill their tiles (cover): no placeholder grey either.
   await waitDrawn(p);
-  const grey = await countColour(p, [0xd4, 0xd6, 0xdb]);
-  // (A placeholder tile is thousands of pixels; the synthetic photos' white
-  // numerals leave a few dozen light-grey anti-aliased pixels.)
+  // The renderer's own count of tiles it could not draw a photo in.
+  const missing = await p.evaluate(
+    () => (window as any).__app.view.lastRender().missing as number,
+  );
   check(
-    'no placeholder tiles once images are decoded',
-    grey < 500,
-    `${String(grey)} px`,
+    'no placeholder tiles once images are decoded (the renderer reports 0 missing)',
+    missing === 0,
+    `${String(missing)} missing`,
   );
 
   // The canvas fits inside the main area with a margin.
@@ -951,6 +952,79 @@ async function checkLayout(p: Page): Promise<void> {
       (await toggle.getAttribute('aria-expanded')) === 'false',
   );
   await waitDrawn(p);
+
+  // Keyboard: the settings panel comes before the tray in tab order, and the
+  // thumbnails are one tab stop with arrow-key movement.
+  const order = await p.evaluate(() => {
+    const panel = document.querySelector('.settings')!;
+    const tray = document.querySelector('.tray')!;
+    const stops = [
+      ...document.querySelectorAll<HTMLElement>('button, input, a[href]'),
+    ].filter((el) => el.tabIndex >= 0 && !el.hidden);
+    const inTray = stops.filter(
+      (el) => tray.contains(el) && el.closest('.tray-grid'),
+    );
+    return {
+      panelFirst: !!(
+        panel.compareDocumentPosition(tray) & Node.DOCUMENT_POSITION_FOLLOWING
+      ),
+      thumbStops: inTray.length,
+    };
+  });
+  check(
+    'tab order: the settings panel comes before the tray, and the thumbnails are a single tab stop',
+    order.panelFirst && order.thumbStops === 1,
+    JSON.stringify(order),
+  );
+  const included = (): Promise<number> =>
+    p.evaluate(() => (window as any).__app.store.getSelectedCount());
+  await p.locator('.thumb[tabindex="0"]').focus();
+  const firstName = await p.evaluate(() =>
+    document.activeElement?.getAttribute('aria-label'),
+  );
+  await p.keyboard.press('ArrowRight');
+  const secondName = await p.evaluate(() =>
+    document.activeElement?.getAttribute('aria-label'),
+  );
+  const stopsAfter = await p.locator('.thumb[tabindex="0"]').count();
+  const before = await included();
+  await p.keyboard.press('Space');
+  await waitDrawn(p);
+  const afterSpace = await included();
+  await p.keyboard.press('Enter');
+  await waitDrawn(p);
+  const afterEnter = await included();
+  await p.keyboard.press('End');
+  const lastIsActive = await p.evaluate(() => {
+    const all = [...document.querySelectorAll('.thumb')];
+    return document.activeElement === all.at(-1);
+  });
+  await p.keyboard.press('Home');
+  const homeFirst = await p.evaluate(
+    () => document.activeElement === document.querySelector('.thumb'),
+  );
+  check(
+    'thumbnails: ArrowRight moves focus (still one tab stop), Space and Enter toggle, End and Home jump',
+    firstName !== secondName &&
+      stopsAfter === 1 &&
+      afterSpace === before - 1 &&
+      afterEnter === before &&
+      lastIsActive &&
+      homeFirst,
+    `${String(firstName)} -> ${String(secondName)}, ${String(before)} -> ${String(afterSpace)} -> ${String(afterEnter)}`,
+  );
+  // Expanded: ArrowDown moves to the next row.
+  await toggle.click();
+  await p.locator('.thumb').first().focus();
+  await p.keyboard.press('ArrowDown');
+  const down = await p.evaluate(() => {
+    const a = document.activeElement!.getBoundingClientRect();
+    const first = document.querySelector('.thumb')!.getBoundingClientRect();
+    return a.top > first.top;
+  });
+  check('expanded tray: ArrowDown moves to the next row', down);
+  await toggle.click();
+  await waitDrawn(p);
 }
 
 const trayCount = (p: Page): Promise<string> =>
@@ -1233,8 +1307,16 @@ async function checkCanvasSettings(p: Page): Promise<void> {
     `${String(outOfRange.width)} x ${String(outOfRange.height)}`,
   );
   await width.press('Escape');
-  await p.locator('.preset', { hasText: /^16:9$/ }).click();
-  await waitDrawn(p);
+  const setSize = async (w: number, h: number): Promise<void> => {
+    await lock.uncheck();
+    await width.fill(String(w));
+    await width.press('Enter');
+    await height.fill(String(h));
+    await height.press('Enter');
+    await lock.check();
+    await waitDrawn(p);
+  };
+  await setSize(1920, 1080);
   check(
     'the largest sizes work: 20000 x 20000 unlocked',
     await (async () => {
@@ -1246,12 +1328,75 @@ async function checkCanvasSettings(p: Page): Promise<void> {
       await waitDrawn(p);
       const big = await canvasInfo(p);
       const fine = big.width === 20000 && big.height === 20000;
-      await lock.check();
-      await p.locator('.preset', { hasText: /^16:9$/ }).click();
-      await waitDrawn(p);
+      await setSize(1920, 1080);
       return fine;
     })(),
   );
+
+  // Presets keep the current long side (the resolution), and the active
+  // preset does nothing.
+  await setSize(3840, 2160);
+  const keep = await commitsDuring(async () => {
+    await p.locator('.preset', { hasText: /^1:1$/ }).click();
+  });
+  const square = await canvasInfo(p);
+  const noop = await commitsDuring(async () => {
+    await p.locator('.preset', { hasText: /^1:1$/ }).click();
+  });
+  await p.locator('.preset', { hasText: /^9:16$/ }).click();
+  await waitDrawn(p);
+  const tall = await canvasInfo(p);
+  check(
+    'presets keep the long side: from 3840 x 2160, 1:1 gives 3840 x 3840 and 9:16 gives 2160 x 3840; the active preset does nothing',
+    square.width === 3840 &&
+      square.height === 3840 &&
+      keep.commits === 1 &&
+      noop.commits === 0 &&
+      tall.width === 2160 &&
+      tall.height === 3840,
+    `${String(square.width)}x${String(square.height)}, ${String(noop.commits)} commits on the active preset, ${String(tall.width)}x${String(tall.height)}`,
+  );
+  await setSize(1920, 1080);
+
+  // The lock at 5:7 keeps the exact ratio.
+  await p.locator('.preset', { hasText: /^5:7$/ }).click();
+  await waitDrawn(p);
+  await height.fill('7000');
+  await height.press('Enter');
+  await waitDrawn(p);
+  const fiveSeven = await canvasInfo(p);
+  check(
+    'lock at 5:7: height 7000 gives width 5000 (the exact ratio)',
+    fiveSeven.width === 5000 && fiveSeven.height === 7000,
+    `${String(fiveSeven.width)} x ${String(fiveSeven.height)}`,
+  );
+  await setSize(1920, 1080);
+
+  // An error in one field survives committing the other.
+  await lock.uncheck();
+  await width.fill('abc');
+  await width.press('Enter');
+  await height.fill('1000');
+  await height.press('Enter');
+  await waitDrawn(p);
+  const kept = await canvasInfo(p);
+  check(
+    "committing one size field keeps the other field's invalid text and its error",
+    kept.height === 1000 &&
+      kept.width === 1920 &&
+      (await width.inputValue()) === 'abc' &&
+      (await width.getAttribute('aria-invalid')) === 'true' &&
+      (await message.innerText()).includes('Width'),
+  );
+  await width.press('Escape');
+  check(
+    "Escape clears that field's error and restores it",
+    (await width.inputValue()) === '1920' &&
+      (await message.isHidden()) &&
+      (await height.inputValue()) === '1000',
+  );
+  await lock.check();
+  await setSize(1920, 1080);
 
   // 3. Readout always visible: with the tray expanded, scrolled, at 900 px.
   const visibleEverywhere: boolean[] = [];
@@ -1273,6 +1418,18 @@ async function checkCanvasSettings(p: Page): Promise<void> {
   const slider = p.locator('#border');
   await editorAction(p, 'setBackground', '#ff00ff');
   await waitDrawn(p);
+  // The slider has a fixed 0 to 10% scale. Re-roll until this arrangement
+  // can draw at least 4%, so the drags below are not limited.
+  for (let i = 0; i < 40; i++) {
+    const avail = await p.evaluate(async (module) => {
+      const m = await import(/* @vite-ignore */ module);
+      return m.borderRange((window as any).__app.editor.getState())
+        .available as number;
+    }, SETTINGS_MODULE);
+    if (avail >= 0.04) break;
+    await p.getByRole('button', { name: 'Shuffle' }).click();
+    await waitDrawn(p);
+  }
   const arrB = await arrangementOf(p);
   const tilesB = await tilePhotos(p);
   const noBorder = await borderPixels(p, [255, 0, 255]);
@@ -1287,7 +1444,7 @@ async function checkCanvasSettings(p: Page): Promise<void> {
   const dragBorder = await commitsDuring(async () => {
     await p.mouse.move(sat(0), sy);
     await p.mouse.down();
-    for (const f of [0.1, 0.3, 0.6, 0.45, 0.5]) {
+    for (const f of [0.1, 0.2, 0.3, 0.2, 0.25]) {
       await p.mouse.move(sat(f), sy, { steps: 5 });
     }
     await p.mouse.up();
@@ -1321,9 +1478,9 @@ async function checkCanvasSettings(p: Page): Promise<void> {
 
   // Further drag to a larger border: margin grows.
   const bigger = await commitsDuring(async () => {
-    await p.mouse.move(sat(0.5), sy);
+    await p.mouse.move(sat(0.25), sy);
     await p.mouse.down();
-    await p.mouse.move(sat(0.9), sy, { steps: 8 });
+    await p.mouse.move(sat(0.38), sy, { steps: 8 });
     await p.mouse.up();
   });
   const wide = await borderPixels(p, [255, 0, 255]);
@@ -1338,9 +1495,9 @@ async function checkCanvasSettings(p: Page): Promise<void> {
   });
   check('tabbing through the slider commits nothing', clickSame.commits === 0);
   const cancelled = await commitsDuring(async () => {
-    await p.mouse.move(sat(0.9), sy);
+    await p.mouse.move(sat(0.38), sy);
     await p.mouse.down();
-    await p.mouse.move(sat(0.3), sy, { steps: 5 });
+    await p.mouse.move(sat(0.1), sy, { steps: 5 });
     await slider.dispatchEvent('pointercancel');
     await p.evaluate(() => {
       document.querySelector<HTMLInputElement>('#border')!.blur();
@@ -1370,12 +1527,13 @@ async function checkCanvasSettings(p: Page): Promise<void> {
       (await borderPixels(p, [255, 0, 255])).bgPixels === 0,
   );
 
-  // The slider's range follows the arrangement; the request is kept.
+  // The slider's scale is fixed (0 to 10%): the thumb shows the request and
+  // never moves on a re-roll; only the shaded unavailable part changes.
   await editorAction(p, 'setBorder', 0.25);
   await waitDrawn(p);
-  const ranges: string[] = [];
+  const avails: string[] = [];
   const rangeProblems: string[] = [];
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 8; i++) {
     await p.getByRole('button', { name: 'Shuffle' }).click();
     await waitDrawn(p);
     const r = await p.evaluate(async (module) => {
@@ -1387,27 +1545,34 @@ async function checkCanvasSettings(p: Page): Promise<void> {
       return {
         sliderMax: Number(el.max),
         sliderValue: Number(el.value),
-        max: range.max,
+        avail: el.style.getPropertyValue('--available'),
+        expectAvail: Math.min(1, range.available / range.scale),
         requested: e.canvas.borderFraction,
         limited: range.limited,
         noteShown: !note.hidden,
         note: note.textContent,
+        label: document.querySelector('output[for=border]')!.textContent,
       };
     }, SETTINGS_MODULE);
-    ranges.push(r.max.toFixed(3));
-    if (Math.abs(r.sliderMax - r.max) > 1e-9)
-      rangeProblems.push(`max ${String(r.sliderMax)} vs ${String(r.max)}`);
-    if (Math.abs(r.sliderValue - Math.min(r.requested, r.max)) > 1e-9)
-      rangeProblems.push(`value ${String(r.sliderValue)}`);
+    avails.push(Number(r.avail).toFixed(2));
+    if (r.sliderMax !== 0.1 || r.sliderValue !== 0.1)
+      rangeProblems.push(
+        `scale ${String(r.sliderMax)} value ${String(r.sliderValue)}`,
+      );
+    if (Math.abs(Number(r.avail) - r.expectAvail) > 1e-9)
+      rangeProblems.push(`shade ${r.avail} vs ${String(r.expectAvail)}`);
     if (r.requested !== 0.25)
       rangeProblems.push(`request changed to ${String(r.requested)}`);
     if (!r.limited || !r.noteShown || !r.note.includes('You asked for 25.0%'))
       rangeProblems.push(`note: ${r.note}`);
+    // The label and the note give the same request.
+    if (!r.note.includes(`You asked for ${r.label}`))
+      rangeProblems.push(`label ${r.label} vs note ${r.note}`);
   }
   check(
-    'after each re-roll the slider range follows the new arrangement, the 25% request is kept and a note says less is drawn',
-    rangeProblems.length === 0 && new Set(ranges).size > 1,
-    `${rangeProblems.join('; ')} maxima ${ranges.join(' ')}`,
+    'border slider: fixed 0 to 10% scale, the thumb and the 25% request never move on a re-roll, the shaded part changes, the label and note agree',
+    rangeProblems.length === 0 && new Set(avails).size > 1,
+    `${rangeProblems.join('; ')} available share of track ${avails.join(' ')}`,
   );
   const limitedDraw = await borderPixels(p, [255, 0, 255]);
   const shownMax = await p.evaluate(() => {
@@ -1464,6 +1629,12 @@ async function checkCanvasSettings(p: Page): Promise<void> {
       for (const c of ['#112233', '#2255aa', '#44aa22', '#ddaa00', '#ff00ff']) {
         el.value = c;
         el.dispatchEvent(new Event('input', { bubbles: true }));
+        if (c === '#2255aa') {
+          // The picker is a separate window on some platforms: focus can
+          // leave and come back while it is open. That is not an end.
+          el.blur();
+          el.focus();
+        }
       }
     });
     await p.waitForTimeout(50);
@@ -1485,6 +1656,33 @@ async function checkCanvasSettings(p: Page): Promise<void> {
       (await canvasInfo(p)).background === '#ff00ff',
     `${String(pickerOnce.commits)} commits, ${String(pickerOnce.steps)} steps`,
   );
+  // The picker returns to the colour it opened with (Chrome fires no
+  // change), then a swatch is clicked: exactly one commit.
+  const staleSwatch = await commitsDuring(async () => {
+    await p.evaluate(() => {
+      const el =
+        document.querySelector<HTMLInputElement>('#background-colour')!;
+      el.focus();
+      for (const c of ['#123456', '#ff00ff']) {
+        el.value = c;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+    await p.waitForTimeout(50);
+    await p.getByRole('button', { name: 'Black background' }).click();
+  });
+  check(
+    'picker returned to its start (no change event), then a swatch click: one commit',
+    staleSwatch.commits === 1,
+    `${String(staleSwatch.commits)} commits`,
+  );
+  await p.evaluate(() => {
+    (window as any).__app.editor.dispatch((s: any) => ({
+      ...s,
+      canvas: { ...s.canvas, background: '#ff00ff' },
+    }));
+  });
+  await waitDrawn(p);
   const fillOnce = await commitsDuring(async () => {
     await p.locator('#background-colour').fill('#00aa44');
   });

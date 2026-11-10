@@ -223,6 +223,67 @@ describe('GestureInput on the colour picker', () => {
   });
 });
 
+describe('GestureInput: one commit per action, whatever else happens', () => {
+  it('picker: input, (focus lost and regained), input, change is one commit', () => {
+    // The picker ends only on `change`, so the blur in the middle never
+    // reaches the gesture.
+    const { editor, colour, frame, commits } = setup();
+    colour.move('#102030');
+    frame();
+    colour.move('#405060');
+    frame();
+    colour.move('#708090');
+    frame();
+    colour.end('#708090'); // change
+    expect(commits()).toBe(1);
+    expect(editor.getState().canvas.background).toBe('#708090');
+  });
+
+  it('a late end event after a commit from elsewhere commits nothing more', () => {
+    const { editor, colour, border, frame, commits } = setup();
+    border.move(0.02);
+    frame();
+    // Shuffle (or any other dispatch) commits the drag in progress.
+    editor.shuffle();
+    expect(commits()).toBe(1);
+    border.end(0.02); // the late pointerup / change / blur
+    border.end(0.02);
+    expect(commits()).toBe(1);
+    // Nor does a late end of a control that stepped and was committed away.
+    colour.move('#123456');
+    frame();
+    editor.dispatch((s) => setBorder(s, 0.03));
+    expect(commits()).toBe(2);
+    colour.end('#123456');
+    expect(commits()).toBe(2);
+  });
+
+  it('a picker returned to its starting colour (no change event), then a swatch click: one commit', () => {
+    const { editor, colour, frame, commits } = setup();
+    colour.move('#123456');
+    frame();
+    colour.move('#ffffff'); // back where it started; Chrome fires no change
+    frame();
+    expect(commits()).toBe(0);
+    editor.dispatch((s) => setBackground(s, '#000000')); // the swatch
+    expect(commits()).toBe(1);
+    colour.end('#ffffff'); // a later blur, if it were wired
+    expect(commits()).toBe(1);
+    expect(editor.getState().canvas.background).toBe('#000000');
+  });
+
+  it('a stale end before a dial drag commits nothing', () => {
+    const { editor, border, frame, commits } = setup();
+    border.move(0.01);
+    frame();
+    editor.shuffle(); // commits
+    const before = commits();
+    border.end(0.01);
+    editor.dragVariation(0.9);
+    expect(commits()).toBe(before);
+  });
+});
+
 describe('EditorStore.drag', () => {
   it('notifies as transient, and a dispatch commits it', () => {
     const editor = new EditorStore({ seed: 1 });

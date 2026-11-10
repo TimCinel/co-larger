@@ -40,23 +40,27 @@ export const RATIO_PRESETS: readonly RatioPreset[] = [
   preset(16, 9),
 ];
 
-/**
- * Choosing a preset sets the canvas's longer side to this many pixels and
- * the shorter side to match: 16:9 is 1920 × 1080, 9:16 is 1080 × 1920, 1:1
- * is 1920 × 1920, 4:5 is 1536 × 1920 and 5:7 is 1371 × 1920 (rounded to a
- * whole pixel). Full HD is a size every screen shows and every printer
- * can scale from; the editor is not tied to it (type any size, or use the
- * paper sizes of #7).
- */
-export const PRESET_LONG_SIDE = 1920;
+/** The longer side of a new canvas, and of the presets from it: 1920 px. */
+export const DEFAULT_LONG_SIDE = 1920;
 
-/** The pixel size choosing `preset` gives. */
-export function presetSize(p: RatioPreset): {
-  readonly width: number;
-  readonly height: number;
-} {
-  const long = PRESET_LONG_SIDE;
-  const short = Math.round((long * Math.min(p.w, p.h)) / Math.max(p.w, p.h));
+/**
+ * The pixel size choosing `preset` gives: the preset's ratio with the
+ * canvas's current longer side (`longSide`), so a ratio click never silently
+ * changes the resolution. From the default 1920 × 1080, 16:9 is 1920 × 1080,
+ * 9:16 is 1080 × 1920, 1:1 is 1920 × 1920, 4:5 is 1536 × 1920 and 5:7 is
+ * 1371 × 1920 (rounded to a whole pixel); from 3840 × 2160, 1:1 is 3840 × 3840,
+ * and clicking the preset already active changes nothing. (A paper size at
+ * 300 DPI, #7, keeps its resolution the same way.)
+ */
+export function presetSize(
+  p: RatioPreset,
+  longSide: number = DEFAULT_LONG_SIDE,
+): { readonly width: number; readonly height: number } {
+  const long = Math.min(MAX_CANVAS_SIDE, Math.max(1, Math.round(longSide)));
+  const short = Math.max(
+    1,
+    Math.round((long * Math.min(p.w, p.h)) / Math.max(p.w, p.h)),
+  );
   return p.w >= p.h
     ? { width: long, height: short }
     : { width: short, height: long };
@@ -81,6 +85,17 @@ export function activePreset(
       (p) => Math.abs(ratio / (p.w / p.h) - 1) <= PRESET_MATCH_TOLERANCE,
     ) ?? null
   );
+}
+
+/**
+ * The ratio (width / height) the aspect lock keeps for a canvas of this
+ * size: the active preset's exact ratio when there is one (so 5:7 stays
+ * exactly 5:7 and height 7000 gives width 5000, not 4998), otherwise the
+ * size's own ratio.
+ */
+export function lockRatioFor(width: number, height: number): number {
+  const p = activePreset(width, height);
+  return p ? p.w / p.h : width / height;
 }
 
 export type Side = 'width' | 'height';
@@ -153,6 +168,11 @@ export function resizeBySide(request: ResizeRequest): SizeResult {
   const parsed = parseSide(request.text, side);
   if (!parsed.ok) return parsed;
   const value = parsed.value;
+  // Re-entering the side's current value changes nothing (rather than
+  // re-deriving the other side from a rounded ratio).
+  if (value === current[side]) {
+    return { ok: true, width: current.width, height: current.height };
+  }
   if (!lock) {
     return side === 'width'
       ? { ok: true, width: value, height: current.height }
@@ -176,45 +196,55 @@ export function resizeBySide(request: ResizeRequest): SizeResult {
 /** One step of the border slider: 0.1% of the canvas's shorter side. */
 export const BORDER_STEP = 0.001;
 
+/**
+ * The slider's fixed scale: 0 to 10% of the shorter side. Fixed, so a thumb
+ * position always means the same border and a re-roll never moves it. (The
+ * state accepts up to MAX_BORDER_FRACTION, 25%, but no arrangement of more
+ * than a few photos can draw that much; 10% is more than most can.)
+ */
+export const BORDER_SLIDER_MAX = 0.1;
+
 /** What the border control shows for a state. */
 export interface BorderRange {
-  /** The slider's largest value (a fraction of the shorter side). */
-  readonly max: number;
-  /** The slider's value: what was asked for, up to `max`. */
+  /** The slider's scale: always BORDER_SLIDER_MAX. */
+  readonly scale: number;
+  /** The slider's value: what was asked for, up to `scale`. */
   readonly value: number;
   /** What the user asked for (a fraction of the shorter side). */
   readonly requested: number;
   /** What is drawn (a fraction), at most `requested`. */
   readonly drawn: number;
+  /** Whole pixels at the canvas's size: the label and the note use these. */
   readonly requestedPx: number;
   readonly drawnPx: number;
+  /**
+   * The most the current arrangement can draw, as a fraction of the shorter
+   * side; the part of the track beyond it is shaded as unavailable.
+   */
+  readonly available: number;
   /** True when less is drawn than was asked for. */
   readonly limited: boolean;
 }
 
-/** Rounds down to a whole number of slider steps. */
-const floorToStep = (fraction: number): number =>
-  Math.floor(fraction / BORDER_STEP + 1e-9) * BORDER_STEP;
-
 /**
- * The border slider's range and what to show beside it. Its maximum is the
- * most the current arrangement allows (borderAt's `max`, which keeps tiles
- * reasonably shaped), at most MAX_BORDER_FRACTION, in whole slider steps. A
- * re-roll or a new size can lower it below the stored request; the request
- * is kept, the slider shows it clamped, and `limited` says less is drawn.
+ * The border slider's numbers for a state. The scale is fixed; `available`
+ * (borderAt's `max`, which keeps tiles reasonably shaped) changes with the
+ * arrangement. A re-roll or new size can lower it below the stored request:
+ * the request is kept and the thumb stays, and `limited` says less is drawn.
  */
 export function borderRange(state: EditorState): BorderRange {
   const { width, height, borderFraction } = state.canvas;
   const short = Math.min(width, height);
   const at = borderAt(state);
-  const max = floorToStep(Math.min(MAX_BORDER_FRACTION, at.max / short));
+  const requestedPx = Math.round(at.requested);
   return {
-    max,
-    value: Math.min(borderFraction, max),
+    scale: BORDER_SLIDER_MAX,
+    value: Math.min(borderFraction, BORDER_SLIDER_MAX),
     requested: borderFraction,
     drawn: at.effective / short,
-    requestedPx: at.requested,
+    requestedPx,
     drawnPx: at.effective,
-    limited: at.effective < Math.round(at.requested),
+    available: Math.min(MAX_BORDER_FRACTION, at.max / short),
+    limited: at.effective < requestedPx,
   };
 }
