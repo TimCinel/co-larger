@@ -157,6 +157,53 @@ button.primary:hover:not(:disabled) {
   position: relative;
 }
 
+/* The collage fills the main area; the view sizes the canvas itself. */
+.collage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.collage-canvas {
+  display: block;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 45%);
+}
+
+.collage-canvas[hidden],
+.canvas-hint[hidden] {
+  display: none;
+}
+
+/* Size-variation dial and Shuffle, at the right of the top bar. */
+.layout-controls {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.layout-controls label {
+  font-size: 0.9rem;
+}
+
+.dial-end {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.layout-controls input[type='range'] {
+  width: 12rem;
+  accent-color: var(--accent);
+}
+
+.layout-controls input[type='range']:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 3px;
+  border-radius: 4px;
+}
+
 .canvas-hint {
   color: var(--muted);
   margin: 0;

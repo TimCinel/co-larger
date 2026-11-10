@@ -5,6 +5,13 @@ import {
   type Decoder,
   type ImportProgress,
 } from './photos';
+import {
+  createCollageView,
+  createLayoutControls,
+  EditorStore,
+  FrameScheduler,
+  type CollageView,
+} from './editor';
 import { installDropTarget } from './ui/dropzone';
 import { createNotices, summaryMessages } from './ui/notices';
 import { createTray } from './ui/tray';
@@ -16,17 +23,26 @@ export interface AppOptions {
   readonly decode?: Decoder;
 }
 
+/** What renderApp returns, for later code (and tests) to build on. */
+export interface App {
+  /** The photos: files, previews, thumbnails, included flags. */
+  readonly store: PhotoStore;
+  /** The editor state: canvas, dial, seed, arrangement, crops. */
+  readonly editor: EditorStore;
+  /** The collage canvas in the main area. */
+  readonly view: CollageView;
+}
+
 /**
  * Renders the app into `root`, replacing its contents: a top bar with the
- * "Add photos" button, the main area (the collage canvas arrives in issue #5)
- * and the tray below it. Returns the photo store so later code can build on it.
+ * "Add photos" button and the layout controls, the main area with the
+ * collage, and the tray below it.
  */
-export function renderApp(
-  root: HTMLElement,
-  options: AppOptions = {},
-): PhotoStore {
+export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   const doc = root.ownerDocument;
   const store = options.store ?? new PhotoStore();
+  const editor = new EditorStore();
+  const frames = new FrameScheduler(doc.defaultView as Window);
   const importer = new PhotoImporter(store, {
     decode: options.decode ?? decodePhoto,
   });
@@ -68,20 +84,26 @@ export function renderApp(
   announcer.className = 'sr-only';
   announcer.setAttribute('role', 'status');
 
-  header.append(title, addButton, progress, announcer, input);
+  const layoutControls = createLayoutControls(doc, editor, frames);
+
+  header.append(title, addButton, progress, announcer, input, layoutControls);
 
   const notices = createNotices(doc);
 
-  // Main area: placeholder for the collage canvas.
+  // Main area: the collage, or a hint when it is empty.
   const main = doc.createElement('main');
   main.className = 'canvas-area';
-  const hint = doc.createElement('p');
-  hint.className = 'canvas-hint';
-  hint.textContent = 'Drop photos anywhere on this page, or use Add photos.';
+  const view = createCollageView({
+    doc,
+    editor,
+    photos: store,
+    frames,
+    area: main,
+  });
   const dropOverlay = doc.createElement('div');
   dropOverlay.className = 'drop-overlay';
   dropOverlay.textContent = 'Drop photos to add them';
-  main.append(hint, dropOverlay);
+  main.append(view.element, dropOverlay);
 
   const tray = createTray(doc, store);
 
@@ -121,5 +143,5 @@ export function renderApp(
   importer.subscribe(showProgress);
 
   // The drop overlay is shown through the `dragging` class on the shell.
-  return store;
+  return { store, editor, view };
 }
