@@ -2730,6 +2730,53 @@ async function checkSelection(
     (await kind()) === 'idle' && (await commits()) === 0,
   );
 
+  // Keyboard focus is visible as soon as Tab reaches the canvas.
+  const focusIndicator = (): Promise<boolean> =>
+    p.evaluate(() => {
+      const box = document.querySelector<HTMLElement>('.tile-focus')!;
+      const r = box.getBoundingClientRect();
+      return (
+        !box.hidden &&
+        r.width > 4 &&
+        r.height > 4 &&
+        document.activeElement?.classList.contains('collage-canvas') === true
+      );
+    });
+  const tabToCanvas = async (): Promise<void> => {
+    for (let i = 0; i < 60; i++) {
+      await p.keyboard.press('Tab');
+      if (
+        await p.evaluate(() =>
+          document.activeElement?.classList.contains('collage-canvas'),
+        )
+      ) {
+        return;
+      }
+    }
+  };
+  await p.evaluate(() => {
+    (document.activeElement as HTMLElement).blur();
+  });
+  await tabToCanvas();
+  check(
+    'Tab to the canvas shows a focus indicator before any arrow key',
+    await focusIndicator(),
+  );
+  await clickTile(1);
+  await p.keyboard.press('Escape');
+  check(
+    'after a mouse click the focus indicator is not shown',
+    !(await p.evaluate(
+      () => !document.querySelector<HTMLElement>('.tile-focus')!.hidden,
+    )),
+  );
+  await p.keyboard.press('Shift+Tab');
+  await tabToCanvas();
+  check(
+    'after a mouse click, Shift+Tab then Tab shows the focus indicator again',
+    await focusIndicator(),
+  );
+
   // Keyboard: focus the canvas, move, select, reach the menu with Tab.
   await p.locator('.collage-canvas').focus();
   await p.keyboard.press('ArrowRight');

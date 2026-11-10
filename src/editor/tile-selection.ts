@@ -359,6 +359,9 @@ export function createTileSelection(
     }
   });
   canvas.addEventListener('focus', () => {
+    // Keyboard focus (not a mouse click) shows the focus indicator at once,
+    // before any arrow key.
+    keyboardMode = canvas.matches(':focus-visible');
     if (focusedId === null && selection.kind !== 'idle') {
       focusedId = selection.photoId;
     }
