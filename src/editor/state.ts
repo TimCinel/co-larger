@@ -41,6 +41,7 @@ import {
   arrangementStep,
   assignPhotos,
   maxBorder,
+  maxBorderForAspect,
   placeLayout,
   planAspectLimit,
   planLayout,
@@ -68,9 +69,8 @@ export interface CanvasSettings {
    * This is the border the user asked for, and no action other than
    * setBorder changes it. What is drawn is clamped to what the current
    * arrangement allows (see borderAt), so re-rolls, drags and size changes
-   * never lose the user's setting. The border control (#6) can show both
-   * with borderAt, and may want to offer the tighter `maxBorderForAspect`
-   * limit.
+   * never lose the user's setting. The border control shows both, from
+   * borderAt.
    */
   readonly borderFraction: number;
   /** Shown in the border and gaps: a lower-case `#rrggbb` colour. */
@@ -96,9 +96,7 @@ export const RATIO_TOLERANCE = 0.005;
 /** Photo aspect ratios accepted in a loaded state: 1:1000 to 1000:1. */
 export const MAX_PHOTO_ASPECT = 1000;
 
-/**
- * Until the canvas settings UI (#6) exists: 1920 × 1080, no border, white.
- */
+/** A new canvas: 1920 × 1080, no border, white. */
 export const DEFAULT_CANVAS: CanvasSettings = Object.freeze({
   width: 1920,
   height: 1080,
@@ -292,16 +290,26 @@ export interface BorderAt {
   /** What is drawn: `requested`, clamped to `max` (whole pixels). */
   readonly effective: number;
   /**
-   * The largest border at which every tile of the current arrangement keeps
-   * at least one pixel (`maxBorder` with snapping); Infinity when empty.
+   * The largest border the current arrangement allows (whole pixels):
+   * every tile keeps at least one pixel (`maxBorder`) and none is more
+   * stretched than MAX_TILE_ASPECT (`maxBorderForAspect`), both with
+   * snapping. Infinity when empty. The border control's range ends here, so
+   * what it offers is what is drawn.
    */
   readonly max: number;
 }
 
 /**
+ * No tile may be more stretched than this (long side over short side) by
+ * the border: the planner keeps tiles within 2.5:1 with no border, and this
+ * leaves room for a border to stretch them a little more.
+ */
+export const MAX_TILE_ASPECT = 3;
+
+/**
  * The border at `size` (default: the canvas's own pixel size): requested,
  * drawn and the current maximum, in pixels at that size. The renderer draws
- * `effective`; the settings UI (#6) can show all three.
+ * `effective`; the border control shows all three.
  */
 export function borderAt(
   state: EditorState,
@@ -313,7 +321,12 @@ export function borderAt(
   const max =
     state.plan.root === null || width < 1 || height < 1
       ? Infinity
-      : maxBorder(state.plan, width, height, { snap: true });
+      : Math.min(
+          maxBorder(state.plan, width, height, { snap: true }),
+          maxBorderForAspect(state.plan, width, height, MAX_TILE_ASPECT, {
+            snap: true,
+          }),
+        );
   return { requested, effective: Math.min(Math.round(requested), max), max };
 }
 

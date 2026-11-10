@@ -1,3 +1,25 @@
+export {
+  createCanvasSettings,
+  createSizeReadout,
+  formatSize,
+} from './canvas-controls';
+export {
+  activePreset,
+  BORDER_SLIDER_MAX,
+  BORDER_STEP,
+  lockRatioFor,
+  borderRange,
+  parseSide,
+  presetSize,
+  DEFAULT_LONG_SIDE,
+  RATIO_PRESETS,
+  resizeBySide,
+  type BorderRange,
+  type RatioPreset,
+  type ResizeRequest,
+  type Side,
+  type SizeResult,
+} from './canvas-settings';
 export { createLayoutControls, describeVariation } from './controls';
 export {
   coverSource,
@@ -9,6 +31,7 @@ export {
   type SourceRect,
 } from './crop';
 export { DialInput, type DialEditor } from './dial';
+export { GestureInput, type GestureTarget } from './gesture';
 export { FrameScheduler, type FrameTask } from './frames';
 export { ImageCache, type CachePhoto, type DecodedImage } from './images';
 export {
@@ -42,6 +65,7 @@ export {
   isAssignmentCached,
   MAX_BORDER_FRACTION,
   MAX_CANVAS_SIDE,
+  MAX_TILE_ASPECT,
   MAX_PHOTO_ASPECT,
   randomSeed,
   RATIO_TOLERANCE,

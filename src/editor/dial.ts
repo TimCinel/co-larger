@@ -1,17 +1,11 @@
 /**
- * The dial's gesture logic, separate from the DOM so it can be tested in
- * Node: turns the events a range input fires into drag steps and exactly one
- * commit per gesture.
- *
- * Browsers fire `input` for every movement and `change` when a pointer drag
- * ends or a key changes the value, but `change` does not fire when a drag
- * ends where it started, and neither fires when the drag is cancelled
- * (pointercancel, lost capture, the window losing focus). So every event
- * that can end a gesture calls `end`, and a commit at the value already
- * committed changes nothing and notifies nobody: however many of those
- * events arrive, the gesture commits once.
+ * The size-variation dial's gesture: a GestureInput (see gesture.ts for how
+ * one drag, click or key press gives exactly one commit) wired to the
+ * EditorStore's dial methods, which also defer costly re-assignment for
+ * large collages while the dial moves.
  */
 import type { FrameScheduler } from './frames';
+import { GestureInput } from './gesture';
 import type { EditorStore } from './store';
 
 export type DialEditor = Pick<
@@ -19,36 +13,23 @@ export type DialEditor = Pick<
   'dragVariation' | 'commitVariation' | 'isDragging'
 >;
 
-export class DialInput {
-  private pending: number | null = null;
-
+export class DialInput extends GestureInput<number> {
   constructor(
-    private readonly editor: DialEditor,
-    private readonly frames: Pick<FrameScheduler, 'request' | 'cancel'>,
-  ) {}
-
-  /** The dial moved (`input`). Applied at most once per frame. */
-  move(value: number): void {
-    this.pending = value;
-    this.frames.request('dial', () => {
-      this.pending = null;
-      this.editor.dragVariation(value);
-    });
-  }
-
-  /**
-   * The gesture ended at `value`: on `change`, `pointerup`,
-   * `pointercancel`, `lostpointercapture` or `blur`. Commits once. (Not on
-   * Escape: the pointer may still be down, so the drag would carry on.)
-   */
-  end(value: number): void {
-    this.frames.cancel('dial');
-    this.pending = null;
-    this.editor.commitVariation(value);
-  }
-
-  /** True while a move is waiting for its frame or a drag is uncommitted. */
-  isBusy(): boolean {
-    return this.pending !== null || this.editor.isDragging();
+    editor: DialEditor,
+    frames: Pick<FrameScheduler, 'request' | 'cancel'>,
+  ) {
+    super(
+      {
+        drag: (value) => {
+          editor.dragVariation(value);
+        },
+        commit: (value) => {
+          editor.commitVariation(value);
+        },
+        isDragging: () => editor.isDragging(),
+      },
+      frames,
+      'dial',
+    );
   }
 }

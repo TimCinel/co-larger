@@ -91,7 +91,7 @@ const MAX_RATIO_ERROR = Math.log(1.019);
  * side) in whole pixels at that size and every edge snapped to whole pixels (so neighbouring
  * tiles share an edge exactly and no background shows through
  * anti-aliasing seams). The border drawn is borderAt(...).effective: the
- * requested border, clamped so that every tile keeps at least one pixel.
+ * requested border, clamped to what the arrangement allows (see borderAt).
  */
 export function tilesFor(state: EditorState, size: RenderSize): Tile[] {
   const width = Math.round(size.width);

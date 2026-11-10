@@ -274,6 +274,19 @@ export class EditorStore {
   }
 
   /**
+   * A step of a continuous gesture on another control (the border slider,
+   * the colour picker): applies `action` to the state, notified as
+   * transient, to be followed by one `dispatch` of the action at the final
+   * value. The action must depend only on its value, as setBorder and
+   * setBackground do, so the committed result does not depend on the path.
+   * Ends a dial drag's deferred assignment first (see settleNow).
+   */
+  drag(action: (state: EditorState) => EditorState): void {
+    this.settleNow();
+    this.set(action(this.state), true);
+  }
+
+  /**
    * Ends a dial drag (or a keyboard step) at `value`, and commits. Calling
    * it again with the same value does nothing, so the several events that
    * can end one gesture (change, pointerup, blur) commit it only once.

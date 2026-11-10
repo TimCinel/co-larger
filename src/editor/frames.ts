@@ -1,12 +1,22 @@
 /**
  * Coalesces work into animation frames. Each kind of task runs at most once
  * per frame, in a fixed order, so input handled in a frame (photo changes,
- * dial moves) is drawn in the same frame rather than the next.
+ * control drags) is drawn in the same frame rather than the next.
  */
 
-/** Task kinds, in the order they run within a frame. */
-export type FrameTask = 'photos' | 'dial' | 'render';
-const ORDER: readonly FrameTask[] = ['photos', 'dial', 'render'];
+/**
+ * Task kinds, in the order they run within a frame. Each continuous control
+ * (see GestureInput) has its own kind, so two controls never replace each
+ * other's queued step.
+ */
+export type FrameTask = 'photos' | 'dial' | 'border' | 'background' | 'render';
+const ORDER: readonly FrameTask[] = [
+  'photos',
+  'dial',
+  'border',
+  'background',
+  'render',
+];
 
 export interface FrameHost {
   requestAnimationFrame(callback: FrameRequestCallback): number;
