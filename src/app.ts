@@ -16,6 +16,7 @@ import {
   type CollageView,
   type TileSelection,
 } from './editor';
+import { browserDeps, createExportControls } from './export';
 import { installDropTarget } from './ui/dropzone';
 import { createNotices, summaryMessages } from './ui/notices';
 import { createTray } from './ui/tray';
@@ -156,7 +157,14 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   workspace.className = 'workspace';
   // The panel comes first in the DOM, so Tab reaches it before the tray's
   // thumbnails; CSS (`order`) keeps it on the right.
-  workspace.append(createCanvasSettings(doc, editor, frames), stage);
+  const settings = createCanvasSettings(doc, editor, frames);
+  settings
+    .querySelector('.settings-footer')
+    ?.append(
+      createExportControls({ doc, editor, photos: store, deps: browserDeps })
+        .element,
+    );
+  workspace.append(settings, stage);
   shell.append(header, workspace);
   root.replaceChildren(shell);
 

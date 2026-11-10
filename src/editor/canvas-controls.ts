@@ -656,7 +656,7 @@ export function createCanvasSettings(
     }
   }
 
-  // Room for #7 (physical sizes) above, and export and save (#11, #12) here.
+  // Export (#11) is added here by the app; save (#12) will follow.
   const footer = doc.createElement('div');
   footer.className = 'settings-footer';
   panel.append(footer);
