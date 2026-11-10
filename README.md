@@ -10,7 +10,7 @@ placeholder page.
 
 ## Development
 
-Requires Node.js 22.13 or later.
+Requires Node.js 24 or later.
 
 ```sh
 npm install
