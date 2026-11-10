@@ -5,6 +5,17 @@
  * in Node.
  */
 import {
+  formatMm,
+  MAX_DPI,
+  MAX_MM,
+  MIN_DPI,
+  MIN_MM,
+  MM_DECIMALS,
+  pixelsFromMm,
+  roundMm,
+  type PhysicalSize,
+} from './physical';
+import {
   borderAt,
   MAX_BORDER_FRACTION,
   MAX_CANVAS_SIDE,
@@ -247,4 +258,243 @@ export function borderRange(state: EditorState): BorderRange {
     available: Math.min(MAX_BORDER_FRACTION, at.max / short),
     limited: at.effective < requestedPx,
   };
+}
+
+// --- Physical sizes (#7) -----------------------------------------------------
+
+/** A paper size, in millimetres, in one orientation. */
+export interface PaperPreset {
+  /** "A4". */
+  readonly name: string;
+  readonly orientation: 'portrait' | 'landscape';
+  readonly widthMm: number;
+  readonly heightMm: number;
+}
+
+const ISO_A: readonly (readonly [string, number, number])[] = [
+  ['A4', 210, 297],
+  ['A3', 297, 420],
+  ['A2', 420, 594],
+];
+
+/** A4, A3 and A2, each portrait then landscape (ISO 216). */
+export const PAPER_PRESETS: readonly PaperPreset[] = ISO_A.flatMap(
+  ([name, short, long]) => [
+    { name, orientation: 'portrait', widthMm: short, heightMm: long },
+    { name, orientation: 'landscape', widthMm: long, heightMm: short },
+  ],
+);
+
+/** "A4 portrait". */
+export const paperLabel = (p: PaperPreset): string =>
+  `${p.name} ${p.orientation}`;
+
+/** The paper preset with exactly these millimetres, or null. */
+export function activePaper(
+  physical: PhysicalSize | undefined,
+): PaperPreset | null {
+  if (physical === undefined) return null;
+  return (
+    PAPER_PRESETS.find(
+      (p) => p.widthMm === physical.widthMm && p.heightMm === physical.heightMm,
+    ) ?? null
+  );
+}
+
+/**
+ * The physical size choosing a ratio preset gives: the preset's ratio with
+ * the current longer side in millimetres, at the current DPI (so, like the
+ * pixel version, a ratio click never changes the resolution). The shorter
+ * side is rounded to MM_DECIMALS.
+ */
+export function presetPhysical(
+  p: RatioPreset,
+  current: PhysicalSize,
+): PhysicalSize {
+  const long = Math.max(current.widthMm, current.heightMm);
+  const short = Math.max(
+    MIN_MM,
+    roundMm((long * Math.min(p.w, p.h)) / Math.max(p.w, p.h)),
+  );
+  return p.w >= p.h
+    ? { widthMm: long, heightMm: short, dpi: current.dpi }
+    : { widthMm: short, heightMm: long, dpi: current.dpi };
+}
+
+export type MmSide = 'widthMm' | 'heightMm';
+
+const mmName = (side: MmSide): string =>
+  side === 'widthMm' ? 'Width' : 'Height';
+
+const MM_RANGE = `${String(MIN_MM)} to ${String(MAX_MM)} mm`;
+const DPI_RANGE = `${String(MIN_DPI)} to ${String(MAX_DPI)}`;
+
+/**
+ * Reads what was typed into a millimetre field: a positive number with a
+ * decimal point or comma and at most MM_DECIMALS decimals, from MIN_MM to
+ * MAX_MM. No units, signs, exponents or thousands separators.
+ */
+export function parseMm(
+  text: string,
+  side: MmSide,
+):
+  | { readonly ok: true; readonly value: number }
+  | { readonly ok: false; readonly message: string } {
+  const name = mmName(side);
+  const trimmed = text.trim();
+  if (trimmed === '') {
+    return {
+      ok: false,
+      message: `${name} is empty. Enter a length in millimetres, ${MM_RANGE}.`,
+    };
+  }
+  if (!/^(?:\d+(?:[.,]\d{1,3})?|[.,]\d{1,3})$/.test(trimmed)) {
+    return {
+      ok: false,
+      message: `${name} must be a plain number of millimetres, such as 297 or 148.5, with at most ${String(MM_DECIMALS)} decimals and no units or separators.`,
+    };
+  }
+  const value = Number(trimmed.replace(',', '.'));
+  if (value < MIN_MM) {
+    return {
+      ok: false,
+      message: `${name} must be at least ${String(MIN_MM)} mm.`,
+    };
+  }
+  if (value > MAX_MM) {
+    return {
+      ok: false,
+      message: `${name} can be at most ${String(MAX_MM)} mm.`,
+    };
+  }
+  return { ok: true, value };
+}
+
+/** Reads what was typed into the DPI field: a whole number, MIN_DPI to MAX_DPI. */
+export function parseDpi(
+  text: string,
+):
+  | { readonly ok: true; readonly value: number }
+  | { readonly ok: false; readonly message: string } {
+  const trimmed = text.trim();
+  if (trimmed === '') {
+    return {
+      ok: false,
+      message: `DPI is empty. Enter a whole number, ${DPI_RANGE}.`,
+    };
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    return {
+      ok: false,
+      message: `DPI must be a whole number, ${DPI_RANGE}, with no decimals, units or separators.`,
+    };
+  }
+  const value = Number(trimmed);
+  if (value < MIN_DPI) {
+    return { ok: false, message: `DPI must be at least ${String(MIN_DPI)}.` };
+  }
+  if (value > MAX_DPI) {
+    return { ok: false, message: `DPI can be at most ${String(MAX_DPI)}.` };
+  }
+  return { ok: true, value };
+}
+
+export type PhysicalResult =
+  | { readonly ok: true; readonly physical: PhysicalSize }
+  | { readonly ok: false; readonly message: string };
+
+/**
+ * Checks that a physical size gives pixel sides from 1 to MAX_CANVAS_SIDE,
+ * or says which side does not and why. `edited` names the field to blame.
+ */
+export function checkPhysicalFits(
+  physical: PhysicalSize,
+  edited: MmSide | 'dpi',
+): PhysicalResult {
+  const { widthMm, heightMm, dpi } = physical;
+  const sides = [
+    ['Width', widthMm],
+    ['Height', heightMm],
+  ] as const;
+  for (const [name, mm] of sides) {
+    const px = pixelsFromMm(mm, dpi);
+    if (px >= 1 && px <= MAX_CANVAS_SIDE) continue;
+    const what = `${name} ${formatMm(mm)} mm at ${String(dpi)} DPI is ${String(px)} px`;
+    const fix =
+      px > MAX_CANVAS_SIDE
+        ? `more than the ${String(MAX_CANVAS_SIDE)} px limit`
+        : 'less than 1 px';
+    const advice =
+      edited === 'dpi'
+        ? 'Choose another DPI.'
+        : px > MAX_CANVAS_SIDE
+          ? 'Choose a smaller size or a lower DPI, or turn the ratio lock off.'
+          : 'Choose a larger size or a higher DPI.';
+    return { ok: false, message: `${what}, ${fix}. ${advice}` };
+  }
+  return { ok: true, physical };
+}
+
+export interface MmResizeRequest {
+  /** The field that was edited. */
+  readonly side: MmSide;
+  /** What was typed into it. */
+  readonly text: string;
+  readonly current: PhysicalSize;
+  /** The aspect lock; when on, the other side follows to keep `ratio`. */
+  readonly lock: boolean;
+  /** The ratio (width / height) the lock keeps. */
+  readonly ratio: number;
+}
+
+/**
+ * The physical size to apply after editing a millimetre field, or why it
+ * cannot be applied. With the lock on, the other side is the edited one
+ * scaled by the locked ratio, rounded to MM_DECIMALS. The result must give
+ * whole pixel sides from 1 to MAX_CANVAS_SIDE. Re-entering the current
+ * value changes nothing.
+ */
+export function resizeByMm(request: MmResizeRequest): PhysicalResult {
+  const { side, current, lock, ratio } = request;
+  const parsed = parseMm(request.text, side);
+  if (!parsed.ok) return parsed;
+  const value = parsed.value;
+  if (value === current[side]) return { ok: true, physical: current };
+  let next: PhysicalSize;
+  if (!lock) {
+    next = { ...current, [side]: value };
+  } else {
+    const followed = roundMm(
+      side === 'widthMm' ? value / ratio : value * ratio,
+    );
+    if (followed < MIN_MM || followed > MAX_MM) {
+      const other = side === 'widthMm' ? 'height' : 'width';
+      return {
+        ok: false,
+        message:
+          `${mmName(side)} ${formatMm(value)} mm would make the ${other} ${formatMm(followed)} mm, ` +
+          `outside ${MM_RANGE}. Choose another size or turn the ratio lock off.`,
+      };
+    }
+    next =
+      side === 'widthMm'
+        ? { ...current, widthMm: value, heightMm: followed }
+        : { ...current, widthMm: followed, heightMm: value };
+  }
+  return checkPhysicalFits(next, side);
+}
+
+/**
+ * The physical size to apply after editing the DPI field (the millimetres
+ * stay, the pixels change), or why it cannot be applied. Re-entering the
+ * current DPI changes nothing.
+ */
+export function resizeByDpi(
+  text: string,
+  current: PhysicalSize,
+): PhysicalResult {
+  const parsed = parseDpi(text);
+  if (!parsed.ok) return parsed;
+  if (parsed.value === current.dpi) return { ok: true, physical: current };
+  return checkPhysicalFits({ ...current, dpi: parsed.value }, 'dpi');
 }

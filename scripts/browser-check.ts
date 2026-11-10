@@ -1,12 +1,14 @@
 /**
  * Local real-browser check for photo import (issue #4), the editor canvas
- * (issue #5) and the canvas settings and page layout (issue #6). Not run in
+ * (issue #5), the canvas settings and page layout (issue #6) and physical
+ * canvas sizes (issue #7). Not run in
  * CI: it needs
  * a locally installed Chrome. Decoding, EXIF handling and drag and drop cannot
  * be verified in Node.
  *
  *   node scripts/browser-check.ts                 # synthetic fixtures
  *   node scripts/browser-check.ts --screenshot    # also rewrite docs/screenshots/issue-6-*.png
+ *   node scripts/browser-check.ts --physical-screenshot  # and docs/screenshots/issue-7-*.png
  *   node scripts/browser-check.ts --tray-screenshot  # and docs/screenshots/photo-tray.png
  *   node scripts/browser-check.ts --dir <folder>  # also import a folder of real
  *                                                  # photos and report timing
@@ -1701,6 +1703,606 @@ async function checkCanvasSettings(p: Page): Promise<void> {
   await waitDrawn(p);
 }
 
+/**
+ * Physical canvas sizes (issue #7): units, paper presets, millimetres and
+ * DPI, in real Chrome with the 40-odd synthetic photos already imported.
+ */
+async function checkPhysicalSizes(p: Page): Promise<void> {
+  await p.locator('.preset', { hasText: /^16:9$/ }).click();
+  await waitDrawn(p);
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__physCommits = 0;
+    w.__physSteps = 0;
+    w.__app.editor.subscribe((_: unknown, change: any) => {
+      if (change.transient) w.__physSteps++;
+      else w.__physCommits++;
+    });
+  });
+  const commitsDuring = async (
+    gesture: () => Promise<void>,
+  ): Promise<number> => {
+    await p.evaluate(() => {
+      (window as any).__physCommits = 0;
+      (window as any).__physSteps = 0;
+    });
+    await gesture();
+    await p.waitForTimeout(100);
+    await waitDrawn(p);
+    return p.evaluate(() => (window as any).__physCommits as number);
+  };
+  const physical = (): Promise<any> =>
+    p.evaluate(
+      () => (window as any).__app.editor.getState().canvas.physical ?? null,
+    );
+  const sizeText = async (): Promise<string> => {
+    const c = await canvasInfo(p);
+    return `${String(c.width)}x${String(c.height)}`;
+  };
+  const value = (id: string): Promise<string> => p.locator(id).inputValue();
+  const asPixels = p.getByRole('radio', { name: 'Pixels' });
+  const asMm = p.getByRole('radio', { name: 'Millimetres' });
+  const paper = (name: string) => p.getByRole('button', { name });
+  const message = p.locator('#size-message');
+  const mmW = p.locator('#size-width-mm');
+  const mmH = p.locator('#size-height-mm');
+  const dpi = p.locator('#size-dpi');
+  const lock = p.getByLabel('Lock aspect ratio');
+  const nPhotos = await p.evaluate(() =>
+    (window as any).__app.store.getSelectedCount(),
+  );
+
+  // Labels and structure.
+  const labelled = await p.evaluate(
+    () =>
+      ['size-width-mm', 'size-height-mm', 'size-dpi'].every(
+        (id) => document.querySelector(`label[for=${id}]`) !== null,
+      ) &&
+      document
+        .querySelector('[role=radiogroup]')
+        ?.getAttribute('aria-label') === 'Size units',
+  );
+  check(
+    'the millimetre and DPI fields and the units choice are labelled',
+    labelled,
+  );
+
+  // 1. Pixel mode is the default: no physical size, no paper presets.
+  check(
+    'pixel mode by default: pixels pressed, no physical size, paper presets and mm fields hidden',
+    (await asPixels.isChecked()) &&
+      !(await asMm.isChecked()) &&
+      (await physical()) === null &&
+      !(await paper('A4 portrait').isVisible()) &&
+      !(await mmW.isVisible()) &&
+      (await p.locator('#size-width').isVisible()),
+  );
+  check(
+    'pixel mode: the readout is pixels only and the border label has no mm',
+    (await readout(p)).text === '1920 × 1080 px' &&
+      !(await p.locator('.slider-row output').innerText()).includes('mm'),
+  );
+  const arr16 = await arrangementOf(p);
+
+  // 2. Entering millimetres keeps the size, one commit, no re-roll.
+  let commits = await commitsDuring(async () => {
+    await asMm.check();
+  });
+  let phys = await physical();
+  check(
+    'switching to millimetres keeps 1920 x 1080 px, converts to mm at 300 DPI, one commit, same arrangement',
+    commits === 1 &&
+      (await sizeText()) === '1920x1080' &&
+      phys?.widthMm === 162.56 &&
+      phys?.heightMm === 91.44 &&
+      phys?.dpi === 300 &&
+      (await arrangementOf(p)) === arr16,
+    `${String(commits)} commits, ${JSON.stringify(phys)}`,
+  );
+  check(
+    'millimetre mode shows the fields, the paper presets and the derived pixel size',
+    (await value('#size-width-mm')) === '162.56' &&
+      (await value('#size-height-mm')) === '91.44' &&
+      (await value('#size-dpi')) === '300' &&
+      (await paper('A4 portrait').isVisible()) &&
+      !(await p.locator('#size-width').isVisible()) &&
+      (await p.locator('#size-derived').innerText()) === '= 1920 × 1080 px',
+  );
+  check(
+    'the top-bar readout shows the paper size, DPI and pixels',
+    (await readout(p)).text === '162.56 × 91.44 mm at 300 DPI · 1920 × 1080 px',
+    (await readout(p)).text,
+  );
+  commits = await commitsDuring(async () => {
+    await asMm.click();
+  });
+  check('choosing the units already chosen commits nothing', commits === 0);
+
+  // 3. Leaving it keeps the pixels and drops the physical description.
+  commits = await commitsDuring(async () => {
+    await asPixels.check();
+  });
+  check(
+    'switching back to pixels keeps 1920 x 1080, drops the physical size, one commit, same arrangement',
+    commits === 1 &&
+      (await sizeText()) === '1920x1080' &&
+      (await physical()) === null &&
+      (await value('#size-width')) === '1920' &&
+      (await readout(p)).text === '1920 × 1080 px' &&
+      (await arrangementOf(p)) === arr16,
+  );
+
+  // 4. A2 portrait at 300 DPI.
+  await asMm.check();
+  await waitDrawn(p);
+  const before = await arrangementOf(p);
+  const t0 = Date.now();
+  commits = await commitsDuring(async () => {
+    await paper('A2 portrait').click();
+  });
+  const a2ms = Date.now() - t0;
+  phys = await physical();
+  check(
+    'A2 portrait at 300 DPI gives a 4961 x 7016 px canvas, one commit, re-rolled',
+    commits === 1 &&
+      (await sizeText()) === '4961x7016' &&
+      phys?.widthMm === 420 &&
+      phys?.heightMm === 594 &&
+      phys?.dpi === 300 &&
+      (await arrangementOf(p)) !== before,
+    `${await sizeText()}, ${String(commits)} commits`,
+  );
+  check(
+    'A2 portrait: readout, fields, derived size and pressed state',
+    (await readout(p)).text === '420 × 594 mm at 300 DPI · 4961 × 7016 px' &&
+      (await value('#size-width-mm')) === '420' &&
+      (await value('#size-height-mm')) === '594' &&
+      (await p.locator('#size-derived').innerText()) === '= 4961 × 7016 px' &&
+      (await p.locator('.paper-preset[aria-pressed=true]').count()) === 1 &&
+      (await paper('A2 portrait').getAttribute('aria-pressed')) === 'true',
+    (await readout(p)).text,
+  );
+  commits = await commitsDuring(async () => {
+    await paper('A2 portrait').click();
+  });
+  check(
+    'clicking the paper preset already active commits nothing',
+    commits === 0,
+  );
+  const big = await drawnStats(p);
+  const backing = await p.evaluate(() => {
+    const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    return c.width * c.height;
+  });
+  check(
+    'at A2 300 DPI the editor draws at screen size (not 35 million px) with every tile and full coverage',
+    backing < 4_000_000 &&
+      big.tiles === nPhotos &&
+      Math.abs(big.coverage - 1) < 1e-9 &&
+      Math.abs(big.canvasW / big.canvasH - 4961 / 7016) < 0.01,
+    `backing ${String(backing)} px, ${String(big.tiles)} tiles`,
+  );
+
+  // 5. A3 landscape at 300 DPI.
+  commits = await commitsDuring(async () => {
+    await paper('A3 landscape').click();
+  });
+  phys = await physical();
+  check(
+    'A3 landscape at 300 DPI gives a 4961 x 3508 px canvas, one commit',
+    commits === 1 &&
+      (await sizeText()) === '4961x3508' &&
+      phys?.widthMm === 420 &&
+      phys?.heightMm === 297,
+    `${await sizeText()}, ${String(commits)} commits`,
+  );
+  check(
+    'only A3 landscape is pressed among the paper presets',
+    (await p.locator('.paper-preset[aria-pressed=true]').count()) === 1 &&
+      (await paper('A3 landscape').getAttribute('aria-pressed')) === 'true',
+  );
+
+  // 6. DPI: the pixel size changes, the layout and the relative border do not.
+  await editorAction(p, 'setBackground', '#000000');
+  await editorAction(p, 'setBorder', 0.02);
+  await waitDrawn(p);
+  const arr0 = await arrangementOf(p);
+  const tiles0 = await tilePhotos(p);
+  const edge0 = await borderPixels(p, [0, 0, 0]);
+  const stats0 = await drawnStats(p);
+  const rel0 = edge0.margin / Math.min(stats0.canvasW, stats0.canvasH);
+  const label = await p.locator('.slider-row output').innerText();
+  check(
+    'physical mode: the border label shows pixels and millimetres (2.0% of 297 mm is 5.9 mm)',
+    label.includes('2.0%') && label.includes('5.9 mm') && label.includes('px'),
+    label,
+  );
+  const dpiProblems: string[] = [];
+  for (const [d, expected] of [
+    [150, '2480x1754'],
+    [72, '1191x842'],
+    [600, '9921x7016'],
+    [300, '4961x3508'],
+  ] as const) {
+    await dpi.fill(String(d));
+    commits = await commitsDuring(async () => {
+      await dpi.press('Enter');
+    });
+    const edge = await borderPixels(p, [0, 0, 0]);
+    const stats = await drawnStats(p);
+    const rel = edge.margin / Math.min(stats.canvasW, stats.canvasH);
+    if (commits !== 1)
+      dpiProblems.push(`${String(d)}: ${String(commits)} commits`);
+    if ((await sizeText()) !== expected)
+      dpiProblems.push(`${String(d)}: ${await sizeText()}`);
+    if ((await arrangementOf(p)) !== arr0)
+      dpiProblems.push(`${String(d)}: re-rolled`);
+    if ((await tilePhotos(p)) !== tiles0)
+      dpiProblems.push(`${String(d)}: photos moved`);
+    if (Math.abs(rel - rel0) > 0.004 || Math.abs(rel - 0.02) > 0.004)
+      dpiProblems.push(
+        `${String(d)}: relative border ${rel.toFixed(4)} vs ${rel0.toFixed(4)}`,
+      );
+    if ((await canvasInfo(p)).border !== 0.02)
+      dpiProblems.push(`${String(d)}: border fraction`);
+    const ph = await physical();
+    if (ph?.widthMm !== 420 || ph?.heightMm !== 297 || ph?.dpi !== d)
+      dpiProblems.push(`${String(d)}: physical ${JSON.stringify(ph)}`);
+    if (
+      (await readout(p)).text !==
+      `420 × 297 mm at ${String(d)} DPI · ${expected.replace('x', ' × ')} px`
+    )
+      dpiProblems.push(`${String(d)}: readout ${(await readout(p)).text}`);
+  }
+  check(
+    'changing DPI at A3 landscape (150, 72, 600, 300) changes the pixel size, keeps the photo-to-tile assignment and the arrangement, the border fraction and its drawn relative width (pixels measured), one commit each',
+    dpiProblems.length === 0,
+    dpiProblems.join('; '),
+  );
+  console.log(
+    `  relative border at 2%: measured ${(rel0 * 100).toFixed(2)}% of the shorter side (margin ${String(edge0.margin)} px)`,
+  );
+
+  // 7. Typing alone commits nothing; blur commits.
+  commits = await commitsDuring(async () => {
+    await dpi.fill('');
+    await dpi.pressSequentially('150', { delay: 20 });
+  });
+  check(
+    'typing a DPI commits nothing on its own',
+    commits === 0 && (await sizeText()) === '4961x3508',
+  );
+  commits = await commitsDuring(async () => {
+    await dpi.press('Tab');
+  });
+  check(
+    'blur commits the DPI, once',
+    commits === 1 && (await sizeText()) === '2480x1754',
+    `${String(commits)} commits`,
+  );
+  await editorAction(p, 'setBorder', 0);
+  await editorAction(p, 'setBackground', '#ffffff');
+
+  // 8. A ratio preset in millimetres keeps the long side in mm and the DPI.
+  const arrA3 = await arrangementOf(p);
+  commits = await commitsDuring(async () => {
+    await p.locator('.preset', { hasText: /^1:1$/ }).click();
+  });
+  phys = await physical();
+  check(
+    'ratio preset 1:1 in millimetres keeps the long side (420 mm) and the DPI (150): 420 x 420 mm, 2480 x 2480 px, one commit, re-rolled',
+    commits === 1 &&
+      phys?.widthMm === 420 &&
+      phys?.heightMm === 420 &&
+      phys?.dpi === 150 &&
+      (await sizeText()) === '2480x2480' &&
+      (await arrangementOf(p)) !== arrA3,
+    `${JSON.stringify(phys)} ${await sizeText()}`,
+  );
+  commits = await commitsDuring(async () => {
+    await p.locator('.preset', { hasText: /^1:1$/ }).click();
+  });
+  check(
+    'clicking the active ratio preset in millimetres commits nothing',
+    commits === 0,
+  );
+  await p.locator('.preset', { hasText: /^3:4$/ }).click();
+  await waitDrawn(p);
+  phys = await physical();
+  check(
+    'ratio preset 3:4 in millimetres: 315 x 420 mm',
+    phys?.widthMm === 315 && phys?.heightMm === 420 && phys?.dpi === 150,
+    JSON.stringify(phys),
+  );
+
+  // 9. The aspect lock works in millimetres.
+  await dpi.fill('300');
+  await dpi.press('Enter');
+  await paper('A4 portrait').click();
+  await waitDrawn(p);
+  const arrA4 = await arrangementOf(p);
+  check('the aspect lock is on in millimetre mode', await lock.isChecked());
+  await mmW.fill('105');
+  commits = await commitsDuring(async () => {
+    await mmW.press('Enter');
+  });
+  phys = await physical();
+  check(
+    'lock on: width 105 mm makes the height 148.5 mm (1240 x 1754 px), one commit, same arrangement',
+    commits === 1 &&
+      phys?.widthMm === 105 &&
+      phys?.heightMm === 148.5 &&
+      (await sizeText()) === '1240x1754' &&
+      (await value('#size-height-mm')) === '148.5' &&
+      (await arrangementOf(p)) === arrA4,
+    `${JSON.stringify(phys)} ${String(commits)} commits`,
+  );
+  await mmH.fill('297');
+  await mmH.press('Enter');
+  await waitDrawn(p);
+  phys = await physical();
+  check(
+    'lock on: height 297 mm makes the width 210 mm, and A4 portrait is pressed again',
+    phys?.widthMm === 210 &&
+      (await paper('A4 portrait').getAttribute('aria-pressed')) === 'true',
+    JSON.stringify(phys),
+  );
+  await mmW.fill('99,9');
+  await mmW.press('Enter');
+  await waitDrawn(p);
+  phys = await physical();
+  check(
+    'a decimal comma is accepted (99,9 mm), and the locked height follows (141.287 mm)',
+    phys?.widthMm === 99.9 && phys?.heightMm === 141.287,
+    JSON.stringify(phys),
+  );
+  await lock.uncheck();
+  await mmW.fill('100');
+  commits = await commitsDuring(async () => {
+    await mmW.press('Enter');
+  });
+  phys = await physical();
+  check(
+    'lock off: only the width changes (100 x 141.287 mm), no paper preset is pressed, one commit',
+    commits === 1 &&
+      phys?.widthMm === 100 &&
+      phys?.heightMm === 141.287 &&
+      (await p.locator('.paper-preset[aria-pressed=true]').count()) === 0,
+    JSON.stringify(phys),
+  );
+  await lock.check();
+  await paper('A4 portrait').click();
+  await waitDrawn(p);
+
+  // 10. Bad input: a message, nothing applied, Escape restores.
+  const base =
+    JSON.stringify(await canvasInfo(p)) + JSON.stringify(await physical());
+  const bad: [string, string, RegExp][] = [
+    ['#size-width-mm', 'abc', /plain number/],
+    ['#size-width-mm', '-5', /plain number/],
+    ['#size-width-mm', '1e3', /plain number/],
+    ['#size-width-mm', '12.3456', /plain number/],
+    ['#size-width-mm', '12 mm', /plain number/],
+    ['#size-width-mm', '', /empty/],
+    ['#size-width-mm', '0', /at least/],
+    ['#size-height-mm', '10001', /at most/],
+    ['#size-height-mm', '99999999999999999999999', /at most/],
+    ['#size-width-mm', '2000', /more than the 20000 px limit/],
+    ['#size-dpi', 'abc', /whole number/],
+    ['#size-dpi', '300.5', /whole number/],
+    ['#size-dpi', '-300', /whole number/],
+    ['#size-dpi', '', /empty/],
+    ['#size-dpi', '0', /at least/],
+    ['#size-dpi', '99999', /at most/],
+    ['#size-dpi', '2400', /more than the 20000 px limit/],
+  ];
+  const badProblems: string[] = [];
+  for (const [id, text, pattern] of bad) {
+    const field = p.locator(id);
+    const original = await field.inputValue();
+    const n = await commitsDuring(async () => {
+      await field.fill(text);
+      await field.press('Enter');
+    });
+    const msg = (await message.isVisible()) ? await message.innerText() : '';
+    if (
+      !pattern.test(msg) ||
+      n !== 0 ||
+      (await field.getAttribute('aria-invalid')) !== 'true' ||
+      JSON.stringify(await canvasInfo(p)) + JSON.stringify(await physical()) !==
+        base
+    )
+      badProblems.push(
+        `${id} ${JSON.stringify(text)}: ${msg || 'no message'}, ${String(n)} commits`,
+      );
+    await field.press('Escape');
+    if (
+      (await message.isVisible()) ||
+      (await field.inputValue()) !== original ||
+      (await field.getAttribute('aria-invalid')) !== null
+    )
+      badProblems.push(`${id}: Escape did not restore`);
+  }
+  check(
+    'bad millimetre and DPI input (text, negatives, exponent, units, too many decimals, empty, zero, huge, over 20000 px) shows an inline message and applies nothing; Escape restores',
+    badProblems.length === 0,
+    badProblems.join('; '),
+  );
+  // Per-field errors: one field's error survives committing the other.
+  await mmW.fill('abc');
+  await mmW.press('Enter');
+  await dpi.fill('0');
+  await dpi.press('Enter');
+  const both = (await message.innerText()).split('\n');
+  check(
+    'each field keeps its own error (width and DPI both shown)',
+    both.length === 2 &&
+      (await mmW.getAttribute('aria-invalid')) === 'true' &&
+      (await dpi.getAttribute('aria-invalid')) === 'true',
+    both.join(' | '),
+  );
+  await mmW.press('Escape');
+  await dpi.press('Escape');
+  // The largest sizes: A4 at 1200 DPI fits, and a paper that does not fit
+  // at the current DPI is refused with a message.
+  await paper('A4 portrait').click();
+  await dpi.fill('1200');
+  await dpi.press('Enter');
+  await waitDrawn(p);
+  check(
+    'A4 portrait at 1200 DPI is 9921 x 14031 px',
+    (await sizeText()) === '9921x14031',
+    await sizeText(),
+  );
+  const atBig = JSON.stringify(await canvasInfo(p));
+  commits = await commitsDuring(async () => {
+    await paper('A2 portrait').click();
+  });
+  check(
+    'a paper that would exceed 20000 px at the current DPI (A2 at 1200 DPI) is refused with a message and commits nothing',
+    commits === 0 &&
+      (await message.isVisible()) &&
+      /A2 portrait.*20000 px limit/.test(await message.innerText()) &&
+      JSON.stringify(await canvasInfo(p)) === atBig,
+    await message.innerText(),
+  );
+  await paper('A4 portrait').click();
+  await dpi.fill('300');
+  await dpi.press('Enter');
+  await paper('A2 portrait').click();
+  await waitDrawn(p);
+  check(
+    'a valid change clears the refusal message',
+    !(await message.isVisible()) && (await sizeText()) === '4961x7016',
+  );
+
+  // 11. Switching modes keeps the size.
+  const a2size = await sizeText();
+  commits = await commitsDuring(async () => {
+    await asPixels.check();
+  });
+  const afterPixels = await sizeText();
+  commits += await commitsDuring(async () => {
+    await asMm.check();
+  });
+  phys = await physical();
+  check(
+    'A2 at 300 DPI -> pixels -> millimetres keeps 4961 x 7016 px (two commits); the DPI is remembered',
+    commits === 2 &&
+      a2size === '4961x7016' &&
+      afterPixels === '4961x7016' &&
+      (await sizeText()) === '4961x7016' &&
+      phys?.dpi === 300,
+    `${a2size} ${afterPixels} ${await sizeText()} ${String(commits)}`,
+  );
+
+  // 12. A pixel-mode edit drops the physical size.
+  await asPixels.check();
+  await p.locator('#size-width').fill('1000');
+  await p.locator('#size-width').press('Enter');
+  await waitDrawn(p);
+  check(
+    'a pixel edit leaves a pixel project: no physical size, readout in pixels',
+    (await physical()) === null &&
+      /^\d+ × \d+ px$/.test((await readout(p)).text),
+  );
+
+  // 13. Saved state stays valid JSON and reopens in the same mode.
+  await asMm.check();
+  await paper('A3 portrait').click();
+  await waitDrawn(p);
+  const reopened = await p.evaluate(async (module) => {
+    const m = await import(/* @vite-ignore */ module);
+    const s = (window as any).__app.editor.getState();
+    const back = m.validateEditorState(JSON.parse(JSON.stringify(s)));
+    return {
+      same: JSON.stringify(back.canvas) === JSON.stringify(s.canvas),
+      physical: back.canvas.physical,
+    };
+  }, STATE_MODULE);
+  check(
+    'the state, saved to JSON and validated, reopens in millimetres with the same numbers',
+    reopened.same &&
+      reopened.physical.widthMm === 297 &&
+      reopened.physical.heightMm === 420 &&
+      reopened.physical.dpi === 300,
+    JSON.stringify(reopened.physical),
+  );
+
+  // 14. Keyboard: the units choice works with arrow keys, with a visible focus.
+  await asPixels.check();
+  await asPixels.focus();
+  commits = await commitsDuring(async () => {
+    await p.keyboard.press('ArrowRight');
+  });
+  const focusRing = await p.evaluate(() => {
+    const radio = document.activeElement as HTMLInputElement;
+    const face = radio.nextElementSibling as HTMLElement;
+    return {
+      value: radio.value,
+      outline: getComputedStyle(face).outlineStyle,
+    };
+  });
+  check(
+    'keyboard: arrow key on the units choice selects millimetres (one commit) and shows a focus ring',
+    commits === 1 &&
+      focusRing.value === 'physical' &&
+      focusRing.outline !== 'none',
+    JSON.stringify(focusRing),
+  );
+  await mmW.focus();
+  const mmRing = await p.evaluate(
+    () => getComputedStyle(document.activeElement!).outlineStyle,
+  );
+  check('the millimetre field has a visible focus ring', mmRing !== 'none');
+
+  // 15. Responsiveness at A2 300 DPI with the photos in the tray.
+  await paper('A2 portrait').click();
+  await waitDrawn(p);
+  const timings = await p.evaluate(async (module) => {
+    const m = await import(/* @vite-ignore */ module);
+    const app = (window as any).__app;
+    const frame = (): Promise<void> =>
+      new Promise((r) => {
+        requestAnimationFrame(() => {
+          r();
+        });
+      });
+    const out: Record<string, number> = {};
+    const time = async (name: string, act: () => void): Promise<void> => {
+      const start = performance.now();
+      act();
+      await frame();
+      await frame();
+      out[name] = Math.round(performance.now() - start);
+    };
+    await time('shuffle', () => {
+      app.editor.shuffle();
+    });
+    await time('dpi', () => {
+      const s = app.editor.getState().canvas.physical;
+      app.editor.dispatch((st: any) =>
+        m.setPhysicalSize(st, s.widthMm, s.heightMm, 150),
+      );
+    });
+    return out;
+  }, STATE_MODULE);
+  await waitDrawn(p);
+  check(
+    'A2 at 300 DPI with a few dozen photos stays responsive: shuffle and a DPI change draw within 2 s',
+    timings.shuffle! < 2000 && timings.dpi! < 2000,
+    `shuffle ${String(timings.shuffle)} ms, dpi change ${String(timings.dpi)} ms, A2 click to drawn ${String(a2ms)} ms, ${String(nPhotos)} photos`,
+  );
+  console.log(
+    `  A2 300 DPI, ${String(nPhotos)} photos: A2 click to drawn ${String(a2ms)} ms, shuffle ${String(timings.shuffle)} ms, DPI change ${String(timings.dpi)} ms`,
+  );
+
+  // Leave a clean pixel state for whatever runs next.
+  await p.locator('.preset', { hasText: /^16:9$/ }).click();
+  await asPixels.check();
+  await waitDrawn(p);
+}
+
 /** At device pixel ratio 2 the canvas has twice the CSS pixels: sharp. */
 async function checkPixelRatio(
   browser: import('playwright-core').Browser,
@@ -2137,6 +2739,7 @@ await checkEditor(page);
 await checkEditorContracts(page);
 await checkLayout(page);
 await checkCanvasSettings(page);
+await checkPhysicalSizes(page);
 await checkPixelRatio(browser);
 
 // 7a. Screenshots for issue #6 (synthetic images only), only when asked for:
@@ -2161,6 +2764,34 @@ if (process.argv.includes('--screenshot')) {
     path: join(root, 'docs', 'screenshots', 'issue-6-tray-expanded.png'),
   });
   await page.getByRole('button', { name: 'Show one row' }).click();
+}
+
+// 7a2. Screenshots for issue #7 (synthetic images only), only when asked for:
+// the panel in millimetres with A2 portrait at 300 DPI, then a DPI that
+// does not fit, with its inline error.
+if (process.argv.includes('--physical-screenshot')) {
+  mkdirSync(join(root, 'docs', 'screenshots'), { recursive: true });
+  await page.evaluate(() => {
+    document.querySelector('.tray-grid')!.scrollLeft = 0;
+  });
+  await page.getByRole('radio', { name: 'Millimetres' }).check();
+  await page.locator('#size-dpi').fill('300');
+  await page.locator('#size-dpi').press('Enter');
+  await page.getByRole('button', { name: 'A2 portrait' }).click();
+  await setDial(page, 0.7);
+  await editorAction(page, 'setBorder', 0.012);
+  await editorAction(page, 'setBackground', '#e8d9b5');
+  await waitDrawn(page);
+  await page.screenshot({
+    path: join(root, 'docs', 'screenshots', 'issue-7-physical.png'),
+  });
+  await page.locator('#size-dpi').fill('2400');
+  await page.locator('#size-dpi').press('Enter');
+  await page.screenshot({
+    path: join(root, 'docs', 'screenshots', 'issue-7-physical-error.png'),
+  });
+  await page.locator('#size-dpi').press('Escape');
+  await page.getByRole('radio', { name: 'Pixels' }).check();
 }
 
 // 7b. Screenshot of the tray for issue #4, only when asked for, so a normal
