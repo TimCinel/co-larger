@@ -4,37 +4,34 @@
  * this module. No DOM, no blobs, no class instances, so it is unit-testable
  * in Node and later issues get the following almost for free:
  *
- * - Undo and redo (#10): a stack of snapshots. Every action returns a new
- *   object and never mutates its input, and unchanged parts keep their
- *   identity, so snapshots are cheap to keep.
+ * - Undo and redo (#10): a stack of snapshots, restored with
+ *   EditorStore.restore. Every action returns a new object and never mutates
+ *   its input; an action that changes nothing returns its input itself, so
+ *   `next === state` means "nothing happened".
  * - Save and load (#12): `JSON.stringify(state)` and
- *   `validateEditorState(JSON.parse(text))`. The plan and the assignment are
- *   stored, not re-derived from the seed, as the layout library asks (its
- *   results depend on floating-point details that may differ between
- *   browsers).
- * - Export (#11): renderCollage (render.ts) draws a snapshot at any size.
+ *   `validateEditorState(JSON.parse(text), { photoIds })`, then
+ *   EditorStore.restore. The plan and the assignment are stored, not
+ *   re-derived from the seed, as the layout library asks (its results depend
+ *   on floating-point details that may differ between browsers).
+ * - Export (#11): render.ts draws a snapshot at any size.
  *
- * Relation to PhotoStore: the PhotoStore owns the photos themselves (the
- * original files, the preview and thumbnail blobs, the tray's include
- * toggles) and is the source of truth for which photos exist and which are
- * included. The editor state refers to photos only by id, and keeps the
- * included photos' ids and aspect ratios (`photos`), which is all layout and
- * assignment need. The app copies the included set from the store into the
- * state (setPhotos) whenever the store changes. Keeping the ids and aspects
- * here rather than reading the store makes every action a pure function of
- * the snapshot, makes a snapshot self-describing (an undo step that removed
- * a photo knows which photos it had; #10 then sets the store's include flags
- * back from `photos`), and lets the JSON be validated without the files.
+ * The state refers to photos only by id, and keeps the included photos' ids
+ * and aspect ratios (`photos`), which is all layout and assignment need. How
+ * it is kept in step with the PhotoStore is described in store.ts.
  *
  * Re-roll rules (spec.md): a re-roll replaces the plan and the assignment.
  *
- * - Re-roll: shuffle (new seed), setVariation, setCanvasSize when the ratio
- *   changes, and setPhotos when the set of included photos changes.
- * - No re-roll: setBorder, setBackground, setCanvasSize at the same ratio,
- *   setCrop.
+ * - Re-roll: shuffle (new seed), setVariation (new value), setCanvasSize
+ *   when the ratio changes, and setPhotos when the set of included photos
+ *   changes.
+ * - No re-roll: setBorder, setBackground, setCrop, and setCanvasSize at the
+ *   same ratio (within RATIO_TOLERANCE, so changing DPI at a fixed paper
+ *   size, which rounds to slightly different ratios, keeps the layout).
  * - Crops belong to the photo and survive re-rolls (and exclusion). They are
  *   dropped only when the photo leaves the store (forgetPhotos).
- * - Manual swaps (#8: `swapSlots` on `assignment`) do not survive a re-roll.
+ * - Manual swaps (#8: `swapSlots` on `assignment`) do not survive a re-roll,
+ *   but survive every action that does not re-roll, including setting the
+ *   dial to the value it already has.
  *
  * Determinism: after any re-roll the plan and the assignment are a function
  * of (canvas ratio, photos, variation, seed) only, never of the previous
@@ -43,10 +40,12 @@
 import {
   arrangementStep,
   assignPhotos,
+  maxBorder,
   placeLayout,
   planLayout,
   validateAssignment,
   validatePlan,
+  type LayoutNode,
   type LayoutPlan,
   type PhotoShape,
 } from '../layout';
@@ -54,19 +53,38 @@ import { DEFAULT_CROP, isDefaultCrop, normaliseCrop, type Crop } from './crop';
 
 /** The output canvas. Lengths are in output pixels. */
 export interface CanvasSettings {
-  /** Output width in pixels. */
+  /** Output width in whole pixels, 1 to MAX_CANVAS_SIDE. */
   readonly width: number;
-  /** Output height in pixels. */
+  /** Output height in whole pixels, 1 to MAX_CANVAS_SIDE. */
   readonly height: number;
   /**
-   * Outer margin and gap between tiles, in output pixels. The renderer
-   * scales it with the output and clamps it so no tile vanishes; the
-   * settings UI (#6, #7) should clamp it with maxBorderForAspect.
+   * Outer margin and gap between tiles, in output pixels. Never more than
+   * the arrangement allows (`maxBorder` with snapping, so every tile keeps
+   * at least one pixel): setBorder clamps it, and so does every re-roll,
+   * because the safe maximum depends on the arrangement. The border control
+   * (#6) should offer the tighter `maxBorderForAspect` limit and re-clamp
+   * after each re-roll. The renderer scales it with the output size.
    */
   readonly border: number;
-  /** Shown in the border and gaps: a `#rrggbb` colour. */
+  /** Shown in the border and gaps: a lower-case `#rrggbb` colour. */
   readonly background: string;
 }
+
+/** The largest canvas side accepted, in pixels (export tops out at 7016). */
+export const MAX_CANVAS_SIDE = 20000;
+
+/**
+ * Two canvas ratios within this relative difference count as the same
+ * ratio: the plan is kept and only rescaled. 0.5% absorbs rounding
+ * millimetres × DPI to whole pixels (A-series paper at 72 dpi and above) and
+ * stays well inside the 2% the layout engine accepts between a plan and the
+ * canvas it is placed on. Measured against the plan's own ratio, so small
+ * changes cannot accumulate.
+ */
+export const RATIO_TOLERANCE = 0.005;
+
+/** Photo aspect ratios accepted in a loaded state: 1:1000 to 1000:1. */
+export const MAX_PHOTO_ASPECT = 1000;
 
 /**
  * Until the canvas settings UI (#6) exists: 1920 × 1080, no border, white.
@@ -81,12 +99,15 @@ export const DEFAULT_CANVAS: CanvasSettings = Object.freeze({
 /** The dial's starting position: halfway between uniform and varied. */
 export const DEFAULT_VARIATION = 0.5;
 
+/** Crops by photo id: an object with no prototype (see cropOf). */
+export type CropMap = Readonly<Record<string, Crop>>;
+
 /** One snapshot of the editor. Plain data: see the module comment. */
 export interface EditorState {
   readonly canvas: CanvasSettings;
   /** The size-variation dial, 0 (uniform) to 1 (varied). */
   readonly variation: number;
-  /** The seed for the plan and the assignment. Shuffle replaces it. */
+  /** The seed for the plan and the assignment: a non-negative integer. */
   readonly seed: number;
   /**
    * The photos in the collage (the store's included photos), in tray order.
@@ -98,11 +119,12 @@ export interface EditorState {
   /** `assignment[slot]` is the id of the photo shown in that slot. */
   readonly assignment: readonly string[];
   /**
-   * Crops by photo id. Photos without an entry use DEFAULT_CROP. Entries
+   * Crops by photo id, with no prototype, so ids like `constructor` or
+   * `__proto__` are safe. Photos without an entry use DEFAULT_CROP. Entries
    * are kept for excluded photos so a crop survives excluding and including
-   * again.
+   * again. Read it with cropOf.
    */
-  readonly crops: Readonly<Record<string, Crop>>;
+  readonly crops: CropMap;
 }
 
 export interface CreateOptions {
@@ -119,19 +141,21 @@ export function createEditorState(options: CreateOptions = {}): EditorState {
   const variation = clampVariation(options.variation ?? DEFAULT_VARIATION);
   const seed = checkSeed(options.seed ?? randomSeed());
   const photos = [...(options.photos ?? [])];
+  const arrangement = arrange(canvas, photos, variation, seed);
   return {
-    canvas,
+    canvas: clampBorder(canvas, arrangement.plan),
     variation,
     seed,
     photos,
-    ...arrange(canvas, photos, variation, seed),
-    crops: {},
+    ...arrangement,
+    crops: emptyCrops(),
   };
 }
 
-/** Re-rolls with a new seed (the Shuffle button). */
+/** Re-rolls with a new seed (the Shuffle button). No-op for the same seed. */
 export function shuffle(state: EditorState, seed: number): EditorState {
   checkSeed(seed);
+  if (seed === state.seed) return state;
   return reroll(state, { seed });
 }
 
@@ -139,15 +163,17 @@ export interface SetVariationOptions {
   /**
    * Replace the plan but keep the current assignment, deferring the costly
    * re-assignment (cubic in the photo count) while the dial is dragged.
-   * The result is provisional: commit with a plain setVariation when the
-   * drag ends. Every photo still has exactly one tile (the slots keep their
+   * The result is provisional: settle it with {@link rearrange} (EditorStore
+   * does this). Every photo still has exactly one tile (the slots keep their
    * numbers), but photos may sit in tiles of the wrong shape.
    */
   readonly keepAssignment?: boolean;
 }
 
 /**
- * Moves the size-variation dial (re-rolls).
+ * Moves the size-variation dial (re-rolls). Returns `state` itself if the
+ * value is unchanged, so a manual swap survives "committing" the dial at the
+ * value it already has.
  *
  * Within one tenth of the dial (one arrangementStep) the plan keeps its
  * structure and slot numbers and only its tiles grow and shrink, and the
@@ -161,12 +187,26 @@ export function setVariation(
   options: SetVariationOptions = {},
 ): EditorState {
   const v = clampVariation(variation);
+  if (v === state.variation) return state;
   if (options.keepAssignment) {
-    if (v === state.variation) return state;
     const plan = planFor(state.canvas, state.photos.length, v, state.seed);
-    return { ...state, variation: v, plan };
+    return {
+      ...state,
+      variation: v,
+      plan,
+      canvas: clampBorder(state.canvas, plan),
+    };
   }
   return reroll(state, { variation: v });
+}
+
+/**
+ * Recomputes the plan and assignment for the state's own inputs: a re-roll
+ * with nothing changed. Discards manual swaps. Used to settle a provisional
+ * state (setVariation with keepAssignment); not a user action.
+ */
+export function rearrange(state: EditorState): EditorState {
+  return reroll(state, {});
 }
 
 /**
@@ -190,21 +230,23 @@ export function forgetPhotos(
   ids: Iterable<string>,
 ): EditorState {
   const doomed = new Set(ids);
-  let crops = state.crops;
-  if (Object.keys(crops).some((id) => doomed.has(id))) {
-    crops = Object.fromEntries(
-      Object.entries(crops).filter(([id]) => !doomed.has(id)),
-    );
-  }
+  const keys = Object.keys(state.crops);
+  const crops = keys.some((id) => doomed.has(id))
+    ? cropsFrom(
+        keys.filter((id) => !doomed.has(id)),
+        state.crops,
+      )
+    : state.crops;
   const photos = state.photos.filter((photo) => !doomed.has(photo.id));
   const next = crops === state.crops ? state : { ...state, crops };
   return setPhotos(next, photos);
 }
 
 /**
- * Sets the canvas size in output pixels. Re-rolls only if the ratio changes;
- * at the same ratio (for example 1920 × 1080 to 3840 × 2160) the plan and
- * assignment are kept.
+ * Sets the canvas size in whole output pixels. Re-rolls only if the ratio
+ * changes by more than RATIO_TOLERANCE from the ratio the plan was made for;
+ * otherwise (for example 1920 × 1080 to 3840 × 2160, or A4 at 300 dpi to
+ * 200 dpi) the plan and assignment are kept.
  */
 export function setCanvasSize(
   state: EditorState,
@@ -218,26 +260,31 @@ export function setCanvasSize(
   ) {
     return state;
   }
-  if (sameRatio(canvas, state.canvas)) return { ...state, canvas };
+  if (sameRatio(canvas.width / canvas.height, state.plan.aspect)) {
+    return { ...state, canvas: clampBorder(canvas, state.plan) };
+  }
   return reroll(state, { canvas });
 }
 
-/** Sets the border in output pixels. Never re-rolls. */
+/**
+ * Sets the border in output pixels, clamped to what the current arrangement
+ * allows (see CanvasSettings.border). Never re-rolls.
+ */
 export function setBorder(state: EditorState, border: number): EditorState {
-  const canvas = checkCanvas({ ...state.canvas, border });
+  const canvas = clampBorder(
+    checkCanvas({ ...state.canvas, border }),
+    state.plan,
+  );
   if (canvas.border === state.canvas.border) return state;
   return { ...state, canvas };
 }
 
-/** Sets the background colour (`#rrggbb`). Never re-rolls. */
+/** Sets the background colour (`#rrggbb`, any case). Never re-rolls. */
 export function setBackground(
   state: EditorState,
   background: string,
 ): EditorState {
-  const canvas = checkCanvas({
-    ...state.canvas,
-    background: background.toLowerCase(),
-  });
+  const canvas = checkCanvas({ ...state.canvas, background });
   if (canvas.background === state.canvas.background) return state;
   return { ...state, canvas };
 }
@@ -249,21 +296,21 @@ export function setCrop(
   crop: Partial<Crop>,
 ): EditorState {
   const next = normaliseCrop(crop);
-  const current = state.crops[photoId];
+  const current = Object.hasOwn(state.crops, photoId)
+    ? state.crops[photoId]
+    : undefined;
   if (current ? sameCrop(current, next) : isDefaultCrop(next)) return state;
-  const crops = { ...state.crops };
-  if (isDefaultCrop(next)) {
-    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
-    delete crops[photoId];
-  } else {
-    crops[photoId] = next;
-  }
+  const keys = Object.keys(state.crops).filter((id) => id !== photoId);
+  const crops = cropsFrom(keys, state.crops) as Record<string, Crop>;
+  if (!isDefaultCrop(next)) crops[photoId] = next;
   return { ...state, crops };
 }
 
 /** A photo's crop, or the default if it has none. */
 export function cropOf(state: EditorState, photoId: string): Crop {
-  return state.crops[photoId] ?? DEFAULT_CROP;
+  return Object.hasOwn(state.crops, photoId)
+    ? (state.crops[photoId] as Crop)
+    : DEFAULT_CROP;
 }
 
 /** A fresh random seed (a 32-bit unsigned integer). */
@@ -323,13 +370,36 @@ export function clearArrangementCache(): void {
   assignmentCache.clear();
 }
 
+export interface ValidateOptions {
+  /**
+   * Every photo id the project has, included or not (for a saved project:
+   * the photos in the zip). Crops may only name these. Defaults to the
+   * state's own (included) photos.
+   */
+  readonly photoIds?: Iterable<string>;
+}
+
 /**
- * Checks a value loaded from JSON (a saved project, #12) and returns it as
- * a clean EditorState. Throws a RangeError if it is not a consistent state:
- * the plan must match the canvas ratio, photo count, variation and seed, and
- * the assignment must place every photo exactly once.
+ * Checks an untrusted value (a saved project, #12) and returns a freshly
+ * built, clean EditorState: no extra fields, no shared references, crops
+ * in a prototype-less object. Throws a RangeError unless:
+ *
+ * - the canvas is whole pixels from 1 to MAX_CANVAS_SIDE, the background is
+ *   `#rrggbb` (any case; normalised to lower case), and the border is within
+ *   what the arrangement allows;
+ * - the variation is 0..1 and the seed a non-negative safe integer;
+ * - every photo has a unique, non-empty string id and an aspect within
+ *   1:MAX_PHOTO_ASPECT and MAX_PHOTO_ASPECT:1;
+ * - the plan is well-formed, matches the photo count, variation and seed and
+ *   (within RATIO_TOLERANCE) the canvas ratio, and gives every tile at least
+ *   one pixel at the canvas size;
+ * - the assignment places every photo exactly once;
+ * - every crop is in range and names a known photo (see ValidateOptions).
  */
-export function validateEditorState(value: unknown): EditorState {
+export function validateEditorState(
+  value: unknown,
+  options: ValidateOptions = {},
+): EditorState {
   if (!isRecord(value)) throw new RangeError('state must be an object');
   const { canvas, variation, seed, photos, plan, assignment, crops } = value;
   if (!isRecord(canvas)) throw new RangeError('canvas must be an object');
@@ -345,35 +415,84 @@ export function validateEditorState(value: unknown): EditorState {
   const checkedSeed = checkSeed(seed as number);
   if (!Array.isArray(photos)) throw new RangeError('photos must be an array');
   const checkedPhotos: PhotoShape[] = photos.map((photo: unknown) => {
-    if (!isRecord(photo) || typeof photo.id !== 'string') {
-      throw new RangeError('each photo needs a string id');
+    if (!isRecord(photo) || typeof photo.id !== 'string' || photo.id === '') {
+      throw new RangeError('each photo needs a non-empty string id');
     }
-    return { id: photo.id, aspect: photo.aspect as number };
+    const aspect = photo.aspect;
+    if (
+      typeof aspect !== 'number' ||
+      !(aspect >= 1 / MAX_PHOTO_ASPECT && aspect <= MAX_PHOTO_ASPECT)
+    ) {
+      throw new RangeError(
+        `photo ${JSON.stringify(photo.id)} has a bad aspect`,
+      );
+    }
+    return { id: photo.id, aspect };
   });
-  const checkedPlan = validatePlan(plan);
+
+  let checkedPlan: LayoutPlan;
+  try {
+    checkedPlan = clonePlan(validatePlan(plan));
+  } catch (error) {
+    throw new RangeError(`invalid plan: ${String(error)}`, { cause: error });
+  }
   if (checkedPlan.count !== checkedPhotos.length) {
     throw new RangeError('plan and photos differ in count');
   }
   if (
-    !sameAspect(checkedPlan.aspect, checkedCanvas.width / checkedCanvas.height)
+    !sameRatio(checkedPlan.aspect, checkedCanvas.width / checkedCanvas.height)
   ) {
     throw new RangeError('plan was made for another canvas ratio');
   }
   if (checkedPlan.variation !== variation || checkedPlan.seed !== seed) {
     throw new RangeError('plan does not match the variation and seed');
   }
+  if (checkedPlan.root !== null) {
+    const tiles = placeLayout(checkedPlan, {
+      width: checkedCanvas.width,
+      height: checkedCanvas.height,
+      snap: true,
+    });
+    if (tiles.some((tile) => tile.width < 1 || tile.height < 1)) {
+      throw new RangeError('plan has tiles smaller than a pixel');
+    }
+    if (
+      checkedCanvas.border >
+      maxBorder(checkedPlan, checkedCanvas.width, checkedCanvas.height, {
+        snap: true,
+      })
+    ) {
+      throw new RangeError('border is too large for the arrangement');
+    }
+  }
+
   if (!Array.isArray(assignment)) {
     throw new RangeError('assignment must be an array');
   }
-  // Also checks every photo's aspect and that ids are unique.
+  // Also checks that ids are unique.
   validateAssignment(assignment, checkedPhotos);
+
   if (!isRecord(crops)) throw new RangeError('crops must be an object');
-  const checkedCrops: Record<string, Crop> = {};
-  for (const [id, crop] of Object.entries(crops)) {
-    if (!isRecord(crop)) throw new RangeError(`crop for ${id} is invalid`);
+  const known = new Set(
+    options.photoIds ?? checkedPhotos.map((photo) => photo.id),
+  );
+  const checkedCrops = emptyCrops() as Record<string, Crop>;
+  for (const id of Object.keys(crops)) {
+    if (!known.has(id)) {
+      throw new RangeError(`crop for unknown photo ${JSON.stringify(id)}`);
+    }
+    const crop = crops[id];
+    if (
+      !isRecord(crop) ||
+      typeof crop.x !== 'number' ||
+      typeof crop.y !== 'number' ||
+      typeof crop.zoom !== 'number'
+    ) {
+      throw new RangeError(`crop for ${JSON.stringify(id)} is invalid`);
+    }
     const normal = normaliseCrop(crop);
     if (!sameCrop(normal, crop as unknown as Crop)) {
-      throw new RangeError(`crop for ${id} is out of range`);
+      throw new RangeError(`crop for ${JSON.stringify(id)} is out of range`);
     }
     if (!isDefaultCrop(normal)) checkedCrops[id] = normal;
   }
@@ -397,10 +516,24 @@ function reroll(
   >,
 ): EditorState {
   const next = { ...state, ...changes };
+  const arrangement = arrange(
+    next.canvas,
+    next.photos,
+    next.variation,
+    next.seed,
+  );
   return {
     ...next,
-    ...arrange(next.canvas, next.photos, next.variation, next.seed),
+    ...arrangement,
+    canvas: clampBorder(next.canvas, arrangement.plan),
   };
+}
+
+/** `canvas` with its border clamped so `plan` keeps every tile >= 1 px. */
+function clampBorder(canvas: CanvasSettings, plan: LayoutPlan): CanvasSettings {
+  if (canvas.border === 0 || plan.root === null) return canvas;
+  const limit = maxBorder(plan, canvas.width, canvas.height, { snap: true });
+  return canvas.border > limit ? { ...canvas, border: limit } : canvas;
 }
 
 function planFor(
@@ -416,6 +549,27 @@ function planFor(
     variation,
     seed,
   });
+}
+
+/** A deep copy of a plan with only the known fields. */
+function clonePlan(plan: LayoutPlan): LayoutPlan {
+  const node = (n: LayoutNode): LayoutNode =>
+    n.kind === 'leaf'
+      ? { kind: 'leaf', slot: n.slot }
+      : {
+          kind: 'split',
+          axis: n.axis,
+          fraction: n.fraction,
+          first: node(n.first),
+          second: node(n.second),
+        };
+  return {
+    aspect: plan.aspect,
+    count: plan.count,
+    variation: plan.variation,
+    seed: plan.seed,
+    root: plan.root === null ? null : node(plan.root),
+  };
 }
 
 const ASSIGNMENT_CACHE_SIZE = 8;
@@ -465,30 +619,54 @@ function canonicalAssignment(
   return assignment;
 }
 
+/** A crop map with no prototype. */
+function emptyCrops(): CropMap {
+  return Object.create(null) as CropMap;
+}
+
+/** A new prototype-less crop map with `keys` copied from `from`. */
+function cropsFrom(keys: readonly string[], from: CropMap): CropMap {
+  const out = emptyCrops() as Record<string, Crop>;
+  for (const key of keys) out[key] = from[key] as Crop;
+  return out;
+}
+
 function checkCanvas(canvas: CanvasSettings): CanvasSettings {
-  const { width, height, border, background } = canvas;
-  if (!isPositive(width) || !isPositive(height)) {
-    throw new RangeError('canvas width and height must be positive numbers');
+  const { width, height, border } = canvas;
+  for (const side of [width, height]) {
+    if (!Number.isInteger(side) || side < 1 || side > MAX_CANVAS_SIDE) {
+      throw new RangeError(
+        `canvas width and height must be whole numbers from 1 to ${String(MAX_CANVAS_SIDE)}`,
+      );
+    }
   }
-  if (!(border >= 0) || !Number.isFinite(border)) {
+  if (
+    typeof border !== 'number' ||
+    !(border >= 0 && border <= MAX_CANVAS_SIDE)
+  ) {
     throw new RangeError('border must be a non-negative number');
   }
-  if (typeof background !== 'string' || !/^#[0-9a-f]{6}$/.test(background)) {
+  const background =
+    typeof canvas.background === 'string'
+      ? canvas.background.toLowerCase()
+      : '';
+  if (!/^#[0-9a-f]{6}$/.test(background)) {
     throw new RangeError('background must be a #rrggbb colour');
   }
   return { width, height, border, background };
 }
 
 function checkSeed(seed: number): number {
-  if (typeof seed !== 'number' || !Number.isFinite(seed)) {
-    throw new RangeError('seed must be a finite number');
+  if (!Number.isSafeInteger(seed) || seed < 0) {
+    throw new RangeError('seed must be a non-negative integer');
   }
   return seed;
 }
 
 function clampVariation(variation: number): number {
-  if (Number.isNaN(variation))
+  if (typeof variation !== 'number' || Number.isNaN(variation)) {
     throw new RangeError('variation must be a number');
+  }
   return Math.min(1, Math.max(0, variation));
 }
 
@@ -501,20 +679,12 @@ function sameIdSet(
   return b.every((photo) => ids.has(photo.id));
 }
 
-function sameRatio(a: CanvasSettings, b: CanvasSettings): boolean {
-  return sameAspect(a.width / a.height, b.width / b.height);
-}
-
-function sameAspect(a: number, b: number): boolean {
-  return Math.abs(a / b - 1) < 1e-9;
+function sameRatio(a: number, b: number): boolean {
+  return Math.abs(a / b - 1) <= RATIO_TOLERANCE;
 }
 
 function sameCrop(a: Crop, b: Crop): boolean {
   return a.x === b.x && a.y === b.y && a.zoom === b.zoom;
-}
-
-function isPositive(value: number): boolean {
-  return typeof value === 'number' && value > 0 && Number.isFinite(value);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

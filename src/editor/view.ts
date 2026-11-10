@@ -52,6 +52,8 @@ export interface CollageViewOptions {
   readonly frames: FrameScheduler;
   /** The element whose size the collage is fitted to. */
   readonly area: HTMLElement;
+  /** Called once per photo whose images cannot be decoded. */
+  readonly onImageError?: (photo: Photo) => void;
 }
 
 export function createCollageView(options: CollageViewOptions): CollageView {
@@ -82,6 +84,10 @@ export function createCollageView(options: CollageViewOptions): CollageView {
     lookup: (id) => byId.get(id),
     onLoad: () => {
       frames.request('render', render);
+    },
+    onError: (id) => {
+      const photo = byId.get(id);
+      if (photo) options.onImageError?.(photo);
     },
   });
 
@@ -126,8 +132,13 @@ export function createCollageView(options: CollageViewOptions): CollageView {
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) return;
     cache.nextFrame();
-    const result = renderCollage(ctx, state, size, (id, tile) =>
-      cache.get(id, tile, cropOf(state, id)),
+    const result = renderCollage(
+      ctx,
+      state,
+      size,
+      (id, tile) =>
+        cache.get(id, tile, cropOf(state, id)) ??
+        (cache.isFailed(id) ? 'failed' : null),
     );
     tiles = result.tiles;
     last = { state, tiles, missing: result.missing };
@@ -137,23 +148,18 @@ export function createCollageView(options: CollageViewOptions): CollageView {
     frames.request('render', render);
   };
 
-  // Keep the editor's photos in step with the store's included photos.
-  // Imports add photos one at a time, so this is coalesced into frames.
-  const syncPhotos = (): void => {
-    editor.setPhotos(photos.getPlacementPhotos());
-  };
+  // The EditorStore keeps the included set in step with the photo store;
+  // the view only keeps its images in step.
   photos.subscribe((change) => {
     indexPhotos();
     if (change.kind === 'removed') {
       cache.release(change.ids);
-      editor.forgetPhotos(change.ids);
     } else {
       // Start decoding thumbnails of newly included photos in the background.
       cache.prefetch(
         change.ids.filter((id) => byId.get(id)?.included === true),
       );
     }
-    frames.request('photos', syncPhotos);
   });
   editor.subscribe(scheduleRender);
 
@@ -187,7 +193,6 @@ export function createCollageView(options: CollageViewOptions): CollageView {
 
   const initial = photos.getPlacementPhotos();
   cache.prefetch(initial.map((photo) => photo.id));
-  syncPhotos();
   scheduleRender();
 
   return {

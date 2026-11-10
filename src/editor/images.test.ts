@@ -24,7 +24,13 @@ function photo(id: string): CachePhoto {
   };
 }
 
-function setup(options: { budgetBytes?: number; concurrency?: number } = {}) {
+function setup(
+  options: {
+    budgetBytes?: number;
+    concurrency?: number;
+    onError?: (id: string) => void;
+  } = {},
+) {
   const photos = new Map(['a', 'b', 'c', 'd'].map((id) => [id, photo(id)]));
   const pending: { label: string; resolve: () => void; fail: () => void }[] =
     [];
@@ -179,17 +185,32 @@ describe('ImageCache', () => {
     }
   });
 
-  it('does not retry a failed decode every frame', async () => {
-    const { cache, pending } = setup();
+  it('falls back to the preview when the thumbnail fails, then reports the photo as failed once', async () => {
+    const errors: string[] = [];
+    const { cache, pending, loads } = setup({
+      onError: (id) => errors.push(id),
+    });
     const warn = console.warn;
     console.warn = () => undefined;
+    const failAll = async (): Promise<string[]> => {
+      await new Promise((r) => setTimeout(r, 0));
+      const batch = pending.splice(0);
+      for (const p of batch) p.fail();
+      await new Promise((r) => setTimeout(r, 0));
+      return batch.map((p) => p.label);
+    };
     try {
       cache.get('a', small);
-      await new Promise((r) => setTimeout(r, 0));
-      pending.splice(0).forEach((p) => {
-        p.fail();
-      });
-      await new Promise((r) => setTimeout(r, 0));
+      expect(await failAll()).toEqual(['thumbnail:a']);
+      expect(errors).toEqual(['a']);
+      expect(cache.isFailed('a')).toBe(false);
+      expect(loads()).toBe(1); // a repaint, to try the fallback
+      // The next frame asks for the preview instead.
+      cache.get('a', small);
+      expect(await failAll()).toEqual(['preview:a']);
+      expect(cache.isFailed('a')).toBe(true);
+      expect(errors).toEqual(['a']); // reported once
+      // And never retries either.
       cache.get('a', small);
       await new Promise((r) => setTimeout(r, 0));
       expect(pending).toHaveLength(0);

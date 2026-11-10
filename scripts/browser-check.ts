@@ -511,6 +511,233 @@ async function checkEditor(p: Page): Promise<void> {
   await waitDrawn(p);
 }
 
+/**
+ * Contracts later issues rely on: one commit per dial gesture, restoring a
+ * snapshot, toasts clear of the collage, decode failures shown.
+ */
+async function checkEditorContracts(p: Page): Promise<void> {
+  await waitDrawn(p);
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__commits = 0;
+    w.__app.editor.subscribe((_: unknown, change: any) => {
+      if (!change.transient) w.__commits++;
+    });
+  });
+  const commitsDuring = async (
+    gesture: () => Promise<void>,
+  ): Promise<number> => {
+    await p.evaluate(() => {
+      (window as any).__commits = 0;
+    });
+    await gesture();
+    await p.waitForTimeout(100);
+    await waitDrawn(p);
+    return p.evaluate(() => (window as any).__commits);
+  };
+  const dial = p.locator('#size-variation');
+  const box = (await dial.boundingBox())!;
+  const y = box.y + box.height / 2;
+  const at = (f: number): number => box.x + 8 + (box.width - 16) * f;
+
+  const drag = await commitsDuring(async () => {
+    await p.mouse.move(at(0.5), y);
+    await p.mouse.down();
+    for (const f of [0.6, 0.8, 0.3, 0.9, 0.7]) {
+      await p.mouse.move(at(f), y, { steps: 5 });
+    }
+    await p.mouse.up();
+  });
+  check(
+    'a mouse drag on the dial commits exactly once',
+    drag === 1,
+    `${String(drag)} commits`,
+  );
+
+  const click = await commitsDuring(async () => {
+    await p.mouse.click(at(0.2), y);
+  });
+  check(
+    'a click that moves the dial commits exactly once',
+    click === 1,
+    `${String(click)} commits`,
+  );
+
+  const sameClick = await commitsDuring(async () => {
+    await p.mouse.click(at(0.2), y);
+  });
+  check(
+    'a click on the current value commits nothing',
+    sameClick === 0,
+    `${String(sameClick)} commits`,
+  );
+
+  const keys = await commitsDuring(async () => {
+    await dial.focus();
+    for (let i = 0; i < 3; i++) await p.keyboard.press('ArrowLeft');
+  });
+  check(
+    'three arrow-key presses commit three times',
+    keys === 3,
+    `${String(keys)} commits`,
+  );
+
+  const cancelled = await commitsDuring(async () => {
+    await p.mouse.move(at(0.4), y);
+    await p.mouse.down();
+    await p.mouse.move(at(0.75), y, { steps: 5 });
+    await p.waitForTimeout(50);
+    // The browser takes the pointer away (for example a system gesture).
+    await dial.dispatchEvent('pointercancel');
+    await p.evaluate(() => {
+      document.querySelector<HTMLInputElement>('#size-variation')!.blur();
+    });
+    await p.mouse.up();
+  });
+  const settled = await p.evaluate(
+    () => !(window as any).__app.editor.isDragging(),
+  );
+  check(
+    'a cancelled drag resolves to one committed state',
+    cancelled === 1 && settled,
+    `${String(cancelled)} commits`,
+  );
+
+  // Swap survives committing the dial at its current value.
+  const swapKept = await p.evaluate(() => {
+    const e = (window as any).__app.editor;
+    e.dispatch((s: any) => {
+      const a = [...s.assignment];
+      [a[0], a[1]] = [a[1], a[0]];
+      return { ...s, assignment: a };
+    });
+    const swapped = e.getState();
+    e.commitVariation(swapped.variation);
+    return e.getState() === swapped;
+  });
+  check(
+    'committing the dial at its current value keeps a manual swap',
+    swapKept,
+  );
+
+  // Restore: a snapshot with a different included set comes back intact,
+  // and the tray follows it.
+  await waitDrawn(p);
+  const snapshot = await p.evaluate(() => {
+    const w = window as any;
+    w.__snapshot = w.__app.editor.getState();
+    return JSON.stringify(w.__snapshot);
+  });
+  await p.locator('.thumb').nth(2).click();
+  await p.locator('.thumb').nth(5).click();
+  await waitDrawn(p);
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__app.editor.restore(w.__snapshot);
+  });
+  await p.waitForTimeout(100);
+  await waitDrawn(p);
+  const restored = await p.evaluate(() => {
+    const w = window as any;
+    const s = w.__app.editor.getState();
+    const included = w.__app.store.getIncludedIds().sort();
+    const ids = s.photos.map((ph: any) => ph.id).sort();
+    return {
+      same: s === w.__snapshot,
+      tray:
+        JSON.stringify(included) === JSON.stringify(ids) &&
+        document.querySelectorAll('.thumb[aria-pressed=true]').length ===
+          ids.length,
+    };
+  });
+  check(
+    'restore puts back a snapshot (with its swap) and the tray follows, without a re-roll',
+    restored.same &&
+      restored.tray &&
+      (await p.evaluate(() =>
+        JSON.stringify((window as any).__app.editor.getState()),
+      )) === snapshot,
+  );
+
+  // Toasts sit clear of the collage.
+  await p.setInputFiles('input[type=file]', join(fixtures, 'landscape.jpg'));
+  await p.waitForSelector('.notice');
+  const overlap = await p.evaluate(() => {
+    const c = document
+      .querySelector('.collage-canvas')!
+      .getBoundingClientRect();
+    return [...document.querySelectorAll('.notice')].some((n) => {
+      const r = n.getBoundingClientRect();
+      return !(
+        r.right <= c.left ||
+        r.left >= c.right ||
+        r.bottom <= c.top ||
+        r.top >= c.bottom
+      );
+    });
+  });
+  check('notices do not cover the collage', !overlap);
+  while ((await p.locator('.notice button').count()) > 0) {
+    await p.locator('.notice button').first().click();
+  }
+
+  // A photo whose images cannot be decoded: an error tile and one notice.
+  await p.evaluate(() => {
+    const store = (window as any).__app.store;
+    const junk = new Blob(['not a jpeg'], { type: 'image/jpeg' });
+    store.addPhotos([
+      {
+        file: new File(['x'], 'broken.jpg', { type: 'image/jpeg' }),
+        width: 400,
+        height: 300,
+        preview: junk,
+        thumbnail: junk,
+      },
+    ]);
+  });
+  await p.waitForFunction(
+    () => {
+      const last = (window as any).__app.view.lastRender();
+      return (
+        document.querySelector('.notice')?.textContent.includes('broken.jpg') &&
+        last?.missing === 1
+      );
+    },
+    undefined,
+    { timeout: 10000 },
+  );
+  const errorPixels = await countColour(p, [0x6b, 0x2a, 0x33]);
+  const notices = await p.locator('.notice').count();
+  check(
+    'an undecodable photo shows an error tile and one notice',
+    errorPixels > 100 && notices === 1,
+    `${String(errorPixels)} error px, ${String(notices)} notice(s)`,
+  );
+  await p.evaluate(() => {
+    const store = (window as any).__app.store;
+    store.removePhotos([store.getPhotos().at(-1).id]);
+  });
+  while ((await p.locator('.notice button').count()) > 0) {
+    await p.locator('.notice button').first().click();
+  }
+  await waitDrawn(p);
+
+  // DPI change at a fixed paper size keeps the layout (#7).
+  const dpi = await p.evaluate(async (module) => {
+    const actions = await import(/* @vite-ignore */ module);
+    const e = (window as any).__app.editor;
+    const before = e.getState();
+    e.dispatch((s: any) => actions.setCanvasSize(s, 3508, 2480));
+    const a4At300 = e.getState();
+    e.dispatch((s: any) => actions.setCanvasSize(s, 2339, 1654));
+    const kept = e.getState().plan === a4At300.plan;
+    e.restore(before);
+    return kept;
+  }, STATE_MODULE);
+  check('A4 at 300 dpi to 200 dpi keeps the layout', dpi);
+  await waitDrawn(p);
+}
+
 /** At device pixel ratio 2 the canvas has twice the CSS pixels: sharp. */
 async function checkPixelRatio(
   browser: import('playwright-core').Browser,
@@ -944,6 +1171,7 @@ check(
 
 // 7. The editor canvas (issue #5): the mosaic, the dial and Shuffle.
 await checkEditor(page);
+await checkEditorContracts(page);
 await checkPixelRatio(browser);
 
 // 7a. Screenshots of the collage at three dial positions (synthetic images

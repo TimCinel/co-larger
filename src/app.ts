@@ -41,8 +41,15 @@ export interface App {
 export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   const doc = root.ownerDocument;
   const store = options.store ?? new PhotoStore();
-  const editor = new EditorStore();
   const frames = new FrameScheduler(doc.defaultView as Window);
+  // Tray changes reach the editor once per frame, so an import of many
+  // photos re-rolls once per frame rather than once per photo.
+  const editor = new EditorStore({
+    photoStore: store,
+    scheduleSync: (sync) => {
+      frames.request('photos', sync);
+    },
+  });
   const importer = new PhotoImporter(store, {
     decode: options.decode ?? decodePhoto,
   });
@@ -99,6 +106,11 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     photos: store,
     frames,
     area: main,
+    onImageError: (photo) => {
+      notices.show(
+        `Could not display ${photo.file.name}: this browser cannot decode it.`,
+      );
+    },
   });
   const dropOverlay = doc.createElement('div');
   dropOverlay.className = 'drop-overlay';
@@ -107,7 +119,9 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
 
   const tray = createTray(doc, store);
 
-  shell.append(header, notices.element, main, tray);
+  // Notices sit in the tray, so they never cover the collage.
+  tray.append(notices.element);
+  shell.append(header, main, tray);
   root.replaceChildren(shell);
 
   const addFiles = (files: File[], folders: string[] = []): void => {

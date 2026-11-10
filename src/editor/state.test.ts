@@ -1,8 +1,11 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment --
+   The validation tests tamper with parsed JSON of unknown shape. */
 import { describe, expect, it } from 'vitest';
 import {
   arrangementStep,
   placeLayout,
   swapSlots,
+  maxBorder,
   validateAssignment,
   type PhotoShape,
 } from '../layout';
@@ -13,6 +16,7 @@ import {
   cropOf,
   DEFAULT_CANVAS,
   forgetPhotos,
+  rearrange,
   setBackground,
   setBorder,
   setCanvasSize,
@@ -21,6 +25,7 @@ import {
   setVariation,
   shuffle,
   validateEditorState,
+  MAX_CANVAS_SIDE,
   type EditorState,
 } from './state';
 
@@ -194,7 +199,9 @@ describe('re-roll rules', () => {
       ...base,
       assignment: swapSlots(base.assignment, 0, 1),
     };
-    expect(shuffle(swapped, base.seed).assignment).toEqual(base.assignment);
+    expect(shuffle(shuffle(swapped, 999), base.seed).assignment).toEqual(
+      base.assignment,
+    );
     expect(setVariation(swapped, 0.36).assignment).toEqual(base.assignment);
   });
 
@@ -271,7 +278,11 @@ describe('dial drag', () => {
       clearArrangementCache();
       let state = base;
       for (const v of path) state = setVariation(state, v, { keepAssignment });
-      const committed = setVariation(state, 0.73);
+      // What EditorStore does at the end of a drag: settle a provisional
+      // state, else commit the final value.
+      const committed = keepAssignment
+        ? rearrange(state)
+        : setVariation(state, 0.73);
       expect(JSON.stringify(committed)).toBe(JSON.stringify(direct));
     }
   });
@@ -369,5 +380,272 @@ describe('serialisation', () => {
     expect(validateEditorState(JSON.parse(JSON.stringify(empty)))).toEqual(
       empty,
     );
+  });
+});
+
+describe('no-op actions return the same state', () => {
+  const photos = makePhotos(8);
+  let base = createEditorState({ seed: 21, photos, variation: 0.4 });
+  base = setCrop(setBorder(base, 4), 'p1', { zoom: 2 });
+
+  it('for every action given its current value', () => {
+    expect(shuffle(base, base.seed)).toBe(base);
+    expect(setVariation(base, base.variation)).toBe(base);
+    expect(setVariation(base, base.variation, { keepAssignment: true })).toBe(
+      base,
+    );
+    expect(setPhotos(base, [...photos].reverse())).toBe(base);
+    expect(forgetPhotos(base, ['nope'])).toBe(base);
+    expect(setCanvasSize(base, 1920, 1080)).toBe(base);
+    expect(setBorder(base, 4)).toBe(base);
+    expect(setBackground(base, '#FFFFFF')).toBe(base);
+    expect(setCrop(base, 'p1', { zoom: 2 })).toBe(base);
+    expect(setCrop(base, 'p2', {})).toBe(base);
+  });
+
+  it('so a manual swap survives them', () => {
+    const swapped = { ...base, assignment: swapSlots(base.assignment, 0, 1) };
+    expect(setVariation(swapped, swapped.variation)).toBe(swapped);
+    expect(shuffle(swapped, swapped.seed)).toBe(swapped);
+  });
+});
+
+describe('canvas ratio tolerance', () => {
+  // A-series paper in mm, at the DPIs #7 will offer.
+  const paper = {
+    A0: [841, 1189],
+    A1: [594, 841],
+    A2: [420, 594],
+    A3: [297, 420],
+    A4: [210, 297],
+    A5: [148, 210],
+  } as const;
+  const px = (mm: number, dpi: number): number => Math.round((mm / 25.4) * dpi);
+  const dpis = [72, 150, 200, 300, 600];
+
+  it('changing DPI at a fixed paper size never re-rolls', () => {
+    for (const [name, [w, h]] of Object.entries(paper)) {
+      for (const [ww, hh] of [
+        [w, h],
+        [h, w],
+      ] as const) {
+        let state = createEditorState({
+          seed: 4,
+          photos: makePhotos(10),
+          canvas: { width: px(ww, 300), height: px(hh, 300) },
+        });
+        const plan = state.plan;
+        for (const dpi of [...dpis, 300, ...[...dpis].reverse()]) {
+          // A0 and A1 at 600 dpi exceed the largest canvas.
+          if (Math.max(px(ww, dpi), px(hh, dpi)) > MAX_CANVAS_SIDE) continue;
+          state = setCanvasSize(state, px(ww, dpi), px(hh, dpi));
+          expect(state.plan, `${name} at ${String(dpi)} dpi`).toBe(plan);
+        }
+      }
+    }
+  });
+
+  it('a real ratio change re-rolls', () => {
+    const a4 = createEditorState({
+      seed: 4,
+      photos: makePhotos(10),
+      canvas: { width: 2480, height: 3508 },
+    });
+    expect(setCanvasSize(a4, 3508, 2480).plan).not.toBe(a4.plan);
+    expect(setCanvasSize(a4, 2480, 3307).plan).not.toBe(a4.plan); // 3:4
+  });
+
+  it('small changes cannot accumulate past the tolerance', () => {
+    let state = createEditorState({ seed: 4, photos: makePhotos(10) });
+    const plan = state.plan;
+    let width = 1920;
+    // Each step is 0.3% wider than the last: within tolerance of the
+    // previous canvas, but not of the plan after a couple of steps.
+    for (let i = 0; i < 5; i++) {
+      width = Math.round(width * 1.003);
+      state = setCanvasSize(state, width, 1080);
+      expect(
+        Math.abs(width / 1080 / state.plan.aspect - 1),
+      ).toBeLessThanOrEqual(0.005);
+    }
+    expect(state.plan).not.toBe(plan);
+  });
+});
+
+describe('border clamping', () => {
+  const base = createEditorState({ seed: 8, photos: makePhotos(30) });
+
+  it('setBorder clamps to what the arrangement allows', () => {
+    const limit = maxBorder(base.plan, 1920, 1080, { snap: true });
+    expect(setBorder(base, 15000).canvas.border).toBe(limit);
+  });
+
+  it('a re-roll re-clamps the border', () => {
+    const wide = setBorder(base, 15000);
+    const varied = setVariation(wide, 1);
+    const limit = maxBorder(varied.plan, 1920, 1080, { snap: true });
+    expect(varied.canvas.border).toBeLessThanOrEqual(limit);
+  });
+
+  it('rejects a negative border', () => {
+    expect(() => setBorder(base, -1)).toThrow(RangeError);
+  });
+});
+
+describe('crops are prototype-safe', () => {
+  const base = createEditorState({ seed: 1, photos: makePhotos(3) });
+
+  it('cropOf never returns inherited properties', () => {
+    expect(cropOf(base, 'constructor')).toEqual({ x: 0.5, y: 0.5, zoom: 1 });
+    expect(cropOf(base, 'toString')).toEqual({ x: 0.5, y: 0.5, zoom: 1 });
+  });
+
+  it('a photo id of __proto__ is an ordinary key', () => {
+    const state = setCrop(base, '__proto__', { zoom: 2 });
+    expect(Object.getPrototypeOf(state.crops)).toBeNull();
+    expect(cropOf(state, '__proto__').zoom).toBe(2);
+    expect(Object.keys(state.crops)).toEqual(['__proto__']);
+  });
+});
+
+describe('validateEditorState on untrusted input', () => {
+  let state = createEditorState({ seed: 77, photos: makePhotos(6) });
+  state = setCrop(setBorder(state, 6), 'p2', { x: 0.1, zoom: 2 });
+  const json = (): Record<string, any> =>
+    JSON.parse(JSON.stringify(state)) as Record<string, any>;
+  const rejects = (mutate: (s: Record<string, any>) => void): void => {
+    const value = json();
+    mutate(value);
+    expect(() => validateEditorState(value)).toThrow(RangeError);
+  };
+
+  it('rejects canvas sizes out of range or fractional', () => {
+    rejects((s) => {
+      s.canvas.width = 0;
+    });
+    rejects((s) => {
+      s.canvas.width = 0.001;
+      s.canvas.height = 0.0005625;
+    });
+    rejects((s) => {
+      s.canvas.width = 1e9;
+      s.canvas.height = 5.625e8;
+    });
+    rejects((s) => {
+      s.canvas.width = MAX_CANVAS_SIDE + 1;
+    });
+    rejects((s) => {
+      s.canvas.width = 1920.5;
+    });
+  });
+
+  it('rejects a border beyond what the arrangement allows', () => {
+    rejects((s) => {
+      s.canvas.border = 1e9;
+    });
+    rejects((s) => {
+      s.canvas.border = 900;
+    });
+    rejects((s) => {
+      s.canvas.border = -1;
+    });
+  });
+
+  it('rejects non-integer, negative or huge seeds', () => {
+    for (const seed of [1.5, -7, 2 ** 60, '5']) {
+      rejects((s) => {
+        s.seed = seed;
+        s.plan.seed = seed;
+      });
+    }
+  });
+
+  it('rejects absurd photo aspects and bad ids', () => {
+    rejects((s) => {
+      s.photos[0].aspect = 1e9;
+    });
+    rejects((s) => {
+      s.photos[0].aspect = 0;
+    });
+    rejects((s) => {
+      s.photos[0].id = '';
+    });
+    rejects((s) => {
+      s.photos[1].id = s.photos[0].id;
+    });
+  });
+
+  it('rejects crops for unknown photos, unless the caller knows them', () => {
+    const value = json();
+    value.crops.stranger = { x: 0.5, y: 0.5, zoom: 2 };
+    expect(() => validateEditorState(value)).toThrow(/unknown photo/);
+    const ok = validateEditorState(value, {
+      photoIds: [...state.photos.map((p) => p.id), 'stranger'],
+    });
+    expect(cropOf(ok, 'stranger').zoom).toBe(2);
+  });
+
+  it('rejects malformed crops', () => {
+    rejects((s) => {
+      s.crops.p2 = { x: 0.1, y: 0.5 };
+    });
+    rejects((s) => {
+      s.crops.p2 = { x: '0.1', y: 0.5, zoom: 2 };
+    });
+  });
+
+  it('a __proto__ crop key cannot replace the prototype', () => {
+    const text = JSON.stringify(state).replace(
+      '"crops":{',
+      '"crops":{"__proto__":{"x":0.2,"y":0.5,"zoom":3},',
+    );
+    const value = JSON.parse(text) as unknown;
+    const loaded = validateEditorState(value, {
+      photoIds: [...state.photos.map((p) => p.id), '__proto__'],
+    });
+    expect(Object.getPrototypeOf(loaded.crops)).toBeNull();
+    expect(cropOf(loaded, '__proto__').zoom).toBe(3);
+    expect(cropOf(loaded, 'constructor').zoom).toBe(1);
+  });
+
+  it('rejects a tampered plan that would render zero-size tiles', () => {
+    rejects((s) => {
+      const squash = (node: any): void => {
+        if (node.kind === 'split') {
+          node.fraction = 0.999999;
+          squash(node.first);
+          squash(node.second);
+        }
+      };
+      squash(s.plan.root);
+    });
+  });
+
+  it('turns any plan error into a RangeError', () => {
+    rejects((s) => {
+      s.plan.root = { kind: 'nonsense' };
+    });
+    rejects((s) => {
+      s.plan = 'plan';
+    });
+  });
+
+  it('accepts and normalises an upper-case background', () => {
+    const value = json();
+    value.canvas.background = '#A0B1C2';
+    expect(validateEditorState(value).canvas.background).toBe('#a0b1c2');
+  });
+
+  it('returns a freshly built object with no extra fields', () => {
+    const value = json();
+    value.extra = 1;
+    value.canvas.extra = 2;
+    value.plan.extra = 3;
+    value.plan.root.extra = 4;
+    value.photos[0].extra = 5;
+    const loaded = validateEditorState(value);
+    expect(JSON.stringify(loaded)).toBe(JSON.stringify(state));
+    expect(loaded.plan).not.toBe(value.plan);
+    expect(loaded.plan.root).not.toBe(value.plan.root);
   });
 });

@@ -1,6 +1,7 @@
 /**
  * Layout controls for the top bar: the size-variation dial and Shuffle.
  */
+import { DialInput } from './dial';
 import type { FrameScheduler } from './frames';
 import type { EditorStore } from './store';
 
@@ -57,28 +58,28 @@ export function createLayoutControls(
 
   group.append(label, low, dial, high, shuffle);
 
-  // While the dial moves, apply at most one value per frame; the release
-  // (or each keyboard step) commits. The final state depends only on the
-  // final value, whatever the pointer did on the way.
-  let pending = false;
+  // While the dial moves, apply at most one value per frame. Every event
+  // that can end the gesture commits; DialInput makes that one commit per
+  // gesture. The final state depends only on the final value.
+  const gesture = new DialInput(editor, frames);
   dial.addEventListener('input', () => {
-    const value = dial.valueAsNumber;
-    dial.setAttribute('aria-valuetext', describeVariation(value));
-    pending = true;
-    frames.request('dial', () => {
-      pending = false;
-      editor.dragVariation(value);
-    });
+    dial.setAttribute('aria-valuetext', describeVariation(dial.valueAsNumber));
+    gesture.move(dial.valueAsNumber);
   });
-  dial.addEventListener('change', () => {
-    frames.cancel('dial');
-    pending = false;
-    editor.commitVariation(dial.valueAsNumber);
-  });
-  // A drag that ends where it started fires no `change`: commit it anyway.
-  dial.addEventListener('pointerup', () => {
-    frames.flush();
-    if (editor.isDragging()) editor.commitVariation(dial.valueAsNumber);
+  const end = (): void => {
+    gesture.end(dial.valueAsNumber);
+  };
+  for (const type of [
+    'change',
+    'pointerup',
+    'pointercancel',
+    'lostpointercapture',
+    'blur',
+  ]) {
+    dial.addEventListener(type, end);
+  }
+  dial.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') end();
   });
 
   const sync = (): void => {
@@ -88,11 +89,7 @@ export function createLayoutControls(
     shuffle.disabled = disabled;
     // Follow the state when it changes from elsewhere (undo, loading a
     // project), but never fight the user's own drag.
-    if (
-      !pending &&
-      !editor.isDragging() &&
-      dial.valueAsNumber !== state.variation
-    ) {
+    if (!gesture.isBusy() && dial.valueAsNumber !== state.variation) {
       dial.value = String(state.variation);
     }
     dial.setAttribute('aria-valuetext', describeVariation(dial.valueAsNumber));

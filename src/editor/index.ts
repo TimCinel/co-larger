@@ -8,20 +8,27 @@ export {
   type Crop,
   type SourceRect,
 } from './crop';
+export { DialInput, type DialEditor } from './dial';
 export { FrameScheduler, type FrameTask } from './frames';
 export { ImageCache, type CachePhoto, type DecodedImage } from './images';
 export {
+  drawBackground,
+  drawTile,
+  ERROR_COLOUR,
   fitSize,
   PLACEHOLDER_COLOUR,
   renderCollage,
+  renderCollageAsync,
   tileAt,
   tilesFor,
+  type AsyncImageProvider,
   type CollageContext,
   type DrawableImage,
   type ImageProvider,
-  type RenderOptions,
+  type LoadedImage,
   type RenderResult,
   type RenderSize,
+  type TileImage,
 } from './render';
 export {
   arrange,
@@ -32,7 +39,11 @@ export {
   DEFAULT_VARIATION,
   forgetPhotos,
   isAssignmentCached,
+  MAX_CANVAS_SIDE,
+  MAX_PHOTO_ASPECT,
   randomSeed,
+  RATIO_TOLERANCE,
+  rearrange,
   setBackground,
   setBorder,
   setCanvasSize,
@@ -43,8 +54,10 @@ export {
   validateEditorState,
   type CanvasSettings,
   type CreateOptions,
+  type CropMap,
   type EditorState,
   type SetVariationOptions,
+  type ValidateOptions,
 } from './state';
 export {
   DEFER_ASSIGNMENT_ABOVE,
@@ -52,6 +65,7 @@ export {
   SETTLE_MS,
   type EditorChange,
   type EditorListener,
+  type EditorPhotoSource,
   type EditorStoreOptions,
 } from './store';
 export { createCollageView, type CollageView } from './view';

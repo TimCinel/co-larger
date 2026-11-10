@@ -108,13 +108,16 @@ button.primary:hover:not(:disabled) {
   accent-color: var(--accent);
 }
 
-/* Toasts: overlaid, so a notice never moves or resizes the canvas. */
+/* Toasts: overlaid on the tray's lower right, so a notice never moves or
+   resizes the canvas and never covers the collage. */
 .notices {
   position: absolute;
-  top: 3.6rem;
+  bottom: 0.75rem;
   right: 1rem;
   z-index: 10;
   width: min(30rem, calc(100% - 2rem));
+  max-height: calc(100% - 1.5rem);
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
@@ -229,6 +232,7 @@ button.primary:hover:not(:disabled) {
 }
 
 .tray {
+  position: relative;
   flex: none;
   max-height: 38vh;
   display: flex;

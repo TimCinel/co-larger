@@ -1,6 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { PhotoShape } from '../layout';
-import { clearArrangementCache, setBorder, setVariation } from './state';
+import { PhotoStore } from '../photos';
+import { makeNewPhoto } from '../photos/test-helpers';
+import { swapSlots } from '../layout';
+import {
+  clearArrangementCache,
+  cropOf,
+  setBorder,
+  setCrop,
+  setPhotos,
+  setVariation,
+  type EditorState,
+} from './state';
 import {
   DEFER_ASSIGNMENT_ABOVE,
   EditorStore,
@@ -46,7 +57,7 @@ describe('EditorStore', () => {
     const { editor, changes } = setup(5);
     editor.dispatch((s) => setBorder(s, 4));
     editor.dispatch((s) => setBorder(s, 4));
-    expect(changes).toEqual([{ transient: false }]);
+    expect(changes).toEqual([{ transient: false, restored: false }]);
     expect(editor.getState().canvas.border).toBe(4);
   });
 
@@ -70,11 +81,7 @@ describe('EditorStore', () => {
     expect(editor.isDragging()).toBe(true);
     editor.commitVariation(0.7);
     expect(editor.isDragging()).toBe(false);
-    expect(changes).toEqual([
-      { transient: true },
-      { transient: true },
-      { transient: false },
-    ]);
+    expect(changes.map((c) => c.transient)).toEqual([true, true, false]);
   });
 
   it('a small collage is re-assigned at once while dragging', () => {
@@ -126,14 +133,46 @@ describe('EditorStore', () => {
     );
   });
 
-  it('setPhotos re-rolls only when the set changes', () => {
+  it('commits a drag once, however many events end it', () => {
+    const { editor, changes } = setup(10);
+    editor.dragVariation(0.6);
+    editor.commitVariation(0.6);
+    editor.commitVariation(0.6);
+    expect(changes.map((c) => c.transient)).toEqual([true, false]);
+  });
+
+  it('committing the dial at its current value keeps a manual swap', () => {
+    const { editor, changes } = setup(10);
+    const v = editor.getState().variation;
+    editor.dispatch((s) => ({
+      ...s,
+      assignment: swapSlots(s.assignment, 0, 1),
+    }));
+    const swapped = editor.getState();
+    editor.commitVariation(v);
+    editor.dragVariation(v);
+    editor.commitVariation(v);
+    expect(editor.getState()).toBe(swapped);
+    expect(changes).toHaveLength(1);
+  });
+
+  it('a provisional drag back to its start value still settles', () => {
+    clearArrangementCache();
+    const { editor } = setup(DEFER_ASSIGNMENT_ABOVE + 1);
+    const start = editor.getState();
+    editor.dragVariation(0.95);
+    clearArrangementCache();
+    editor.dragVariation(0.5);
+    editor.commitVariation(0.5);
+    expect(JSON.stringify(editor.getState())).toBe(JSON.stringify(start));
+  });
+
+  it('dispatch re-rolls only when the photo set changes', () => {
     const { editor, changes } = setup(4);
-    editor.setPhotos(makePhotos(4));
+    editor.dispatch((s) => setPhotos(s, makePhotos(4)));
     expect(changes).toHaveLength(0);
-    editor.setPhotos(makePhotos(6));
+    editor.dispatch((s) => setPhotos(s, makePhotos(6)));
     expect(editor.getState().plan.count).toBe(6);
-    editor.forgetPhotos(['p5']);
-    expect(editor.getState().plan.count).toBe(5);
   });
 
   it('a throwing listener does not stop the others', () => {
@@ -144,7 +183,7 @@ describe('EditorStore', () => {
       throw new Error('boom');
     });
     editor.subscribe(other);
-    editor.setPhotos(makePhotos(2));
+    editor.dispatch((s) => setPhotos(s, makePhotos(2)));
     expect(onListenerError).toHaveBeenCalledOnce();
     expect(other).toHaveBeenCalledOnce();
   });
@@ -154,7 +193,123 @@ describe('EditorStore', () => {
     const listener = vi.fn();
     const off = editor.subscribe(listener);
     off();
-    editor.setPhotos(makePhotos(2));
+    editor.dispatch((s) => setPhotos(s, makePhotos(2)));
     expect(listener).not.toHaveBeenCalled();
+  });
+});
+
+/** An editor connected to a real PhotoStore, with a manual sync queue. */
+function connected(count: number) {
+  const photos = new PhotoStore();
+  photos.addPhotos(
+    Array.from({ length: count }, (_, i) =>
+      makeNewPhoto(`p${String(i)}.jpg`, i % 3 ? 400 : 300, i % 3 ? 300 : 400),
+    ),
+  );
+  const queue: (() => void)[] = [];
+  const editor = new EditorStore({
+    seed: 9,
+    photoStore: photos,
+    scheduleSync: (sync) => queue.push(sync),
+  });
+  const changes: EditorChange[] = [];
+  editor.subscribe((_, change) => changes.push(change));
+  const flush = (): void => {
+    for (const sync of queue.splice(0)) sync();
+  };
+  return { photos, editor, changes, flush };
+}
+
+describe('EditorStore with a PhotoStore', () => {
+  it('starts with the store’s included photos', () => {
+    const { editor } = connected(5);
+    expect(editor.getState().photos.map((p) => p.id)).toHaveLength(5);
+  });
+
+  it('follows tray toggles once per sync, re-rolling', () => {
+    const { photos, editor, flush, changes } = connected(6);
+    const [a, b] = editor.getState().photos;
+    photos.setIncluded((a as PhotoShape).id, false);
+    photos.setIncluded((b as PhotoShape).id, false);
+    expect(editor.getState().photos).toHaveLength(6);
+    flush();
+    expect(editor.getState().photos).toHaveLength(4);
+    expect(changes).toHaveLength(1);
+  });
+
+  it('forgets removed photos at once', () => {
+    const { photos, editor } = connected(4);
+    const id = (editor.getState().photos[0] as PhotoShape).id;
+    editor.dispatch((s) => setCrop(s, id, { zoom: 2 }));
+    photos.removePhotos([id]);
+    expect(editor.getState().photos).toHaveLength(3);
+    expect(Object.keys(editor.getState().crops)).toEqual([]);
+  });
+
+  it('restore puts back a snapshot and the tray flags, without a re-roll', () => {
+    const { photos, editor, flush, changes } = connected(8);
+    const ids = editor.getState().photos.map((p) => p.id);
+    // A snapshot with a swap and a crop, while 2 photos are excluded.
+    photos.setIncluded([ids[0] as string, ids[1] as string], false);
+    flush();
+    editor.dispatch((s) => ({
+      ...s,
+      assignment: swapSlots(s.assignment, 0, 3),
+    }));
+    editor.dispatch((s) => setCrop(s, ids[4] as string, { x: 0.1, zoom: 3 }));
+    const snapshot: EditorState = editor.getState();
+    // Then the user changes the tray: all included again (a re-roll).
+    photos.setAllIncluded(true);
+    flush();
+    expect(editor.getState().photos).toHaveLength(8);
+
+    changes.length = 0;
+    editor.restore(snapshot);
+    expect(editor.getState()).toBe(snapshot);
+    expect(photos.getIncludedIds().sort()).toEqual(
+      snapshot.photos.map((p) => p.id).sort(),
+    );
+    expect(changes).toEqual([{ transient: false, restored: true }]);
+    // The store's change queues a sync; it must not re-roll.
+    flush();
+    expect(editor.getState()).toBe(snapshot);
+    expect(cropOf(editor.getState(), ids[4] as string).zoom).toBe(3);
+    expect(changes).toHaveLength(1);
+  });
+
+  it('restore of an older snapshot excludes photos the snapshot did not have', () => {
+    const { photos, editor, flush } = connected(5);
+    const snapshot = editor.getState();
+    photos.addPhotos([makeNewPhoto('late.jpg')]);
+    flush();
+    expect(editor.getState().photos).toHaveLength(6);
+    editor.restore(snapshot);
+    flush();
+    expect(photos.getSelectedCount()).toBe(5);
+    expect(editor.getState()).toBe(snapshot);
+  });
+
+  it('restore fails loudly, changing nothing, for a photo the store lacks', () => {
+    const { photos, editor, flush } = connected(4);
+    const snapshot = editor.getState();
+    const gone = (snapshot.photos[0] as PhotoShape).id;
+    photos.removePhotos([gone]);
+    const before = editor.getState();
+    const included = photos.getIncludedIds();
+    expect(() => {
+      editor.restore(snapshot);
+    }).toThrow(/not in the photo store/);
+    flush();
+    expect(editor.getState()).toBe(before);
+    expect(photos.getIncludedIds()).toEqual(included);
+  });
+
+  it('restore ends a drag', () => {
+    const { editor } = connected(4);
+    const snapshot = editor.getState();
+    editor.dragVariation(0.9);
+    editor.restore(snapshot);
+    expect(editor.isDragging()).toBe(false);
+    expect(editor.getState()).toBe(snapshot);
   });
 });

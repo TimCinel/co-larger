@@ -47,6 +47,12 @@ export interface ImageCacheOptions<I extends DecodedImage> {
   readonly decode?: (blob: Blob) => Promise<I>;
   /** Called after each image finishes decoding, to schedule a repaint. */
   readonly onLoad?: () => void;
+  /**
+   * Called once per photo the first time any of its images fails to decode
+   * (to tell the user). A failed thumbnail falls back to the preview; a
+   * photo with neither is reported by `isFailed`.
+   */
+  readonly onError?: (photoId: string) => void;
   /** Byte budget for decoded images (width × height × 4). Default 256 MB. */
   readonly budgetBytes?: number;
   /** Decodes running at once. Default 4. */
@@ -78,6 +84,8 @@ export class ImageCache<I extends DecodedImage = ImageBitmap> {
   private readonly lookup: (id: string) => CachePhoto | undefined;
   private readonly decode: (blob: Blob) => Promise<I>;
   private readonly onLoad: () => void;
+  private readonly onError: (photoId: string) => void;
+  private readonly reported = new Set<string>();
   private readonly budget: number;
   private readonly concurrency: number;
   private active = 0;
@@ -90,6 +98,7 @@ export class ImageCache<I extends DecodedImage = ImageBitmap> {
       options.decode ??
       ((blob) => createImageBitmap(blob) as unknown as Promise<I>);
     this.onLoad = options.onLoad ?? (() => undefined);
+    this.onError = options.onError ?? (() => undefined);
     this.budget = options.budgetBytes ?? DEFAULT_BUDGET_BYTES;
     this.concurrency = Math.max(1, options.concurrency ?? 4);
   }
@@ -112,11 +121,26 @@ export class ImageCache<I extends DecodedImage = ImageBitmap> {
     const preview = this.use(photoId, 'preview');
     if (preview) return preview;
     const thumbnail = this.use(photoId, 'thumbnail');
-    if (!this.thumbnailSuffices(photo, tile, crop)) {
+    if (
+      this.statusOf(photoId, 'thumbnail') === 'failed' ||
+      !this.thumbnailSuffices(photo, tile, crop)
+    ) {
       this.request(photoId, 'preview');
     }
     if (!thumbnail) this.request(photoId, 'thumbnail');
     return thumbnail;
+  }
+
+  /** True when no image of the photo can be decoded (draw an error). */
+  isFailed(photoId: string): boolean {
+    return (
+      this.statusOf(photoId, 'thumbnail') === 'failed' &&
+      this.statusOf(photoId, 'preview') === 'failed'
+    );
+  }
+
+  private statusOf(id: string, level: Level): Entry<I>['status'] | undefined {
+    return this.entries.get(keyOf(id, level))?.status;
   }
 
   /** Queues the thumbnails of `ids` (decoded in the background). */
@@ -127,6 +151,7 @@ export class ImageCache<I extends DecodedImage = ImageBitmap> {
   /** Frees every image of these photos and drops any queued decodes. */
   release(ids: Iterable<string>): void {
     for (const id of ids) {
+      this.reported.delete(id);
       for (const level of ['thumbnail', 'preview'] as const) {
         const key = keyOf(id, level);
         const entry = this.entries.get(key);
@@ -227,8 +252,19 @@ export class ImageCache<I extends DecodedImage = ImageBitmap> {
           this.active--;
           // Still in the cache: remember the failure so it is not retried
           // every frame. The tile keeps its placeholder.
-          if (this.entries.get(key) === entry) entry.status = 'failed';
-          console.warn(`Could not decode ${entry.level} of ${entry.id}`, error);
+          if (this.entries.get(key) === entry) {
+            entry.status = 'failed';
+            console.warn(
+              `Could not decode ${entry.level} of ${entry.id}`,
+              error,
+            );
+            if (!this.reported.has(entry.id)) {
+              this.reported.add(entry.id);
+              this.onError(entry.id);
+            }
+            // Repaint: the tile may now fall back or show the error.
+            this.onLoad();
+          }
           this.pump();
         },
       );

@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import type { Tile } from '../layout';
 import { coverSource } from './crop';
 import {
+  drawTile,
+  ERROR_COLOUR,
   fitSize,
   PLACEHOLDER_COLOUR,
   renderCollage,
+  renderCollageAsync,
   tileAt,
   tilesFor,
   type CollageContext,
@@ -20,7 +23,8 @@ import {
 
 type Call =
   | { op: 'fillRect'; fill: string; args: number[] }
-  | { op: 'drawImage'; image: unknown; args: number[] };
+  | { op: 'drawImage'; image: unknown; args: number[] }
+  | { op: 'stroke'; stroke: string };
 
 /** A 2D context that records what is drawn. */
 function recorder(): CollageContext & { calls: Call[] } {
@@ -28,6 +32,8 @@ function recorder(): CollageContext & { calls: Call[] } {
   const ctx = {
     calls,
     fillStyle: '',
+    strokeStyle: '',
+    lineWidth: 1,
     imageSmoothingEnabled: false,
     imageSmoothingQuality: 'low' as ImageSmoothingQuality,
     fillRect(...args: number[]) {
@@ -35,6 +41,18 @@ function recorder(): CollageContext & { calls: Call[] } {
     },
     drawImage(image: unknown, ...args: number[]) {
       calls.push({ op: 'drawImage', image, args });
+    },
+    beginPath() {
+      // Paths are recorded only when stroked.
+    },
+    moveTo() {
+      // As above.
+    },
+    lineTo() {
+      // As above.
+    },
+    stroke() {
+      calls.push({ op: 'stroke', stroke: ctx.strokeStyle });
     },
   };
   return ctx;
@@ -133,7 +151,7 @@ describe('renderCollage', () => {
       y: 0,
       zoom: 2,
     });
-    expect(draw?.args.slice(0, 4)).toEqual([
+    expect(draw && 'args' in draw ? draw.args.slice(0, 4) : null).toEqual([
       expected?.sx,
       expected?.sy,
       expected?.sw,
@@ -222,6 +240,100 @@ describe('renderCollage', () => {
     });
     const tiles = tilesFor(one, { width: 640, height: 360 });
     expect(tiles).toEqual([{ slot: 0, x: 0, y: 0, width: 640, height: 360 }]);
+  });
+});
+
+describe('renderCollageAsync (export path)', () => {
+  const state = setCrop(
+    createEditorState({ seed: 4, photos, variation: 0.9 }),
+    'tall',
+    { x: 0.2, y: 0.8, zoom: 1.6 },
+  );
+  const imgs = images(800);
+
+  it('issues exactly the same draw calls as renderCollage', async () => {
+    const sync = recorder();
+    const syncResult = renderCollage(
+      sync,
+      state,
+      { width: 1200, height: 675 },
+      (id) => imgs.get(id) ?? null,
+    );
+    const async = recorder();
+    const asyncResult = await renderCollageAsync(
+      async,
+      state,
+      { width: 1200, height: 675 },
+      async (id) => {
+        await new Promise((r) => setTimeout(r, 0));
+        return imgs.get(id) ?? null;
+      },
+    );
+    expect(async.calls).toEqual(sync.calls);
+    expect(asyncResult).toEqual(syncResult);
+  });
+
+  it('obtains one image at a time and releases each after drawing it', async () => {
+    let held = 0;
+    let maxHeld = 0;
+    const released: string[] = [];
+    const ctx = recorder();
+    await renderCollageAsync(
+      ctx,
+      state,
+      { width: 600, height: 338 },
+      async (id) => {
+        held++;
+        maxHeld = Math.max(maxHeld, held);
+        await Promise.resolve();
+        const img = imgs.get(id);
+        return img
+          ? {
+              ...img,
+              release: () => {
+                held--;
+                released.push(id);
+              },
+            }
+          : null;
+      },
+    );
+    expect(maxHeld).toBe(1);
+    expect(released.sort()).toEqual(photos.map((p) => p.id).sort());
+  });
+});
+
+describe('drawTile', () => {
+  const state = createEditorState({ seed: 4, photos });
+  const tile: Tile = { slot: 0, x: 10, y: 20, width: 100, height: 80 };
+
+  it('draws a loading placeholder for null', () => {
+    const ctx = recorder();
+    expect(drawTile(ctx, state, tile, null)).toBe(false);
+    expect(ctx.calls).toEqual([
+      { op: 'fillRect', fill: PLACEHOLDER_COLOUR, args: [10, 20, 100, 80] },
+    ]);
+  });
+
+  it('draws a visibly different error placeholder, with a cross, for failed', () => {
+    const ctx = recorder();
+    expect(drawTile(ctx, state, tile, 'failed')).toBe(false);
+    expect(ctx.calls[0]).toEqual({
+      op: 'fillRect',
+      fill: ERROR_COLOUR,
+      args: [10, 20, 100, 80],
+    });
+    expect(ctx.calls.some((c) => c.op === 'stroke')).toBe(true);
+  });
+
+  it('counts failed tiles as missing in renderCollage', () => {
+    const result = renderCollage(
+      recorder(),
+      state,
+      { width: 400, height: 225 },
+      () => 'failed',
+    );
+    expect(result.missing).toBe(photos.length);
   });
 });
 
