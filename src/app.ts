@@ -134,6 +134,7 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     view,
     editor,
     photos: store,
+    frames,
     emptyFocus: () => addButton,
   });
   const dropOverlay = doc.createElement('div');

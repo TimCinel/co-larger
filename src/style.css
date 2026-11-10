@@ -806,3 +806,40 @@ button.primary:hover:not(:disabled) {
   margin: 0 0.4rem;
   font-size: 0.85rem;
 }
+
+/* Crop editing (#9): the slider and Reset sit in the tile's menu. */
+.tile-menu {
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.tile-menu-crop {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.tile-menu-zoom {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.tile-menu-zoom input {
+  width: 7rem;
+}
+
+/* Pointer events on the canvas drive panning, so the browser must not take
+   the touch for scrolling or zooming the page. */
+.collage-canvas {
+  touch-action: none;
+}
+
+.collage-canvas.pannable {
+  cursor: grab;
+}
+
+.collage-canvas.panning {
+  cursor: grabbing;
+}

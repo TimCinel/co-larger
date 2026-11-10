@@ -50,10 +50,15 @@ export { createLayoutControls, describeVariation } from './controls';
 export {
   coverSource,
   DEFAULT_CROP,
+  fitCrop,
+  panCrop,
+  visibleFractions,
+  zoomCropAt,
   isDefaultCrop,
   MAX_ZOOM,
   normaliseCrop,
   type Crop,
+  type CropGeometry,
   type SourceRect,
 } from './crop';
 export { DialInput, type DialEditor } from './dial';

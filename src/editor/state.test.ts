@@ -241,7 +241,7 @@ describe('crops', () => {
     // Clamped to the default, so nothing is stored.
     expect(cropOf(state, 'p0')).toEqual({ x: 0, y: 1, zoom: 1 });
     const zoomed = setCrop(base, 'p0', { zoom: 1e9 });
-    expect(cropOf(zoomed, 'p0').zoom).toBe(10);
+    expect(cropOf(zoomed, 'p0').zoom).toBe(5);
   });
 
   it('default crops are not stored', () => {
