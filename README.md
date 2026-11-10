@@ -6,8 +6,9 @@ never leave your machine: there is no backend.
 Unlike most collage makers, tile sizes are configurable, from uniform to a few
 very large "feature" photos among many small ones. See [spec.md](spec.md) for
 the planned scope. The app is at an early stage: you can add photos (file picker
-or drag and drop) and choose which are included, but the collage canvas is not
-built yet.
+or drag and drop), choose which are included, and see them as a mosaic with a
+size-variation dial and Shuffle. Canvas settings, swap, crop, undo, export and
+save are not built yet.
 
 ## Development
 
@@ -18,17 +19,17 @@ npm install
 npm run dev
 ```
 
-| Command                 | What it does                                                   |
-| ----------------------- | -------------------------------------------------------------- |
-| `npm run dev`           | Start the Vite dev server.                                     |
-| `npm run build`         | Build the static site into `dist/`.                            |
-| `npm run preview`       | Serve the built site locally.                                  |
-| `npm test`              | Run the unit tests once (Vitest).                              |
-| `npm run lint`          | Run ESLint and check formatting with Prettier.                 |
-| `npm run format`        | Format all files with Prettier.                                |
-| `npm run typecheck`     | Type check with `tsc`.                                         |
-| `npm run check`         | Run lint, type check, tests and build, as CI does.             |
-| `npm run check:browser` | Real-browser check of photo import (local only; needs Chrome). |
+| Command                 | What it does                                                        |
+| ----------------------- | ------------------------------------------------------------------- |
+| `npm run dev`           | Start the Vite dev server.                                          |
+| `npm run build`         | Build the static site into `dist/`.                                 |
+| `npm run preview`       | Serve the built site locally.                                       |
+| `npm test`              | Run the unit tests once (Vitest).                                   |
+| `npm run lint`          | Run ESLint and check formatting with Prettier.                      |
+| `npm run format`        | Format all files with Prettier.                                     |
+| `npm run typecheck`     | Type check with `tsc`.                                              |
+| `npm run check`         | Run lint, type check, tests and build, as CI does.                  |
+| `npm run check:browser` | Real-browser check of import and editor (local only; needs Chrome). |
 
 The layout engine (`src/layout/`) is a pure TypeScript library. To see it
 working, run `npm run dev` and open `/demo/layout.html`: a development-only page
@@ -47,6 +48,16 @@ synthetic photos in `tests/fixtures/` (regenerate them with
 `scripts/make-fixtures.sh`). Pass `-- --dir <folder>` to also import a folder of
 real photos and print timing and memory numbers. It is not part of CI, which
 has no browser.
+
+The editor (`src/editor/`) keeps everything that decides the collage in one
+plain, JSON-serialisable `EditorState` (canvas settings, dial, seed, plan,
+assignment, per-photo crops), changed only by pure actions in `state.ts` and
+held by an `EditorStore` with subscribe/notify. `renderCollage` (`render.ts`)
+draws a state onto any 2D context at any size; the editor calls it with
+decoded previews and thumbnails from a bounded `ImageCache`, and the export
+will call it with the originals. The cover-and-crop maths is `coverSource` in
+`crop.ts`. `npm run check:browser` also checks the collage, the dial and
+Shuffle; with `--dir` it reports frame times while dragging the dial.
 
 The build uses relative asset URLs, so `dist/` can be hosted at the root of a
 domain or under any sub-path.

@@ -68,6 +68,19 @@ export function planAspectLimit(
 }
 
 /**
+ * The dial value at which planLayout chooses the tree's structure for
+ * `variation`: the nearest tenth (after clamping to 0..1). Two variations
+ * with the same step, and otherwise the same inputs, give plans with the same
+ * structure and the same slot numbers; only the cut positions differ. So an
+ * editor can keep which photo is in which slot while the dial moves within a
+ * step, and must re-assign photos when the step changes.
+ */
+export function arrangementStep(variation: number): number {
+  const v = Math.min(1, Math.max(0, variation));
+  return Math.round(v * STRUCTURE_STEPS) / STRUCTURE_STEPS;
+}
+
+/**
  * Builds a mosaic plan: a guillotine tree with one leaf per slot. The plan
  * depends on the canvas's aspect ratio, the count, the variation and the
  * seed; never on the canvas's absolute size or the border.
@@ -108,7 +121,7 @@ export function planLayout(options: PlanOptions): LayoutPlan {
   // cut runs) at the nearest step of the dial, then fit the cut positions to
   // the exact variation. Between steps the tiles grow and shrink smoothly;
   // only crossing a step boundary rearranges them.
-  const step = Math.round(variation * STRUCTURE_STEPS) / STRUCTURE_STEPS;
+  const step = arrangementStep(variation);
   const limit = planAspectLimit(width, height, count);
   const structure = new Planner(
     weightsAt(step),

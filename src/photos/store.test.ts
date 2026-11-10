@@ -278,4 +278,26 @@ describe('PhotoStore', () => {
       expect(() => store.addPhotos([makeNewPhoto('a.jpg')])).not.toThrow();
     });
   });
+
+  it('setIncludedIds includes exactly those photos, with one notification', () => {
+    const store = new PhotoStore();
+    const [a, b, c] = store.addPhotos([
+      makeNewPhoto('a.jpg'),
+      makeNewPhoto('b.jpg'),
+      makeNewPhoto('c.jpg'),
+    ]);
+    store.setIncluded((a as { id: string }).id, false);
+    const changes: PhotoStoreChange[] = [];
+    store.subscribe((change) => changes.push(change));
+    store.setIncludedIds([(a as { id: string }).id, 'unknown']);
+    expect(store.getIncludedIds()).toEqual([(a as { id: string }).id]);
+    expect(changes).toEqual([
+      {
+        kind: 'included',
+        ids: [a, b, c].map((p) => (p as { id: string }).id),
+      },
+    ]);
+    store.setIncludedIds([(a as { id: string }).id]);
+    expect(changes).toHaveLength(1);
+  });
 });

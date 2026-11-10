@@ -193,6 +193,23 @@ export class PhotoStore {
     this.setIncludedWhere((photo) => wanted.has(photo.id), included);
   }
 
+  /**
+   * Includes exactly the photos in `ids` and excludes every other, with a
+   * single change notification (for restoring an undo step or a saved
+   * project). Unknown ids are ignored; check them first if that matters.
+   */
+  setIncludedIds(ids: Iterable<string>): void {
+    const wanted = new Set(ids);
+    const changed: string[] = [];
+    this.photos = this.photos.map((photo) => {
+      const included = wanted.has(photo.id);
+      if (photo.included === included) return photo;
+      changed.push(photo.id);
+      return { ...photo, included };
+    });
+    if (changed.length > 0) this.notify({ kind: 'included', ids: changed });
+  }
+
   /** Includes or excludes every photo ("Add all" / "Remove all"). */
   setAllIncluded(included: boolean): void {
     this.setIncludedWhere(() => true, included);

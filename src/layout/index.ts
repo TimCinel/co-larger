@@ -29,7 +29,12 @@ import { planLayout } from './plan';
 import { placeLayout } from './place';
 import type { PlaceOptions, PlanOptions, Tile } from './types';
 
-export { MAX_PLAN_ASPECT, planAspectLimit, planLayout } from './plan';
+export {
+  arrangementStep,
+  MAX_PLAN_ASPECT,
+  planAspectLimit,
+  planLayout,
+} from './plan';
 export {
   maxBorder,
   maxBorderForAspect,
