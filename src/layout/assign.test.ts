@@ -199,6 +199,9 @@ describe('solver optimality', () => {
       items[Math.floor(random() * items.length)] as T;
     const kinds = ['uniform', 'camera', 'extreme', 'tied'] as const;
     const camera = [4 / 3, 3 / 2, 3 / 4, 2 / 3, 1, 16 / 9, 9 / 16];
+    const allPermutations = Array.from({ length: 8 }, (_, n) =>
+      permutations(n),
+    );
     let checked = 0;
     for (let trial = 0; trial < 3000; trial++) {
       const n = 1 + (trial % 7);
@@ -223,10 +226,23 @@ describe('solver optimality', () => {
           height: size / Math.sqrt(shape),
         };
       });
+      const totalArea = slots.reduce((t, x) => t + x.width * x.height, 0);
+      const matrix = new Float64Array(n * n);
+      for (const [p, photo] of photos.entries()) {
+        for (const [slot, x] of slots.entries()) {
+          const crop = cropFraction(photo.aspect, x.width / x.height);
+          matrix[p * n + slot] = x.width * x.height * crop * crop;
+        }
+      }
       let best = Infinity;
-      for (const perm of permutations(n)) {
-        const assignment = perm.map((p) => (photos[p] as PhotoShape).id);
-        best = Math.min(best, placementCost(slots, photos, assignment));
+      for (const perm of allPermutations[n] as number[][]) {
+        // Same sum as placementCost, from a precomputed matrix: calling it
+        // 5,040 times per problem is too slow for CI.
+        let sum = 0;
+        for (const [slot, p] of perm.entries()) {
+          sum += matrix[p * n + slot] as number;
+        }
+        best = Math.min(best, sum / totalArea);
       }
       const exact = assignPhotos(slots, photos, { seed: trial, noise: 0 });
       expectPermutation(exact, photos);
@@ -243,7 +259,7 @@ describe('solver optimality', () => {
       checked++;
     }
     expect(checked).toBe(3000);
-  });
+  }, 60_000);
 });
 
 describe('crop tail', () => {
@@ -571,13 +587,23 @@ describe('swapSlots', () => {
 
 describe('performance', () => {
   it('assigns 200 photos in under 100 ms on every preset', () => {
-    let worst = 0;
-    for (const [i, ratio] of RATIO_PRESETS.entries()) {
+    // CI runs test files in parallel on a shared runner, so a single timing
+    // can be inflated by other work (once 132 ms against about 9 ms
+    // locally). Warm up once, then take each preset's median of 3 runs.
+    const time = (ratio: readonly [number, number], i: number): number => {
       const slots = slotsFor(ratio, 200, i / 10, i);
       const photos = realisticPhotos(200);
       const started = performance.now();
       assignPhotos(slots, photos, { seed: i });
-      worst = Math.max(worst, performance.now() - started);
+      return performance.now() - started;
+    };
+    time([1, 1], 0);
+    let worst = 0;
+    for (const [i, ratio] of RATIO_PRESETS.entries()) {
+      const runs = [time(ratio, i), time(ratio, i), time(ratio, i)].sort(
+        (a, b) => a - b,
+      );
+      worst = Math.max(worst, runs[1] as number);
     }
     expect(worst).toBeLessThan(100);
   });
