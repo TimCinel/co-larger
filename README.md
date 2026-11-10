@@ -30,8 +30,9 @@ npm run dev
 
 The layout engine (`src/layout/`) is a pure TypeScript library. To see it
 working, run `npm run dev` and open `/demo/layout.html`: a development-only page
-that draws layouts as coloured rectangles at several dial values. It is not part
-of the build.
+that draws layouts as coloured rectangles at several dial values. Its "View"
+control also shows how well photos fit their slots under auto-placement
+(`assignPhotos`) and under random placement. It is not part of the build.
 
 The build uses relative asset URLs, so `dist/` can be hosted at the root of a
 domain or under any sub-path.

@@ -49,6 +49,7 @@
         margin: 0;
       }
       figcaption {
+        white-space: pre-line;
         font-size: 11px;
         color: #666;
         margin-top: 2px;
@@ -75,6 +76,15 @@
         <span style="background: hsl(95 25% 62%)"></span>roughly square</span
       >
     </p>
+    <p>
+      In the photo-fit views each slot holds a photo of known aspect (see “Photo
+      mix”). The light rectangle is the whole photo shrunk to fit inside the
+      slot; the dark margin around it is the share cropped away when the photo
+      fills the slot. Colour runs from green (no crop) to red (half or more
+      cropped). “Crop” is the area-weighted mean crop fraction;
+      <em>auto</em> is <code>assignPhotos</code>, <em>random</em> a seeded
+      shuffle.
+    </p>
     <form id="controls">
       <label
         >Tiles <input id="count" type="number" min="1" max="500" value="30"
@@ -84,6 +94,26 @@
         >Border (% of short side)
         <input id="border" type="number" min="0" max="5" step="0.1" value="0.6"
       /></label>
+      <label
+        >View
+        <select id="view">
+          <option value="shapes">Slot shapes</option>
+          <option value="auto">Photo fit: auto-placement</option>
+          <option value="random">Photo fit: random placement</option>
+          <option value="compare">Photo fit: auto vs random</option>
+        </select></label
+      >
+      <label
+        >Photo mix
+        <select id="mix">
+          <option value="realistic">
+            60% landscape, 30% portrait, 10% square
+          </option>
+          <option value="panoramas">With panoramas and tall photos</option>
+          <option value="landscape">All 3:2 landscape</option>
+          <option value="portrait">All 3:4 portrait</option>
+        </select></label
+      >
       <label
         >Live dial
         <input id="dial" type="range" min="0" max="1" step="0.01" value="0.5" />
