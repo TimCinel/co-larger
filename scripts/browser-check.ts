@@ -78,6 +78,9 @@ const isGreenish = (p: number[]): boolean =>
 
 // --- Editor canvas helpers (issue #5) ----------------------------------------
 
+/** The editor's pure actions, imported into the page from the dev server. */
+const STATE_MODULE = '/src/editor/state.ts';
+
 /** Waits until the latest editor state is drawn with every image decoded. */
 async function waitDrawn(p: Page, timeout = 30000): Promise<void> {
   await p.waitForFunction(
@@ -212,13 +215,13 @@ function editorAction(
   ...args: unknown[]
 ): Promise<void> {
   return p.evaluate(
-    async ({ name, args }) => {
-      const actions = await import('/src/editor/state.ts');
+    async ({ name, args, module }) => {
+      const actions = await import(/* @vite-ignore */ module);
       (window as any).__app.editor.dispatch((s: unknown) =>
         actions[name](s, ...args),
       );
     },
-    { name, args },
+    { name, args, module: STATE_MODULE },
   );
 }
 
@@ -327,9 +330,9 @@ async function checkEditor(p: Page): Promise<void> {
   }
   await p.mouse.up();
   await waitDrawn(p);
-  const dragged = await p.evaluate(async () => {
+  const dragged = await p.evaluate(async (module) => {
     const e = (window as any).__app.editor;
-    const actions = await import('/src/editor/state.ts');
+    const actions = await import(/* @vite-ignore */ module);
     const s = e.getState();
     const direct = actions.setVariation(
       actions.shuffle(s, s.seed), // the same inputs, re-derived
@@ -342,7 +345,7 @@ async function checkEditor(p: Page): Promise<void> {
         JSON.stringify({ p: s.plan, a: s.assignment }) ===
         JSON.stringify({ p: direct.plan, a: direct.assignment }),
     };
-  });
+  }, STATE_MODULE);
   check(
     'mouse drag on the dial commits a state that depends only on the final value',
     dragged.same && !dragged.dragging && dragged.v > 0.4 && dragged.v < 0.8,
