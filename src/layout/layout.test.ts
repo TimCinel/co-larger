@@ -667,8 +667,9 @@ describe('dial continuity', () => {
 
 describe('performance', () => {
   it('plans and places a 200-tile layout in under 100 ms', () => {
-    let worst = 0;
-    for (const [i, ratio] of RATIO_PRESETS.entries()) {
+    // Noise only adds time: take each preset's minimum of 5 runs after a
+    // warm-up, so a shared CI runner cannot flake it but a real slowdown fails.
+    const time = (ratio: readonly [number, number], i: number): number => {
       const started = performance.now();
       layoutMosaic({
         ...canvas(ratio),
@@ -677,7 +678,13 @@ describe('performance', () => {
         seed: i,
         border: 10,
       });
-      worst = Math.max(worst, performance.now() - started);
+      return performance.now() - started;
+    };
+    time([1, 1], 0);
+    let worst = 0;
+    for (const [i, ratio] of RATIO_PRESETS.entries()) {
+      const best = Math.min(...Array.from({ length: 5 }, () => time(ratio, i)));
+      worst = Math.max(worst, best);
     }
     expect(worst).toBeLessThan(100);
   });

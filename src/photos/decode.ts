@@ -56,6 +56,9 @@ function scaleTo(
       ? canvas.getContext('2d')
       : canvas.getContext('2d');
   if (!context) throw new Error('2D canvas is not available');
+  // JPEG has no alpha: without this, transparent pixels (PNG, WebP) go black.
+  context.fillStyle = '#fff';
+  context.fillRect(0, 0, width, height);
   context.imageSmoothingQuality = 'high';
   context.drawImage(source, 0, 0, width, height);
   return canvas;

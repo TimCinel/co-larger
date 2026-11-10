@@ -587,9 +587,10 @@ describe('swapSlots', () => {
 
 describe('performance', () => {
   it('assigns 200 photos in under 100 ms on every preset', () => {
-    // CI runs test files in parallel on a shared runner, so a single timing
-    // can be inflated by other work (once 132 ms against about 9 ms
-    // locally). Warm up once, then take each preset's median of 3 runs.
+    // CI runs test files in parallel on a shared runner, so any one timing can
+    // be inflated by other work. Scheduling noise only ever adds time, so take
+    // each preset's minimum of 5 runs (after one warm-up): a real slowdown
+    // makes every run slow and still fails.
     const time = (ratio: readonly [number, number], i: number): number => {
       const slots = slotsFor(ratio, 200, i / 10, i);
       const photos = realisticPhotos(200);
@@ -600,10 +601,8 @@ describe('performance', () => {
     time([1, 1], 0);
     let worst = 0;
     for (const [i, ratio] of RATIO_PRESETS.entries()) {
-      const runs = [time(ratio, i), time(ratio, i), time(ratio, i)].sort(
-        (a, b) => a - b,
-      );
-      worst = Math.max(worst, runs[1] as number);
+      const best = Math.min(...Array.from({ length: 5 }, () => time(ratio, i)));
+      worst = Math.max(worst, best);
     }
     expect(worst).toBeLessThan(100);
   });

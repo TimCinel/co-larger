@@ -24,4 +24,14 @@ describe('summaryMessages', () => {
     );
     expect(messages[1]).toContain('Skipped 1 already added photo: d.jpg');
   });
+
+  it('explains dropped folders', () => {
+    const messages = summaryMessages(
+      { added: 0, duplicates: [], failures: [] },
+      ['Holiday'],
+    );
+    expect(messages).toEqual([
+      'Folders are not supported, drop the photos themselves: Holiday',
+    ]);
+  });
 });

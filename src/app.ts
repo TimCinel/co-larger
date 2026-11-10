@@ -60,10 +60,15 @@ export function renderApp(
   progress.hidden = true;
   const bar = doc.createElement('progress');
   const progressText = doc.createElement('span');
-  progressText.setAttribute('role', 'status');
+  // Visual only. Announcing every photo would flood a screen reader, so the
+  // live region below speaks only at the start and end of an import.
+  progress.setAttribute('aria-hidden', 'true');
   progress.append(bar, progressText);
+  const announcer = doc.createElement('span');
+  announcer.className = 'sr-only';
+  announcer.setAttribute('role', 'status');
 
-  header.append(title, addButton, progress, input);
+  header.append(title, addButton, progress, announcer, input);
 
   const notices = createNotices(doc);
 
@@ -83,9 +88,11 @@ export function renderApp(
   shell.append(header, notices.element, main, tray);
   root.replaceChildren(shell);
 
-  const addFiles = (files: File[]): void => {
+  const addFiles = (files: File[], folders: string[] = []): void => {
     void importer.enqueue(files).then((summary) => {
-      for (const message of summaryMessages(summary)) notices.show(message);
+      for (const message of summaryMessages(summary, folders)) {
+        notices.show(message);
+      }
     });
   };
 
@@ -94,9 +101,18 @@ export function renderApp(
     // Reset so picking the same files again still fires `change`.
     input.value = '';
   });
-  installDropTarget(doc, shell, addFiles);
+  installDropTarget(doc, shell, ({ files, folders }) => {
+    addFiles(files, folders);
+  });
 
+  let wasActive = false;
   const showProgress = (state: ImportProgress): void => {
+    if (state.active && !wasActive) {
+      announcer.textContent = `Importing ${String(state.total)} ${state.total === 1 ? 'photo' : 'photos'}`;
+    } else if (!state.active && wasActive) {
+      announcer.textContent = 'Import finished';
+    }
+    wasActive = state.active;
     progress.hidden = !state.active;
     bar.max = state.total;
     bar.value = state.done;

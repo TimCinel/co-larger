@@ -35,6 +35,9 @@ draw $tmp/up-land3.jpg 400 300 '#308080' 'ORIENT 3 shows 400x300'
 magick $tmp/up-land3.jpg -rotate 180 -quality 90 orient-3.jpg
 exiftool -q -overwrite_original -n -Orientation=3 orient-3.jpg
 
+# A PNG with transparent corners (its JPEG preview must get a white background).
+magick -size 200x100 xc:none -fill '#e02020' -draw 'circle 100,50 100,15' transparent.png
+
 # Files the browser cannot decode.
 printf 'This is not an image.\n' > not-an-image.txt
 { printf '\000\000\000\030ftypheic'; head -c 2048 /dev/zero; } > fake.heic

@@ -198,4 +198,41 @@ describe('PhotoImporter', () => {
     ]);
     expect(yields).toBeGreaterThanOrEqual(3);
   });
+
+  it('does not stall when a store listener throws', async () => {
+    const store = new PhotoStore({ onListenerError: () => undefined });
+    store.subscribe(() => {
+      throw new Error('bad listener');
+    });
+    const { decode } = trackingDecoder();
+    const importer = new PhotoImporter(store, {
+      decode,
+      yieldToMain: instantly,
+    });
+    const summary = await importer.enqueue([
+      makeFile('a.jpg', 1),
+      makeFile('b.jpg', 2),
+    ]);
+    expect(summary.added).toBe(2);
+    expect(importer.getProgress().active).toBe(false);
+  });
+
+  it('reports a failure if the store rejects a photo, and carries on', async () => {
+    const store = new PhotoStore();
+    const decode: Decoder = (file) =>
+      Promise.resolve(
+        file.name === 'zero.jpg' ? makeDecoded(0, 0) : makeDecoded(),
+      );
+    const importer = new PhotoImporter(store, {
+      decode,
+      yieldToMain: instantly,
+    });
+    const summary = await importer.enqueue([
+      makeFile('zero.jpg'),
+      makeFile('ok.jpg'),
+    ]);
+    expect(summary.added).toBe(1);
+    expect(summary.failures.map((f) => f.name)).toEqual(['zero.jpg']);
+    expect(importer.getProgress().active).toBe(false);
+  });
 });

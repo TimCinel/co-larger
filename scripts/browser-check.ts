@@ -3,7 +3,8 @@
  * a locally installed Chrome. Decoding, EXIF handling and drag and drop cannot
  * be verified in Node.
  *
- *   node scripts/browser-check.ts                 # synthetic fixtures + screenshot
+ *   node scripts/browser-check.ts                 # synthetic fixtures
+ *   node scripts/browser-check.ts --screenshot    # also rewrite docs/screenshots/photo-tray.png
  *   node scripts/browser-check.ts --dir <folder>  # also import a folder of real
  *                                                  # photos and report timing
  *                                                  # (prints numbers only)
@@ -89,7 +90,9 @@ const context = await browser.newContext({
 const page = await context.newPage();
 
 const requests: { url: string; method: string; hasBody: boolean }[] = [];
-page.on('request', (r) => {
+// Context-wide, so every page this script opens is watched, including the
+// real-photo page.
+context.on('request', (r) => {
   requests.push({
     url: r.url(),
     method: r.method(),
@@ -347,16 +350,112 @@ check(
   await count(),
 );
 
-// 7. Screenshot for the PR (synthetic images only).
-for (const i of [1, 4, 7, 12, 20, 30])
-  await page.locator('.thumb').nth(i).click();
-mkdirSync(join(root, 'docs', 'screenshots'), { recursive: true });
+// 6b. Notices are overlays: dismissing them must not move or resize the canvas.
+const canvasBefore = await page.locator('.canvas-area').boundingBox();
+while ((await page.locator('.notice button').count()) > 0) {
+  await page.locator('.notice button').first().click();
+}
+const canvasAfter = await page.locator('.canvas-area').boundingBox();
+check(
+  'notices do not change the canvas area size',
+  canvasBefore?.height === canvasAfter?.height &&
+    canvasBefore?.y === canvasAfter?.y,
+  `${String(canvasBefore?.height)} vs ${String(canvasAfter?.height)}`,
+);
+
+// 6c. A lost dragleave cannot leave the overlay stuck.
 await page.evaluate(() => {
-  document.querySelector('.tray-grid')!.scrollTop = 0;
+  const dt = new DataTransfer();
+  dt.items.add(new File(['x'], 'x.jpg', { type: 'image/jpeg' }));
+  document.dispatchEvent(
+    new DragEvent('dragenter', {
+      dataTransfer: dt,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
 });
-await page.screenshot({
-  path: join(root, 'docs', 'screenshots', 'photo-tray.png'),
+check(
+  'overlay shows on dragenter',
+  await page.locator('.shell.dragging').isVisible(),
+);
+await page.waitForTimeout(1300);
+check(
+  'overlay clears itself when the drag just stops (no dragleave)',
+  (await page.locator('.shell.dragging').count()) === 0,
+);
+
+// 6d. Screen readers: no live region on the per-photo progress text.
+check(
+  'progress text is not a live region; one polite announcer exists',
+  (await page.locator('.progress [role]').count()) === 0 &&
+    (await page.locator('.sr-only[role=status]').count()) === 1,
+);
+
+// 6e. Transparent PNG gets a white (not black) background in the preview.
+await page.setInputFiles('input[type=file]', join(fixtures, 'transparent.png'));
+await page.waitForFunction(
+  () => document.querySelectorAll('.thumb').length === 47,
+);
+const pngCorner = await page.evaluate(async () => {
+  const store = (window as unknown as { __store: any }).__store;
+  const photo = store.getPhotos().at(-1);
+  const bitmap = await createImageBitmap(photo.preview);
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext('2d')!;
+  ctx.drawImage(bitmap, 0, 0);
+  const thumb = await createImageBitmap(photo.thumbnail);
+  const tctx = new OffscreenCanvas(thumb.width, thumb.height).getContext('2d')!;
+  tctx.drawImage(thumb, 0, 0);
+  return {
+    preview: [...ctx.getImageData(3, 3, 1, 1).data],
+    thumb: [...tctx.getImageData(2, 2, 1, 1).data],
+  };
 });
+check(
+  'transparent PNG: preview and thumbnail corners are white',
+  [...pngCorner.preview, ...pngCorner.thumb].every(
+    (v, i) => i % 4 === 3 || v > 240,
+  ),
+  JSON.stringify(pngCorner),
+);
+
+// 6f. Removing a photo releases its object URL and its tray item.
+const removal = await page.evaluate(() => {
+  const store = (window as unknown as { __store: any }).__store;
+  const revoked: string[] = [];
+  const original = URL.revokeObjectURL.bind(URL);
+  URL.revokeObjectURL = (url: string) => {
+    revoked.push(url);
+    original(url);
+  };
+  const id = store.getPhotos().at(-1).id;
+  store.removePhotos([id]);
+  URL.revokeObjectURL = original;
+  return {
+    revoked: revoked.length,
+    thumbs: document.querySelectorAll('.thumb').length,
+  };
+});
+check(
+  'removePhotos revokes the object URL and removes the tray item',
+  removal.revoked === 1 && removal.thumbs === 46,
+  JSON.stringify(removal),
+);
+
+// 7. Screenshot for the PR (synthetic images only), only when asked for, so a
+// normal run leaves the committed screenshot alone.
+if (process.argv.includes('--screenshot')) {
+  for (const i of [1, 4, 7, 12, 20, 30])
+    await page.locator('.thumb').nth(i).click();
+  mkdirSync(join(root, 'docs', 'screenshots'), { recursive: true });
+  await page.evaluate(() => {
+    document.querySelector('.tray-grid')!.scrollTop = 0;
+  });
+  await page.screenshot({
+    path: join(root, 'docs', 'screenshots', 'photo-tray.png'),
+  });
+}
 
 // 8. Optional: a folder of real photos. Prints numbers only.
 if (realDir) {

@@ -41,8 +41,12 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
 
   tray.append(toolbar, grid, empty);
 
-  const items = new Map<string, HTMLButtonElement>();
-  const urls: string[] = [];
+  interface Item {
+    readonly li: HTMLLIElement;
+    readonly button: HTMLButtonElement;
+    readonly url: string;
+  }
+  const items = new Map<string, Item>();
 
   function createItem(photo: Photo): HTMLLIElement {
     const li = doc.createElement('li');
@@ -58,7 +62,6 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
     img.alt = '';
     img.draggable = false;
     const url = URL.createObjectURL(photo.thumbnail);
-    urls.push(url);
     img.src = url;
 
     const tick = doc.createElement('span');
@@ -70,17 +73,25 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
       const current = store.getPhoto(photo.id);
       if (current) store.setIncluded(photo.id, !current.included);
     });
-    items.set(photo.id, button);
+    items.set(photo.id, { li, button, url });
     li.append(button);
     return li;
   }
 
   function sync(): void {
     const photos = store.getPhotos();
+    const present = new Set(photos.map((photo) => photo.id));
+    // Release object URLs of photos that were removed from the store.
+    for (const [id, item] of items) {
+      if (present.has(id)) continue;
+      URL.revokeObjectURL(item.url);
+      item.li.remove();
+      items.delete(id);
+    }
     const fresh = photos.filter((photo) => !items.has(photo.id));
     if (fresh.length > 0) grid.append(...fresh.map(createItem));
     for (const photo of photos) {
-      const button = items.get(photo.id);
+      const button = items.get(photo.id)?.button;
       if (!button) continue;
       button.setAttribute('aria-pressed', String(photo.included));
       button.classList.toggle('included', photo.included);
@@ -96,9 +107,9 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
 
   store.subscribe(sync);
   sync();
-  // Object URLs are released with the page; photos are never removed in v1.
+  // Remaining object URLs are released with the page.
   doc.defaultView?.addEventListener('pagehide', () => {
-    for (const url of urls) URL.revokeObjectURL(url);
+    for (const item of items.values()) URL.revokeObjectURL(item.url);
   });
   return tray;
 }

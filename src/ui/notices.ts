@@ -9,8 +9,16 @@ function nameList(names: readonly string[]): string {
 }
 
 /** Human-readable messages for what an import skipped. Empty if all was fine. */
-export function summaryMessages(summary: ImportSummary): string[] {
+export function summaryMessages(
+  summary: ImportSummary,
+  folders: readonly string[] = [],
+): string[] {
   const messages: string[] = [];
+  if (folders.length > 0) {
+    messages.push(
+      `Folders are not supported, drop the photos themselves: ${nameList(folders)}`,
+    );
+  }
   const failed = summary.failures.map((failure) => failure.name);
   if (failed.length > 0) {
     messages.push(

@@ -174,9 +174,13 @@ export class PhotoImporter {
       const { batch, file } = job;
       this.queuedFingerprints.delete(fileFingerprint(file));
       if (job.result) {
-        const added = this.store.addPhotos([{ file, ...job.result }]);
-        if (added.length > 0) batch.added++;
-        else batch.duplicates.push(file.name);
+        try {
+          const added = this.store.addPhotos([{ file, ...job.result }]);
+          if (added.length > 0) batch.added++;
+          else batch.duplicates.push(file.name);
+        } catch (error) {
+          batch.failures.push({ name: file.name, message: describe(error) });
+        }
       } else {
         batch.failures.push({ name: file.name, message: describe(job.error) });
       }

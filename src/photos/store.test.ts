@@ -140,4 +140,142 @@ describe('PhotoStore', () => {
     expect(before[0]?.included).toBe(true);
     expect(store.getPhotos()).not.toBe(before);
   });
+
+  describe('batch include/exclude', () => {
+    it('includes or excludes many photos with one change event', () => {
+      const store = new PhotoStore();
+      const [a, b, c] = store.addPhotos([
+        makeNewPhoto('a.jpg'),
+        makeNewPhoto('b.jpg'),
+        makeNewPhoto('c.jpg'),
+      ]);
+      const changes: PhotoStoreChange[] = [];
+      store.subscribe((change) => changes.push(change));
+      store.setIncluded([a?.id ?? '', c?.id ?? '', 'unknown'], false);
+      expect(changes).toEqual([{ kind: 'included', ids: [a?.id, c?.id] }]);
+      expect(store.getIncludedIds()).toEqual([b?.id]);
+      store.setIncluded(new Set([a?.id ?? '', b?.id ?? '']), true); // only a changes
+      expect(changes).toHaveLength(2);
+      expect(store.getIncludedIds()).toEqual([a?.id, b?.id]);
+    });
+
+    it('getIncludedIds supports restoring a selection in one call', () => {
+      const store = new PhotoStore();
+      store.addPhotos([makeNewPhoto('a.jpg'), makeNewPhoto('b.jpg')]);
+      const before = store.getIncludedIds();
+      store.setAllIncluded(false);
+      store.setIncluded(before, true);
+      expect(store.getIncludedIds()).toEqual(before);
+    });
+  });
+
+  describe('restoring photos', () => {
+    it('keeps a given id and included flag, and mints ids past it', () => {
+      const store = new PhotoStore();
+      const [restored] = store.addPhotos([
+        { ...makeNewPhoto('a.jpg'), id: 'photo-7', included: false },
+      ]);
+      expect(restored?.id).toBe('photo-7');
+      expect(restored?.included).toBe(false);
+      const minted = store.addPhotos(
+        Array.from({ length: 8 }, (_, n) => makeNewPhoto(`m${String(n)}.jpg`)),
+      );
+      const ids = [restored, ...minted].map((p) => p?.id);
+      expect(new Set(ids).size).toBe(9);
+    });
+
+    it('rejects a clashing id and adds nothing', () => {
+      const store = new PhotoStore();
+      store.addPhotos([{ ...makeNewPhoto('a.jpg'), id: 'x' }]);
+      expect(() =>
+        store.addPhotos([
+          makeNewPhoto('b.jpg'),
+          { ...makeNewPhoto('c.jpg'), id: 'x' },
+        ]),
+      ).toThrow(RangeError);
+      expect(store.getTotalCount()).toBe(1);
+    });
+  });
+
+  describe('removal', () => {
+    it('removes photos, emits one removed change, and allows re-adding', () => {
+      const store = new PhotoStore();
+      const [a, b] = store.addPhotos([
+        makeNewPhoto('a.jpg'),
+        makeNewPhoto('b.jpg'),
+      ]);
+      const changes: PhotoStoreChange[] = [];
+      store.subscribe((change) => changes.push(change));
+      store.removePhotos([a?.id ?? '', 'unknown']);
+      expect(changes).toEqual([{ kind: 'removed', ids: [a?.id] }]);
+      expect(store.getPhotos().map((p) => p.id)).toEqual([b?.id]);
+      store.removePhotos(['unknown']); // no-op
+      expect(changes).toHaveLength(1);
+      expect(store.addPhotos([makeNewPhoto('a.jpg')])).toHaveLength(1);
+    });
+
+    it('clear removes everything with one change', () => {
+      const store = new PhotoStore();
+      store.addPhotos([makeNewPhoto('a.jpg'), makeNewPhoto('b.jpg')]);
+      const changes: PhotoStoreChange[] = [];
+      store.subscribe((change) => changes.push(change));
+      store.clear();
+      expect(store.getTotalCount()).toBe(0);
+      expect(changes).toHaveLength(1);
+      expect(changes[0]?.kind).toBe('removed');
+      store.clear();
+      expect(changes).toHaveLength(1);
+    });
+  });
+
+  describe('atomic addPhotos', () => {
+    it('adds nothing and marks nothing as seen if a later item is invalid', () => {
+      const store = new PhotoStore();
+      const changes: PhotoStoreChange[] = [];
+      store.subscribe((change) => changes.push(change));
+      expect(() =>
+        store.addPhotos([makeNewPhoto('a.jpg'), makeNewPhoto('b.jpg', 0, 0)]),
+      ).toThrow(RangeError);
+      expect(store.getTotalCount()).toBe(0);
+      expect(changes).toEqual([]);
+      expect(store.hasFile(makeFile('a.jpg'))).toBe(false);
+      expect(store.addPhotos([makeNewPhoto('a.jpg')])).toHaveLength(1);
+    });
+
+    it('skips duplicates within one call', () => {
+      const store = new PhotoStore();
+      expect(
+        store.addPhotos([makeNewPhoto('a.jpg'), makeNewPhoto('a.jpg')]),
+      ).toHaveLength(1);
+    });
+  });
+
+  describe('listener errors', () => {
+    it('isolates a throwing listener from the store and other listeners', () => {
+      const errors: unknown[] = [];
+      const store = new PhotoStore({ onListenerError: (e) => errors.push(e) });
+      const boom = new Error('boom');
+      store.subscribe(() => {
+        throw boom;
+      });
+      const later = vi.fn();
+      store.subscribe(later);
+      expect(() => store.addPhotos([makeNewPhoto('a.jpg')])).not.toThrow();
+      expect(store.getTotalCount()).toBe(1);
+      expect(later).toHaveBeenCalledOnce();
+      expect(errors).toEqual([boom]);
+    });
+
+    it('survives a throwing error handler', () => {
+      const store = new PhotoStore({
+        onListenerError: () => {
+          throw new Error('handler');
+        },
+      });
+      store.subscribe(() => {
+        throw new Error('listener');
+      });
+      expect(() => store.addPhotos([makeNewPhoto('a.jpg')])).not.toThrow();
+    });
+  });
 });
