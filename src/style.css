@@ -428,7 +428,8 @@ button.primary:hover:not(:disabled) {
 }
 
 .preset,
-.paper-preset {
+.paper-preset,
+.export-option {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -440,6 +441,8 @@ button.primary:hover:not(:disabled) {
 
 .preset[aria-pressed='true'],
 .preset[aria-pressed='true']:hover:not(:disabled),
+.export-option[aria-pressed='true'],
+.export-option[aria-pressed='true']:hover:not(:disabled),
 .paper-preset[aria-pressed='true'],
 .paper-preset[aria-pressed='true']:hover:not(:disabled),
 .swatch[aria-pressed='true'] {
@@ -734,9 +737,69 @@ button.primary:hover:not(:disabled) {
   font-variant-numeric: tabular-nums;
 }
 
-/* Export and save buttons will go here. */
+/* Export (#11), and save (#12) later. */
 .settings-footer {
   margin-top: auto;
+}
+
+.export-format {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.export-option {
+  flex: 1;
+}
+
+.export-quality {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.export-quality[hidden],
+.export-running[hidden] {
+  display: none;
+}
+
+.export-download {
+  width: 100%;
+  margin-top: 0.6rem;
+}
+
+.export-hint,
+.export-status {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.export-error {
+  margin: 0.4rem 0 0;
+  color: #f1a0a8;
+  font-size: 0.85rem;
+}
+
+.export-error:empty,
+.export-status:empty {
+  display: none;
+}
+
+.export-running {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.export-progress {
+  flex: 1 1 100%;
+  accent-color: var(--accent);
 }
 
 /* Tile selection (#8): outlines and the Swap / Remove menu sit over the

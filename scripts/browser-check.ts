@@ -21,8 +21,9 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium, type Page } from 'playwright-core';
+import { chromium, firefox, type Page } from 'playwright-core';
 import { createServer } from 'vite';
+import { checkA2, checkExport, exportRealFolder } from './export-checks.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtures = join(root, 'tests', 'fixtures');
@@ -3910,8 +3911,61 @@ const server = await createServer({
 await server.listen();
 const origin = 'http://localhost:5199';
 
+// `--a2-only --engine firefox|chrome`: just the A2 export, in another engine.
+if (process.argv.includes('--a2-only')) {
+  const engine = process.argv[process.argv.indexOf('--engine') + 1] ?? 'chrome';
+  const other =
+    engine === 'firefox'
+      ? await firefox.launch({ executablePath: process.env.FIREFOX_PATH })
+      : await chromium.launch({ channel: 'chrome' });
+  console.log(`Browser: ${engine} ${other.version()}`);
+  await checkA2(
+    other,
+    origin,
+    check,
+    `${engine} ${other.version()}`,
+    engine === 'firefox'
+      ? 'playwright_firefoxdev_profile'
+      : 'playwright_chromiumdev_profile',
+  );
+  await other.close();
+  await server.close();
+  process.exit(failures === 0 ? 0 : 1);
+}
+
 const browser = await chromium.launch({ channel: 'chrome' });
 console.log(`Browser: Chrome ${browser.version()}`);
+
+// `--export-dir <folder>`: A2 export of real photos, numbers only.
+const exportDirIndex = process.argv.indexOf('--export-dir');
+if (exportDirIndex >= 0) {
+  const dir = process.argv[exportDirIndex + 1] ?? '';
+  const files = readdirSync(dir)
+    .filter((f) => /\.jpe?g$/i.test(f))
+    .map((f) => join(dir, f));
+  console.log(`Real photos: ${String(files.length)} files (numbers only)`);
+  await exportRealFolder(
+    browser,
+    origin,
+    files,
+    'playwright_chromiumdev_profile',
+  );
+  await browser.close();
+  await server.close();
+  process.exit(0);
+}
+
+// `--export-only`: just the export checks (without A2), while working on them.
+if (process.argv.includes('--export-only')) {
+  await checkExport(browser, origin, check, {
+    screenshots: process.argv.includes('--export-screenshot')
+      ? join(root, 'docs', 'screenshots')
+      : undefined,
+  });
+  await browser.close();
+  await server.close();
+  process.exit(failures === 0 ? 0 : 1);
+}
 const context = await browser.newContext({
   viewport: { width: 1280, height: 800 },
 });
@@ -4281,6 +4335,18 @@ await checkPixelRatio(browser);
 await checkSelection(browser);
 await checkCrop(browser);
 await checkCropPerformance(browser);
+await checkExport(browser, origin, check, {
+  screenshots: process.argv.includes('--export-screenshot')
+    ? join(root, 'docs', 'screenshots')
+    : undefined,
+});
+await checkA2(
+  browser,
+  origin,
+  check,
+  `Chrome ${browser.version()}`,
+  'playwright_chromiumdev_profile',
+);
 
 // 7a. Screenshots for issue #6 (synthetic images only), only when asked for:
 // a preset other than 16:9, a border, a background colour and the compact
