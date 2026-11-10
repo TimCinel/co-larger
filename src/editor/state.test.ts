@@ -26,6 +26,7 @@ import {
   setPhotos,
   setVariation,
   shuffle,
+  swapTiles,
   validateEditorState,
   MAX_BORDER_FRACTION,
   MAX_CANVAS_SIDE,
@@ -738,5 +739,52 @@ describe('validateEditorState on untrusted input', () => {
     expect(JSON.stringify(loaded)).toBe(JSON.stringify(state));
     expect(loaded.plan).not.toBe(value.plan);
     expect(loaded.plan.root).not.toBe(value.plan.root);
+  });
+});
+
+describe('swapTiles', () => {
+  const photos = makePhotos(8);
+  const base = setCrop(createEditorState({ photos, seed: 5 }), 'p2', {
+    zoom: 2,
+    x: 0.3,
+    y: 0.6,
+  });
+
+  it('exchanges exactly two entries and nothing else', () => {
+    const next = swapTiles(base, 1, 4);
+    expect(next.assignment[1]).toBe(base.assignment[4]);
+    expect(next.assignment[4]).toBe(base.assignment[1]);
+    base.assignment.forEach((id, slot) => {
+      if (slot !== 1 && slot !== 4) expect(next.assignment[slot]).toBe(id);
+    });
+    expect(next.plan).toBe(base.plan);
+    expect(next.crops).toBe(base.crops);
+    expect(next.photos).toBe(base.photos);
+    expect(next.canvas).toBe(base.canvas);
+    expect(next.seed).toBe(base.seed);
+  });
+
+  it('does not change its input, and swapping back restores it', () => {
+    const before = JSON.stringify(base);
+    const next = swapTiles(base, 0, 7);
+    expect(JSON.stringify(base)).toBe(before);
+    expect(swapTiles(next, 7, 0)).toEqual(base);
+  });
+
+  it('returns the same object for the same tile', () => {
+    expect(swapTiles(base, 3, 3)).toBe(base);
+  });
+
+  it('rejects slots that do not exist', () => {
+    expect(() => swapTiles(base, 0, 8)).toThrow(RangeError);
+    expect(() => swapTiles(base, -1, 0)).toThrow(RangeError);
+    expect(() => swapTiles(base, 0.5, 1)).toThrow(RangeError);
+    expect(() => swapTiles(base, 9, 9)).toThrow(RangeError);
+  });
+
+  it('still validates, and photos keep their crops', () => {
+    const next = swapTiles(base, 0, 5);
+    expect(validateEditorState(JSON.parse(JSON.stringify(next)))).toEqual(next);
+    expect(cropOf(next, 'p2')).toEqual(cropOf(base, 'p2'));
   });
 });

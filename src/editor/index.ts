@@ -102,6 +102,7 @@ export {
   setCrop,
   setPhotos,
   setPhysicalSize,
+  swapTiles,
   switchToPhysical,
   switchToPixels,
   setVariation,
@@ -125,3 +126,17 @@ export {
   type EditorStoreOptions,
 } from './store';
 export { createCollageView, type CollageView } from './view';
+export {
+  createTileSelection,
+  type TileSelection,
+  type TileSelectionOptions,
+} from './tile-selection';
+export {
+  initialSelection,
+  moveFocus,
+  reduceSelection,
+  type FocusDirection,
+  type SelectionEffect,
+  type SelectionEvent,
+  type SelectionState,
+} from './selection';

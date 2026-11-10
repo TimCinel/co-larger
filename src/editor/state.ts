@@ -46,6 +46,7 @@ import {
   placeLayout,
   planAspectLimit,
   planLayout,
+  swapSlots,
   validateAssignment,
   validatePlan,
   type LayoutNode,
@@ -412,6 +413,22 @@ export function setBackground(
   const canvas = checkCanvas({ ...state.canvas, background });
   if (canvas.background === state.canvas.background) return state;
   return { ...state, canvas };
+}
+
+/**
+ * Swaps the photos in two tiles (slots). Only those two entries of the
+ * assignment change; the plan, the crops (which belong to photos, so each
+ * photo keeps its crop in its new tile) and everything else stay. Swapping a
+ * tile with itself returns `state`. Throws a RangeError for a slot that does
+ * not exist.
+ */
+export function swapTiles(
+  state: EditorState,
+  slotA: number,
+  slotB: number,
+): EditorState {
+  const assignment = swapSlots(state.assignment, slotA, slotB);
+  return slotA === slotB ? state : { ...state, assignment };
 }
 
 /** Sets one photo's crop (normalised). Never re-rolls. */
