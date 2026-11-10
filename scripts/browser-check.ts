@@ -1,7 +1,8 @@
 /**
  * Local real-browser check for photo import (issue #4), the editor canvas
  * (issue #5), the canvas settings and page layout (issue #6) and physical
- * canvas sizes (issue #7). Not run in
+ * canvas sizes (issue #7), and tile selection, Swap and Remove (issue #8).
+ * Not run in
  * CI: it needs
  * a locally installed Chrome. Decoding, EXIF handling and drag and drop cannot
  * be verified in Node.
@@ -9,6 +10,7 @@
  *   node scripts/browser-check.ts                 # synthetic fixtures
  *   node scripts/browser-check.ts --screenshot    # also rewrite docs/screenshots/issue-6-*.png
  *   node scripts/browser-check.ts --physical-screenshot  # and docs/screenshots/issue-7-*.png
+ *   node scripts/browser-check.ts --selection-screenshot  # and docs/screenshots/issue-8-*.png
  *   node scripts/browser-check.ts --tray-screenshot  # and docs/screenshots/photo-tray.png
  *   node scripts/browser-check.ts --dir <folder>  # also import a folder of real
  *                                                  # photos and report timing
@@ -2398,6 +2400,472 @@ async function checkPixelRatio(
   await ctx.close();
 }
 
+// --- Tile selection, Swap and Remove (issue #8) --------------------------------
+
+/** Selection in a fresh page with the six synthetic fixtures. */
+async function checkSelection(
+  browser: import('playwright-core').Browser,
+): Promise<void> {
+  const ctx = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+  });
+  const p = await ctx.newPage();
+  await p.goto(origin);
+  await p.waitForSelector('.tray');
+  await p.setInputFiles(
+    'input[type=file]',
+    [
+      'landscape.jpg',
+      'portrait.jpg',
+      'square.jpg',
+      'orient-6.jpg',
+      'orient-8.jpg',
+      'orient-3.jpg',
+    ].map((f) => join(fixtures, f)),
+  );
+  await p.waitForFunction(
+    () => (window as any).__app.editor.getState().photos.length === 6,
+  );
+  await waitDrawn(p);
+  // Count committed editor notifications from here on.
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__commits = 0;
+    w.__app.editor.subscribe((_s: unknown, c: { transient: boolean }) => {
+      if (!c.transient) w.__commits++;
+    });
+  });
+  const commits = (): Promise<number> =>
+    p.evaluate(() => (window as any).__commits);
+  const resetCommits = (): Promise<void> =>
+    p.evaluate(() => {
+      (window as any).__commits = 0;
+    });
+  const kind = (): Promise<string> =>
+    p.evaluate(() => (window as any).__app.selection.getSelection().kind);
+  const assignment = (): Promise<string[]> =>
+    p.evaluate(() => [...(window as any).__app.editor.getState().assignment]);
+  /** The client point at the centre of a slot's tile. */
+  const centre = (slot: number): Promise<{ x: number; y: number }> =>
+    p.evaluate((slot) => {
+      const { tiles } = (window as any).__app.view.lastRender();
+      const t = tiles.find((t: any) => t.slot === slot);
+      const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+      const r = c.getBoundingClientRect();
+      return {
+        x: r.left + ((t.x + t.width / 2) * r.width) / c.width,
+        y: r.top + ((t.y + t.height / 2) * r.height) / c.height,
+      };
+    }, slot);
+  const clickTile = async (slot: number): Promise<void> => {
+    const { x, y } = await centre(slot);
+    await p.mouse.click(x, y);
+  };
+  const menu = p.locator('.tile-menu');
+  const swapBtn = menu.getByRole('button', { name: 'Swap' });
+  const removeBtn = menu.getByRole('button', { name: 'Remove' });
+  const outline = p.locator('.tile-outline');
+  const outsideClick = (): Promise<void> => p.mouse.click(5, 790);
+
+  // Select and deselect: no commits.
+  await clickTile(0);
+  const outlineBox = await outline.boundingBox();
+  const tileBox = await p.evaluate(() => {
+    const { tiles } = (window as any).__app.view.lastRender();
+    const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    const r = c.getBoundingClientRect();
+    const t = tiles.find((t: any) => t.slot === 0);
+    return {
+      x: r.left + (t.x * r.width) / c.width,
+      y: r.top + (t.y * r.height) / c.height,
+      w: (t.width * r.width) / c.width,
+    };
+  });
+  check(
+    'clicking a tile selects it: outline over that tile and the menu appears',
+    (await kind()) === 'selected' &&
+      (await outline.isVisible()) &&
+      (await menu.isVisible()) &&
+      Math.abs(outlineBox!.x - tileBox.x) < 1.5 &&
+      Math.abs(outlineBox!.y - tileBox.y) < 1.5 &&
+      Math.abs(outlineBox!.width - tileBox.w) < 1.5,
+    JSON.stringify({ outlineBox, tileBox }),
+  );
+  check(
+    'the menu offers Swap and Remove as buttons with a label',
+    (await swapBtn.isVisible()) &&
+      (await removeBtn.isVisible()) &&
+      ((await menu.getAttribute('aria-label')) ?? '').includes('Actions for '),
+  );
+  const before = await assignment();
+  await clickTile(0);
+  check(
+    'clicking the selected tile again deselects it',
+    (await kind()) === 'idle' &&
+      !(await outline.isVisible()) &&
+      !(await menu.isVisible()),
+  );
+  await clickTile(1);
+  await outsideClick();
+  check('clicking outside the collage deselects', (await kind()) === 'idle');
+  await clickTile(1);
+  await p.keyboard.press('Escape');
+  check('Escape deselects', (await kind()) === 'idle');
+  await clickTile(2);
+  await clickTile(3);
+  check(
+    'clicking another tile moves the selection',
+    (await kind()) === 'selected' &&
+      (await p.evaluate(
+        () => (window as any).__app.selection.selectedTile().tile.slot,
+      )) === 3,
+  );
+  await outsideClick();
+  check(
+    'selecting and deselecting makes no commits and changes nothing',
+    (await commits()) === 0 &&
+      JSON.stringify(await assignment()) === JSON.stringify(before),
+    String(await commits()),
+  );
+
+  // The menu stays inside the viewport for every tile (and a small window).
+  for (const size of [
+    { width: 1280, height: 800 },
+    { width: 900, height: 620 },
+  ]) {
+    await p.setViewportSize(size);
+    await waitDrawn(p);
+    let inside = true;
+    let tried = 0;
+    for (let slot = 0; slot < 6; slot++) {
+      // A narrow window can push part of the collage off screen: skip those.
+      const c = await centre(slot);
+      if (c.x < 0 || c.y < 0 || c.x > size.width || c.y > size.height) continue;
+      tried++;
+      await clickTile(slot);
+      const box = await menu.boundingBox();
+      if (box) console.log('DBG', size.width, slot, JSON.stringify(box));
+      if (
+        !box ||
+        box.x < 0 ||
+        box.y < 0 ||
+        box.x + box.width > size.width ||
+        box.y + box.height > size.height
+      ) {
+        inside = false;
+      }
+    }
+    await outsideClick();
+    check(
+      `the menu stays inside the viewport for every tile at ${String(size.width)} x ${String(size.height)}`,
+      inside && tried >= 4,
+      `${String(tried)} tiles tried`,
+    );
+  }
+  await p.setViewportSize({ width: 1280, height: 800 });
+  await waitDrawn(p);
+
+  // Give one photo a crop, so we can check crops stay with their photos.
+  const photoA = before[0]!;
+  const photoB = before[3]!;
+  await editorAction(p, 'setCrop', photoA, { zoom: 2, x: 0.3, y: 0.7 });
+  await waitDrawn(p);
+  const cropBefore = await p.evaluate(
+    (id) => JSON.stringify((window as any).__app.editor.getState().crops[id]),
+    photoA,
+  );
+  await resetCommits();
+
+  // Swap: pending state, then a second tile.
+  await clickTile(0);
+  await swapBtn.click();
+  const pendingHint = await menu.innerText();
+  check(
+    'choosing Swap shows a hint and a distinct outline on the first tile',
+    (await kind()) === 'swapping' &&
+      /swap/i.test(pendingHint) &&
+      (await outline.evaluate((e) => e.classList.contains('swapping'))) &&
+      (await p.locator('.tile-menu-hint').isVisible()),
+    pendingHint,
+  );
+  if (process.argv.includes('--selection-screenshot')) {
+    mkdirSync(join(root, 'docs', 'screenshots'), { recursive: true });
+    await p.screenshot({
+      path: join(root, 'docs', 'screenshots', 'issue-8-swap-pending.png'),
+    });
+  }
+  const pixelsBefore = await canvasPixels(p);
+  const photosBefore = await assignment();
+  await clickTile(3);
+  await waitDrawn(p);
+  const after = await assignment();
+  const changed = after.flatMap((id, slot) =>
+    id === photosBefore[slot] ? [] : [slot],
+  );
+  check(
+    'swapping exchanges the two photos and nothing else, as one commit',
+    changed.join() === '0,3' &&
+      after[0] === photosBefore[3] &&
+      after[3] === photosBefore[0] &&
+      (await commits()) === 1 &&
+      (await kind()) === 'idle' &&
+      !(await menu.isVisible()),
+    `changed ${changed.join()}, commits ${String(await commits())}`,
+  );
+  const pixelsAfter = await canvasPixels(p);
+  const diff = await p.evaluate(
+    ({ a, b, slots }) => {
+      const { tiles, state } = (window as any).__app.view.lastRender();
+      const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+      const w = c.width;
+      const inSwapped = (x: number, y: number): boolean =>
+        tiles.some(
+          (t: any) =>
+            slots.includes(t.slot) &&
+            x >= t.x &&
+            x < t.x + t.width &&
+            y >= t.y &&
+            y < t.y + t.height,
+        );
+      let outside = 0;
+      let inside = 0;
+      for (let i = 0; i < a.length; i += 4) {
+        const px = (i / 4) % w;
+        const py = Math.floor(i / 4 / w);
+        const same =
+          a[i] === b[i] &&
+          a[i + 1] === b[i + 1] &&
+          a[i + 2] === b[i + 2] &&
+          a[i + 3] === b[i + 3];
+        if (!same) {
+          if (inSwapped(px, py)) inside++;
+          else outside++;
+        }
+      }
+      return { outside, inside, size: state.assignment.length };
+    },
+    { a: pixelsBefore, b: pixelsAfter, slots: [0, 3] },
+  );
+  check(
+    'every other tile is pixel-identical after the swap; the swapped tiles changed',
+    diff.outside === 0 && diff.inside > 0,
+    JSON.stringify(diff),
+  );
+  const stats = await drawnStats(p);
+  check(
+    'after a swap each photo still fills its tile (no empty space)',
+    Math.abs(stats.coverage - 1) < 1e-9 && stats.assignmentOk,
+    String(stats.coverage),
+  );
+  const cropAfter = await p.evaluate(
+    (id) => JSON.stringify((window as any).__app.editor.getState().crops[id]),
+    photoA,
+  );
+  check(
+    'a swapped photo keeps its crop',
+    cropBefore === cropAfter && photoB !== photoA,
+  );
+  // Tiles fully painted: no pixel left at the page background inside tiles.
+  const unpainted = await p.evaluate(() => {
+    const { tiles } = (window as any).__app.view.lastRender();
+    const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    const data = c.getContext('2d')!.getImageData(0, 0, c.width, c.height);
+    let bad = 0;
+    for (const t of tiles) {
+      for (const [fx, fy] of [
+        [0.02, 0.02],
+        [0.98, 0.02],
+        [0.02, 0.98],
+        [0.98, 0.98],
+      ] as const) {
+        const x = Math.floor(t.x + t.width * fx);
+        const y = Math.floor(t.y + t.height * fy);
+        const i = (y * c.width + x) * 4;
+        // The default background is white; a photo corner is not.
+        if (
+          data.data[i] === 255 &&
+          data.data[i + 1] === 255 &&
+          data.data[i + 2] === 255
+        ) {
+          bad++;
+        }
+      }
+    }
+    return bad;
+  });
+  check('no tile corner is left unpainted after the swap', unpainted === 0);
+
+  // Cancelling a swap: zero commits, nothing changed.
+  await resetCommits();
+  const keep = await assignment();
+  await clickTile(1);
+  await swapBtn.click();
+  await clickTile(1);
+  check(
+    'clicking the same tile cancels a pending swap',
+    (await kind()) === 'idle' && (await commits()) === 0,
+  );
+  await clickTile(1);
+  await swapBtn.click();
+  await outsideClick();
+  check(
+    'clicking outside cancels a pending swap',
+    (await kind()) === 'idle' && (await commits()) === 0,
+  );
+  await clickTile(1);
+  await swapBtn.click();
+  await p.keyboard.press('Escape');
+  check(
+    'Escape cancels a pending swap, with no commit and nothing changed',
+    (await kind()) === 'idle' &&
+      (await commits()) === 0 &&
+      JSON.stringify(await assignment()) === JSON.stringify(keep) &&
+      !(await outline.isVisible()),
+  );
+  await clickTile(1);
+  await swapBtn.click();
+  await menu.getByRole('button', { name: 'Cancel' }).click();
+  check(
+    'the Cancel button cancels a pending swap',
+    (await kind()) === 'idle' && (await commits()) === 0,
+  );
+
+  // Keyboard: focus the canvas, move, select, reach the menu with Tab.
+  await p.locator('.collage-canvas').focus();
+  await p.keyboard.press('ArrowRight');
+  await p.keyboard.press('Enter');
+  const selectedByKey = await p.evaluate(() =>
+    (window as any).__app.selection.selectedTile(),
+  );
+  const label1 = await p.locator('.collage-canvas').getAttribute('aria-label');
+  const nameOf = (id: string): Promise<string> =>
+    p.evaluate((id) => (window as any).__store.getPhoto(id).file.name, id);
+  const selName = selectedByKey ? await nameOf(selectedByKey.photoId) : '';
+  check(
+    'keyboard: arrow keys and Enter select a tile; the canvas label names the file, position and state',
+    selectedByKey !== null &&
+      (label1 ?? '').includes(selName) &&
+      /tile \d+ of 6, selected/.test(label1 ?? ''),
+    label1 ?? '',
+  );
+  await p.keyboard.press('Tab');
+  check(
+    'keyboard: Tab from the canvas reaches the Swap button, then Remove',
+    (await p.evaluate(() => document.activeElement?.textContent)) === 'Swap' &&
+      (await (async () => {
+        await p.keyboard.press('Tab');
+        return p.evaluate(() => document.activeElement?.textContent);
+      })()) === 'Remove',
+  );
+  await p.keyboard.press('Shift+Tab');
+  await p.keyboard.press('Enter'); // Swap
+  check(
+    'keyboard: Enter on Swap starts a swap and returns focus to the canvas',
+    (await kind()) === 'swapping' &&
+      (await p.evaluate(() => document.activeElement?.className)) ===
+        'collage-canvas swap-pending',
+  );
+  await resetCommits();
+  const kbBefore = await assignment();
+  await p.keyboard.press('ArrowLeft');
+  await p.keyboard.press('Enter');
+  const kbAfter = await assignment();
+  await waitDrawn(p);
+  check(
+    'keyboard: a second tile chosen with arrows and Enter swaps, as one commit',
+    (await commits()) === 1 &&
+      kbAfter.filter((id, i) => id !== kbBefore[i]).length === 2,
+  );
+  await p.keyboard.press('Enter');
+  await p.keyboard.press('Escape');
+  check(
+    'keyboard: Escape clears a selection made by keyboard',
+    (await kind()) === 'idle',
+  );
+
+  // Remove: gone from the collage, unticked in the tray, one commit.
+  await resetCommits();
+  await clickTile(2);
+  const victim = (await assignment())[2]!;
+  const victimName = await nameOf(victim);
+  const selectedBefore = await p.evaluate(() =>
+    (window as any).__store.getSelectedCount(),
+  );
+  await removeBtn.click();
+  await waitDrawn(p);
+  const survivors = await assignment();
+  check(
+    'Remove takes the photo out of the collage and re-rolls: one commit, no selection left',
+    !survivors.includes(victim) &&
+      survivors.length === 5 &&
+      (await commits()) === 1 &&
+      (await kind()) === 'idle' &&
+      !(await menu.isVisible()),
+    `commits ${String(await commits())}`,
+  );
+  check(
+    'Remove unticks the photo in the tray, which keeps showing it',
+    (await p
+      .locator(`.thumb[aria-label="${victimName}"]`)
+      .getAttribute('aria-pressed')) === 'false' &&
+      (await p.evaluate(() => (window as any).__store.getSelectedCount())) ===
+        selectedBefore - 1 &&
+      (await p.locator('.thumb').count()) === 6,
+  );
+
+  // Re-rolls clear the selection.
+  await clickTile(0);
+  const shuffleBtn = p.getByRole('button', { name: 'Shuffle' });
+  await shuffleBtn.click();
+  await waitDrawn(p);
+  check(
+    'Shuffle clears the selection',
+    (await kind()) === 'idle' && !(await outline.isVisible()),
+  );
+  await clickTile(0);
+  await setDial(p, 0.9);
+  await waitDrawn(p);
+  check('changing the dial clears the selection', (await kind()) === 'idle');
+  await clickTile(0);
+  await p.locator('.thumb').first().click();
+  await waitDrawn(p);
+  check(
+    'including or excluding a photo in the tray clears the selection',
+    (await kind()) === 'idle',
+  );
+
+  // Selected photo leaves the collage through the tray.
+  await clickTile(0);
+  const gone = (await assignment())[0]!;
+  const goneName = await nameOf(gone);
+  await p.locator(`.thumb[aria-label="${goneName}"]`).click();
+  await waitDrawn(p);
+  check(
+    'excluding the selected photo in the tray clears the selection',
+    (await kind()) === 'idle' && !(await outline.isVisible()),
+  );
+
+  if (process.argv.includes('--selection-screenshot')) {
+    await p.getByRole('button', { name: 'Add all to collage' }).click();
+    await waitDrawn(p);
+    await p.getByRole('button', { name: 'Shuffle' }).click();
+    await waitDrawn(p);
+    await clickTile(1);
+    await p.screenshot({
+      path: join(root, 'docs', 'screenshots', 'issue-8-selected.png'),
+    });
+  }
+  await ctx.close();
+}
+
+/** The collage canvas's pixels. */
+function canvasPixels(p: Page): Promise<number[]> {
+  return p.evaluate(() => {
+    const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    return [...c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data];
+  });
+}
+
 const server = await createServer({
   root,
   server: { port: 5199 },
@@ -2774,6 +3242,7 @@ await checkLayout(page);
 await checkCanvasSettings(page);
 await checkPhysicalSizes(page);
 await checkPixelRatio(browser);
+await checkSelection(browser);
 
 // 7a. Screenshots for issue #6 (synthetic images only), only when asked for:
 // a preset other than 16:9, a border, a background colour and the compact

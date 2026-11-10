@@ -738,3 +738,71 @@ button.primary:hover:not(:disabled) {
 .settings-footer {
   margin-top: auto;
 }
+
+/* Tile selection (#8): outlines and the Swap / Remove menu sit over the
+   canvas as separate elements, so the canvas pixels never change. */
+.collage-canvas:focus {
+  outline: none;
+}
+
+.collage-canvas.swap-pending {
+  cursor: copy;
+}
+
+.tile-outline,
+.tile-focus {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.tile-outline {
+  border: 3px solid var(--accent);
+  box-shadow:
+    0 0 0 1px #fff,
+    inset 0 0 0 1px #fff;
+}
+
+.tile-outline.swapping {
+  border: 3px dashed #ffb020;
+  box-shadow:
+    0 0 0 1px #000,
+    inset 0 0 0 1px #000;
+}
+
+.tile-focus {
+  outline: 2px dashed #fff;
+  outline-offset: -6px;
+  box-shadow: inset 0 0 0 1px #000;
+}
+
+.tile-outline[hidden],
+.tile-focus[hidden],
+.tile-menu[hidden],
+.tile-menu [hidden] {
+  display: none;
+}
+
+.tile-menu {
+  position: fixed;
+  z-index: 5;
+  display: flex;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 0.3rem;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 50%);
+  max-width: min(22rem, calc(100vw - 12px));
+}
+
+.tile-menu-actions,
+.tile-menu-pending {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.tile-menu-hint {
+  margin: 0 0.4rem;
+  font-size: 0.85rem;
+}

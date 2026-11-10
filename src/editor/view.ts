@@ -41,6 +41,12 @@ export interface CollageView {
     readonly tiles: readonly Tile[];
     readonly missing: number;
   } | null;
+  /**
+   * Calls `listener` after every draw (and after the canvas is hidden for an
+   * empty collage), when `lastRender` and the canvas's size are current.
+   * Returns an unsubscribe function. For overlays on the canvas (#8, #9).
+   */
+  onRender(listener: () => void): () => void;
   /** Draws now instead of in the next frame (for tests). */
   renderNow(): void;
 }
@@ -96,7 +102,13 @@ export function createCollageView(options: CollageViewOptions): CollageView {
   let available = { width: 0, height: 0 };
   let dpr = win.devicePixelRatio || 1;
 
+  const renderListeners = new Set<() => void>();
   function render(): void {
+    draw();
+    for (const listener of [...renderListeners]) listener();
+  }
+
+  function draw(): void {
     const state = editor.getState();
     const empty = state.photos.length === 0;
     canvas.hidden = empty;
@@ -209,6 +221,12 @@ export function createCollageView(options: CollageViewOptions): CollageView {
       return tile && photoId !== undefined ? { tile, photoId } : null;
     },
     lastRender: () => last,
+    onRender(listener) {
+      renderListeners.add(listener);
+      return () => {
+        renderListeners.delete(listener);
+      };
+    },
     renderNow() {
       frames.cancel('render');
       render();

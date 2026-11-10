@@ -10,9 +10,11 @@ import {
   createCollageView,
   createLayoutControls,
   createSizeReadout,
+  createTileSelection,
   EditorStore,
   FrameScheduler,
   type CollageView,
+  type TileSelection,
 } from './editor';
 import { installDropTarget } from './ui/dropzone';
 import { createNotices, summaryMessages } from './ui/notices';
@@ -33,6 +35,8 @@ export interface App {
   readonly editor: EditorStore;
   /** The collage canvas in the main area. */
   readonly view: CollageView;
+  /** Which tile is selected, and the Swap / Remove menu. */
+  readonly selection: TileSelection;
 }
 
 /**
@@ -125,6 +129,12 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
       );
     },
   });
+  const selection = createTileSelection({
+    doc,
+    view,
+    editor,
+    photos: store,
+  });
   const dropOverlay = doc.createElement('div');
   dropOverlay.className = 'drop-overlay';
   dropOverlay.textContent = 'Drop photos to add them';
@@ -181,5 +191,5 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   importer.subscribe(showProgress);
 
   // The drop overlay is shown through the `dragging` class on the shell.
-  return { store, editor, view };
+  return { store, editor, view, selection };
 }
