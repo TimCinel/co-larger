@@ -8,18 +8,29 @@
  * landscape photo in a 3:4 portrait slot loses 44% of it; putting it in a 3:2
  * slot loses 11%.
  *
- * What is minimised: the crop fraction of each photo weighted by its slot's
- * area, as a share of the total slot area ({@link weightedCrop}). A badly
- * cropped photo in a large feature tile is far more visible than one in a
- * thumbnail, so the large slots get the best-fitting photos first.
+ * What is minimised ({@link placementCost}): each photo's crop fraction
+ * squared, weighted by its slot's share of the total slot area.
+ *
+ * - Area weighting: a badly cropped photo in a large feature tile is far more
+ *   visible than one in a thumbnail, so the large slots get the best fits.
+ * - Squaring: with the plain crop fraction, the optimum happily sacrifices a
+ *   photo that fits nowhere (cropping it by 60% or more) so that another
+ *   fits perfectly. Squared, one photo cropped by 60% costs twice as much as
+ *   two cropped by 30%, so unavoidable cropping is spread out. Measured on a
+ *   typical camera mix this cut photos cropped by more than half from about
+ *   1.2% to 0.06% and the worst crop from 73% to 56%, for 0.4 percentage
+ *   points more mean crop.
+ *
+ * {@link weightedCrop} reports the plain area-weighted crop fraction, the
+ * human-readable figure ("14% of the collage's photo area is cropped").
  *
  * Variety: Shuffle must change which photos are featured, so this is not a
  * single global optimum. Each pairing's cost gets a small seeded random
- * surcharge of up to {@link PLACEMENT_NOISE} (as a crop fraction, also
+ * surcharge of up to {@link PLACEMENT_NOISE} (in the same squared units, also
  * weighted by slot area), and the assignment that minimises the perturbed
  * total is found exactly (Hungarian algorithm). That gives two guarantees:
  *
- * - The weighted crop is never more than PLACEMENT_NOISE above the best
+ * - The placement cost is never more than PLACEMENT_NOISE above the best
  *   possible for those photos and slots.
  * - Photos that fit a slot about equally well (any two 4:3 photos, say, or a
  *   4:3 and a 1.4 one) are in effect drawn at random for it, so different
@@ -67,7 +78,7 @@ export interface AssignOptions {
   /** Any finite number. The same seed and inputs give the same assignment. */
   readonly seed: number;
   /**
-   * The largest seeded surcharge per pairing, as a crop fraction. Defaults
+   * The largest seeded surcharge per pairing, in placement-cost units. Defaults
    * to {@link PLACEMENT_NOISE}; 0 gives the exact optimum (with ties broken
    * by photo order). Mainly for tests and tuning.
    */
@@ -75,19 +86,21 @@ export interface AssignOptions {
 }
 
 /**
- * The largest seeded surcharge added to any pairing, as a crop fraction. The
- * result's weighted crop is at most this much above the optimum; in
- * practice it is far closer (measured on 40-photo layouts: 0.1 percentage
- * points above the optimum on average for a typical camera mix, 0.5 for
- * photos with all-different aspects, 1.9 at worst).
+ * The largest seeded surcharge added to any pairing, in placement-cost units
+ * (crop fraction squared). The result's placement cost is at most this much
+ * above the optimum; in practice it is far closer (measured: 0.005 at worst).
  *
- * Large enough that photos within a few percent of each other in aspect
- * take turns in the large slots, even when no two aspects are equal; small
- * enough that an exact fit still usually beats a 4:3 photo in a 3:2 slot
- * (11% cropped), and well short of what a wrong-orientation photo costs
- * (25% or more).
+ * Tuned so the largest slots get as much variety as the earlier linear cost
+ * gave with 0.08: over 20 seeds on a fixed 40-tile layout, about 9 different
+ * photos in the largest slot for a typical camera mix, 7.5 for a phone mix
+ * and 6.6 when no two aspects are equal. In squared units an exact fit costs
+ * 0, a 4:3 photo in a 3:2 slot (11% cropped) 0.012 and a 25% crop 0.0625,
+ * so an exact fit can lose a big slot to a photo cropped by up to 20%, but
+ * never to a wrong-orientation one (4:3 in 3:4 is 44% cropped, 0.19).
+ * Raising it to 0.08 adds a little variety but gives back part of the tail
+ * improvement (worst crop 59% instead of 56%).
  */
-export const PLACEMENT_NOISE = 0.08;
+export const PLACEMENT_NOISE = 0.04;
 
 /**
  * The fraction of a photo's area cropped away when it fills a slot "cover"
@@ -108,21 +121,70 @@ export function weightedCrop(
   photos: readonly PhotoShape[],
   assignment: readonly string[],
 ): number {
+  return weightedMean(slots, photos, assignment, (crop) => crop);
+}
+
+/**
+ * What {@link assignPhotos} minimises (before its seeded surcharge): the
+ * area-weighted mean of each photo's crop fraction squared. Squaring makes
+ * one photo cropped by 60% cost far more than two cropped by 30%, so the
+ * optimum spreads unavoidable cropping instead of sacrificing a few photos.
+ */
+export function placementCost(
+  slots: readonly SlotShape[],
+  photos: readonly PhotoShape[],
+  assignment: readonly string[],
+): number {
+  return weightedMean(slots, photos, assignment, (crop) => crop * crop);
+}
+
+/**
+ * Throws a RangeError unless `assignment` puts each of `photos` in exactly
+ * one slot: same length, no unknown ids, no repeats. Use it on assignments
+ * loaded from saved projects. Also checks the photos as assignPhotos does.
+ */
+export function validateAssignment(
+  assignment: readonly unknown[],
+  photos: readonly PhotoShape[],
+): asserts assignment is Assignment {
   const byId = indexPhotos(photos);
+  if (assignment.length !== photos.length) {
+    throw new RangeError(
+      `assignment has ${String(assignment.length)} slots for ${String(photos.length)} photos`,
+    );
+  }
+  const seen = new Set<string>();
+  for (const id of assignment) {
+    if (typeof id !== 'string' || !byId.has(id)) {
+      throw new RangeError(`unknown photo id ${JSON.stringify(id)}`);
+    }
+    if (seen.has(id)) {
+      throw new RangeError(`photo id ${JSON.stringify(id)} appears twice`);
+    }
+    seen.add(id);
+  }
+}
+
+function weightedMean(
+  slots: readonly SlotShape[],
+  photos: readonly PhotoShape[],
+  assignment: readonly string[],
+  measure: (crop: number) => number,
+): number {
   if (assignment.length !== slots.length) {
     throw new RangeError('assignment and slots differ in length');
   }
+  validateAssignment(assignment, photos);
+  const aspectOf = new Map(photos.map((p) => [p.id, p.aspect]));
   let total = 0;
-  let cropped = 0;
+  let sum = 0;
   for (const [slot, s] of slots.entries()) {
-    const id = assignment[slot] as string;
-    const photo = byId.get(id);
-    if (!photo) throw new RangeError(`unknown photo id ${JSON.stringify(id)}`);
+    const aspect = aspectOf.get(assignment[slot] as string) as number;
     const area = s.width * s.height;
     total += area;
-    cropped += area * cropFraction(photo.aspect, s.width / s.height);
+    sum += area * measure(cropFraction(aspect, s.width / s.height));
   }
-  return total > 0 ? cropped / total : 0;
+  return total > 0 ? sum / total : 0;
 }
 
 /** Returns a copy of `assignment` with the photos in slots `a` and `b` swapped. */
@@ -143,7 +205,7 @@ export function swapSlots(
 }
 
 /**
- * Assigns each photo to one slot, minimising area-weighted cropping with
+ * Assigns each photo to one slot, minimising the placement cost with
  * seeded variety (see the module comment). `slots[i]` is slot `i`, so the
  * tiles from placeLayout can be passed directly.
  *
@@ -190,9 +252,9 @@ export function assignPhotos(
     const key = hashString(photo.id);
     for (let s = 0; s < n; s++) {
       const noise = noiseScale * hashUnit(seed, key, s);
+      const crop = cropFraction(photo.aspect, slotAspects[s] as number);
       cost[p * n + s] =
-        ((areas[s] as number) / totalArea) *
-        (cropFraction(photo.aspect, slotAspects[s] as number) + noise);
+        ((areas[s] as number) / totalArea) * (crop * crop + noise);
     }
   }
 

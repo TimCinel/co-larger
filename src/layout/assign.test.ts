@@ -4,8 +4,10 @@ import {
   cropFraction,
   PLACEMENT_NOISE,
   placeLayout,
+  placementCost,
   planLayout,
   swapSlots,
+  validateAssignment,
   weightedCrop,
   type PhotoShape,
   type SlotShape,
@@ -110,32 +112,37 @@ describe('crop versus random assignment', () => {
         randomTotal += random;
       }
     }
-    // Measured: 0.53 overall; 0.74 for the worst preset and dial (where
-    // the slot shapes match the photo mix least well).
+    // Measured: 0.55 overall; 0.75 for the worst preset and dial (7:5 at
+    // dial 0, where the slot shapes match the photo mix least well).
     expect(oursTotal / randomTotal).toBeLessThan(0.6);
   }, 60_000);
 
-  it('stays within PLACEMENT_NOISE of the best possible assignment', () => {
+  it('keeps the placement cost within PLACEMENT_NOISE of the optimum', () => {
+    let worstExcess = 0;
     for (const ratio of RATIO_PRESETS) {
       for (const dial of DIALS) {
         const photos = realisticPhotos(40);
         const slots = slotsFor(ratio, 40, dial, 7);
-        const best = weightedCrop(
+        // noise 0 is the exact optimum (checked by brute force below).
+        const best = placementCost(
           slots,
           photos,
           assignPhotos(slots, photos, { seed: 7, noise: 0 }),
         );
         for (const seed of [1, 2, 3]) {
-          const ours = weightedCrop(
+          const ours = placementCost(
             slots,
             photos,
             assignPhotos(slots, photos, { seed }),
           );
           expect(ours).toBeGreaterThanOrEqual(best - 1e-12);
           expect(ours).toBeLessThanOrEqual(best + PLACEMENT_NOISE);
+          worstExcess = Math.max(worstExcess, ours - best);
         }
       }
     }
+    // The guarantee is loose; in practice the excess is far smaller.
+    expect(worstExcess).toBeLessThan(PLACEMENT_NOISE / 4);
   });
 
   it('crops nothing when the photos are exactly the slot shapes', () => {
@@ -147,9 +154,11 @@ describe('crop versus random assignment', () => {
     });
     const exact = assignPhotos(slots, photos, { seed: 1, noise: 0 });
     expect(weightedCrop(slots, photos, exact)).toBeLessThan(1e-12);
-    // With the default noise, any compromise is tiny.
+    // With the default noise, near-matches are interchangeable (that is the
+    // variety), so a few photos trade places with similar ones. Measured:
+    // 3.4% mean crop.
     const seeded = assignPhotos(slots, photos, { seed: 1 });
-    expect(weightedCrop(slots, photos, seeded)).toBeLessThan(0.01);
+    expect(weightedCrop(slots, photos, seeded)).toBeLessThan(0.05);
   });
 
   it('puts portrait photos in the large portrait slots and landscape in landscape', () => {
@@ -169,6 +178,146 @@ describe('crop versus random assignment', () => {
       }
     }
   });
+});
+
+describe('solver optimality', () => {
+  /** Every permutation of 0..n-1. */
+  function permutations(n: number): number[][] {
+    if (n === 0) return [[]];
+    const out: number[][] = [];
+    for (const rest of permutations(n - 1)) {
+      for (let i = 0; i <= rest.length; i++) {
+        out.push([...rest.slice(0, i), n - 1, ...rest.slice(i)]);
+      }
+    }
+    return out;
+  }
+
+  it('matches brute force over every permutation on small problems', () => {
+    const random = createRandom(2024);
+    const pick = <T>(items: readonly T[]): T =>
+      items[Math.floor(random() * items.length)] as T;
+    const kinds = ['uniform', 'camera', 'extreme', 'tied'] as const;
+    const camera = [4 / 3, 3 / 2, 3 / 4, 2 / 3, 1, 16 / 9, 9 / 16];
+    let checked = 0;
+    for (let trial = 0; trial < 3000; trial++) {
+      const n = 1 + (trial % 7);
+      const kind = kinds[Math.floor(trial / 7) % kinds.length] as string;
+      const aspect = (): number => {
+        if (kind === 'camera') return pick(camera);
+        if (kind === 'tied') return pick([4 / 3, 3 / 4]);
+        if (kind === 'extreme') return Math.exp((random() * 2 - 1) * 9);
+        return Math.exp((random() * 2 - 1) * 1.5);
+      };
+      const photos = Array.from({ length: n }, (_, i) => ({
+        id: `p${String(i)}`,
+        aspect: aspect(),
+      }));
+      // Slot areas from about 1e-6 to 1e6 of each other on some trials.
+      const spread = trial % 3 === 0 ? 14 : 2;
+      const slots = Array.from({ length: n }, () => {
+        const size = Math.exp((random() * 2 - 1) * spread);
+        const shape = kind === 'extreme' ? aspect() : pick(camera);
+        return {
+          width: size * Math.sqrt(shape),
+          height: size / Math.sqrt(shape),
+        };
+      });
+      let best = Infinity;
+      for (const perm of permutations(n)) {
+        const assignment = perm.map((p) => (photos[p] as PhotoShape).id);
+        best = Math.min(best, placementCost(slots, photos, assignment));
+      }
+      const exact = assignPhotos(slots, photos, { seed: trial, noise: 0 });
+      expectPermutation(exact, photos);
+      const cost = placementCost(slots, photos, exact);
+      expect(cost, `trial ${String(trial)}`).toBeLessThanOrEqual(
+        best * (1 + 1e-9) + 1e-15,
+      );
+      // With the default noise: still a permutation, within the guarantee.
+      const seeded = assignPhotos(slots, photos, { seed: trial });
+      expectPermutation(seeded, photos);
+      expect(placementCost(slots, photos, seeded)).toBeLessThanOrEqual(
+        best + PLACEMENT_NOISE + 1e-12,
+      );
+      checked++;
+    }
+    expect(checked).toBe(3000);
+  });
+});
+
+describe('crop tail', () => {
+  // 11 presets × dials 0, 0.5, 1 × 40 and 120 photos × 2 seeds: 10,560
+  // photos per mix.
+  const phoneMix = [
+    // 45% 4:3, 25% 3:4, 10% 16:9, 5% 9:16, 10% 1:1, 5% 3:2.
+    4 / 3,
+    3 / 4,
+    4 / 3,
+    1,
+    4 / 3,
+    3 / 4,
+    16 / 9,
+    4 / 3,
+    3 / 4,
+    4 / 3,
+    1,
+    4 / 3,
+    3 / 4,
+    16 / 9,
+    4 / 3,
+    9 / 16,
+    4 / 3,
+    3 / 4,
+    3 / 2,
+    4 / 3,
+  ];
+  const phonePhotos = (count: number): PhotoShape[] =>
+    Array.from({ length: count }, (_, i) => ({
+      id: `phone-${String(i)}`,
+      aspect: phoneMix[i % phoneMix.length] as number,
+    }));
+
+  // [mix, max share of photos over half cropped, max single crop].
+  // Measured with the squared cost (and, for comparison, the earlier linear
+  // cost): phone 0.06%, worst 56% (linear: 1.5%, 72%). The realistic mix
+  // includes 5% 3:1 panoramas, which no slot fits (slots stay within 2.5:1)
+  // and which crop by two thirds in a square slot: 1.45%, worst 83%
+  // (linear: 3.6%, 87%).
+  for (const [name, makePhotos, maxShare, maxCrop] of [
+    ['phone', phonePhotos, 0.003, 0.62],
+    ['realistic', realisticPhotos, 0.02, 0.88],
+  ] as const) {
+    it(`rarely crops a photo by more than half (${name} mix)`, () => {
+      let photosSeen = 0;
+      let overHalf = 0;
+      let worst = 0;
+      for (const ratio of RATIO_PRESETS) {
+        for (const dial of [0, 0.5, 1]) {
+          for (const count of [40, 120]) {
+            const photos = makePhotos(count);
+            const aspectOf = new Map(photos.map((p) => [p.id, p.aspect]));
+            for (const seed of [1, 2]) {
+              const slots = slotsFor(ratio, count, dial, seed);
+              const assignment = assignPhotos(slots, photos, { seed });
+              for (const t of slots) {
+                const id = assignment[t.slot] as string;
+                const crop = cropFraction(
+                  aspectOf.get(id) as number,
+                  t.width / t.height,
+                );
+                photosSeen++;
+                if (crop > 0.5) overHalf++;
+                worst = Math.max(worst, crop);
+              }
+            }
+          }
+        }
+      }
+      expect(overHalf / photosSeen).toBeLessThan(maxShare);
+      expect(worst).toBeLessThan(maxCrop);
+    }, 60_000);
+  }
 });
 
 describe('determinism and variety', () => {
@@ -290,18 +439,14 @@ describe('edge cases', () => {
     const photos = realisticPhotos(20);
     const a = assignPhotos(slots, photos, { seed: 3 });
     expectPermutation(a, photos);
-    const best = weightedCrop(
+    const best = placementCost(
       slots,
       photos,
       assignPhotos(slots, photos, { seed: 3, noise: 0 }),
     );
-    expect(weightedCrop(slots, photos, a)).toBeLessThanOrEqual(
+    expect(placementCost(slots, photos, a)).toBeLessThanOrEqual(
       best + PLACEMENT_NOISE,
     );
-    // Note what "least cropped" means here: with every photo narrower than
-    // every slot, the optimum sacrifices the portrait photos to the widest
-    // slots so that the landscape ones fit the narrowest slots well, rather
-    // than cropping everything moderately.
     expect(weightedCrop(slots, photos, a)).toBeLessThan(
       weightedCrop(slots, photos, randomAssignment(photos, 3)),
     );
@@ -382,6 +527,33 @@ describe('edge cases', () => {
     );
     expect(() => weightedCrop(slots, ok, ['a'])).toThrow(RangeError);
     expect(() => weightedCrop(slots, ok, ['a', 'z'])).toThrow(/unknown/);
+    expect(() => weightedCrop(slots, ok, ['a', 'a'])).toThrow(/twice/);
+    expect(() => placementCost(slots, ok, ['b', 'b'])).toThrow(/twice/);
+  });
+
+  it('validates assignments loaded from JSON', () => {
+    const photos: PhotoShape[] = [
+      { id: 'a', aspect: 1 },
+      { id: 'b', aspect: 2 },
+      { id: 'c', aspect: 0.5 },
+    ];
+    const loaded: unknown = JSON.parse('["c", "a", "b"]');
+    if (!Array.isArray(loaded)) throw new Error('not an array');
+    expect(() => {
+      validateAssignment(loaded, photos);
+    }).not.toThrow();
+    for (const bad of [
+      ['a', 'b'],
+      ['a', 'b', 'c', 'a'],
+      ['a', 'b', 'b'],
+      ['a', 'b', 'z'],
+      ['a', 'b', 3],
+      ['a', 'b', null],
+    ]) {
+      expect(() => {
+        validateAssignment(bad, photos);
+      }, JSON.stringify(bad)).toThrow(RangeError);
+    }
   });
 });
 
