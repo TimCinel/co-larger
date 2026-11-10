@@ -1,6 +1,11 @@
 // Development-only page for eyeballing the layout engine. Not part of the app
 // build: Vite only bundles index.html. Open /demo/layout.html under `npm run dev`.
-import { layoutMosaic, type Tile } from '../src/layout';
+import {
+  maxBorderForAspect,
+  placeLayout,
+  planLayout,
+  type Tile,
+} from '../src/layout';
 
 const RATIOS: readonly (readonly [number, number])[] = [
   [1, 1],
@@ -36,18 +41,16 @@ function panel(ratio: readonly [number, number], dial: number): HTMLElement {
   const height = rh * scale;
   const count = Math.max(1, Math.round(input('count').valueAsNumber || 1));
   const seed = input('seed').valueAsNumber || 0;
-  const border =
+  const requested =
     ((input('border').valueAsNumber || 0) / 100) * Math.min(width, height);
 
   const started = performance.now();
-  const tiles = layoutMosaic({
-    width,
-    height,
-    count,
-    variation: dial,
-    seed,
-    border,
-  });
+  const plan = planLayout({ width, height, count, variation: dial, seed });
+  // Clamp the border the way the editor should: no tile beyond 3:1 and none
+  // under a pixel.
+  const limit = maxBorderForAspect(plan, width, height, 3);
+  const border = Math.min(requested, limit);
+  const tiles = placeLayout(plan, { width, height, border });
   const elapsed = performance.now() - started;
 
   const canvas = document.createElement('canvas');
@@ -75,7 +78,8 @@ function panel(ratio: readonly [number, number], dial: number): HTMLElement {
   const caption = document.createElement('figcaption');
   caption.textContent =
     `max/min area ${(Math.max(...areas) / Math.min(...areas)).toFixed(1)}× · ` +
-    `max aspect ${Math.max(...aspects).toFixed(2)} · ${elapsed.toFixed(1)} ms`;
+    `max aspect ${Math.max(...aspects).toFixed(2)} · ${elapsed.toFixed(1)} ms` +
+    (border < requested ? ` · border clamped to ${border.toFixed(2)} px` : '');
   figure.append(canvas, caption);
   return figure;
 }

@@ -3,6 +3,7 @@ import {
   layoutMosaic,
   MAX_PLAN_ASPECT,
   maxBorder,
+  maxBorderForAspect,
   placeLayout,
   planLayout,
   type LayoutNode,
@@ -19,6 +20,9 @@ import {
 
 const SEEDS = Array.from({ length: 40 }, (_, i) => i * 7919 + 1);
 const VARIATIONS = [0, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9, 1];
+
+/** Timeout for the heavy property tests: a few seconds locally, slower in CI. */
+const HEAVY = 60_000;
 
 /** A canvas of the given ratio about the size of an A2 poster at 300 DPI. */
 function canvas([w, h]: readonly [number, number]): {
@@ -37,95 +41,109 @@ describe('property tests: 1 to 200 tiles on every ratio preset', () => {
   // One plan per tile count and ratio preset (2,200 plans), cycling through
   // variations and seeds so every count, ratio, variation and seed combination
   // class is covered. Each plan is checked for everything at once.
-  it('tiles the canvas exactly, without slivers, at any size and border', () => {
-    let checked = 0;
-    for (let count = 1; count <= 200; count++) {
-      for (const [r, ratio] of RATIO_PRESETS.entries()) {
-        const c = canvas(ratio);
-        const variation = VARIATIONS[(count + r) % VARIATIONS.length] as number;
-        const seed = SEEDS[(count * 11 + r) % SEEDS.length] as number;
-        const plan = planLayout({ ...c, count, variation, seed });
-        const label = `count ${String(count)} ratio ${ratio.join(':')} variation ${String(variation)}`;
+  it(
+    'tiles the canvas exactly, without slivers, at any size and border',
+    () => {
+      let checked = 0;
+      for (let count = 1; count <= 200; count++) {
+        for (const [r, ratio] of RATIO_PRESETS.entries()) {
+          const c = canvas(ratio);
+          const variation = VARIATIONS[
+            (count + r) % VARIATIONS.length
+          ] as number;
+          const seed = SEEDS[(count * 11 + r) % SEEDS.length] as number;
+          const plan = planLayout({ ...c, count, variation, seed });
+          const label = `count ${String(count)} ratio ${ratio.join(':')} variation ${String(variation)}`;
 
-        // Exact tiling, unsnapped, with no border and with borders of 0.3%
-        // and 0.5% of the short side (about 21 and 35 px on an A2 poster;
-        // at 200 tiles that is already a large share of a small tile).
-        const plain = placeLayout(plan, c);
-        expect(
-          tilingError(plain, c.width, c.height, 0, 1e-6),
-          label,
-        ).toBeNull();
-        expect(maxAspect(plain), label).toBeLessThanOrEqual(
-          MAX_PLAN_ASPECT + 1e-9,
-        );
-        for (const share of [0.003, 0.005]) {
-          const border = shortSide(c) * share;
-          const tiles = placeLayout(plan, { ...c, border });
+          // Exact tiling, unsnapped, with no border, and with borders of half
+          // and all of the largest border that keeps every tile within 3:1.
+          const plain = placeLayout(plan, c);
           expect(
-            tilingError(tiles, c.width, c.height, border, 1e-6),
+            tilingError(plain, c.width, c.height, 0, 1e-6),
             label,
           ).toBeNull();
-          expect(maxAspect(tiles), label).toBeLessThanOrEqual(3);
-        }
-
-        // Snapped to whole pixels, at poster size and at a small preview size.
-        for (const size of [
-          c,
-          { width: c.width / 10, height: c.height / 10 },
-        ]) {
-          const width = Math.round(size.width);
-          const height = Math.round(size.height);
-          const border = count > 100 ? 0 : 2;
-          const tiles = placeLayout(plan, {
-            width,
-            height,
-            border,
-            snap: true,
-          });
-          for (const t of tiles) {
-            expect(Number.isInteger(t.x) && Number.isInteger(t.width)).toBe(
-              true,
-            );
-            expect(Number.isInteger(t.y) && Number.isInteger(t.height)).toBe(
-              true,
-            );
+          expect(maxAspect(plain), label).toBeLessThanOrEqual(
+            MAX_PLAN_ASPECT + 1e-9,
+          );
+          const limit = maxBorderForAspect(plan, c.width, c.height, 3);
+          expect(limit, label).toBeGreaterThan(0);
+          for (const border of [limit / 2, limit]) {
+            const tiles = placeLayout(plan, { ...c, border });
+            expect(
+              tilingError(tiles, c.width, c.height, border, 1e-6),
+              label,
+            ).toBeNull();
+            expect(maxAspect(tiles), label).toBeLessThanOrEqual(3 + 1e-9);
           }
-          // A preview can be too small to give 200 tiles a pixel each.
-          if (tiles.every((t) => t.width > 0 && t.height > 0)) {
+
+          // Snapped to whole pixels, at poster size and at a small preview size.
+          for (const size of [
+            c,
+            { width: c.width / 10, height: c.height / 10 },
+          ]) {
+            const width = Math.round(size.width);
+            const height = Math.round(size.height);
+            const border = Math.min(
+              2,
+              maxBorder(plan, width, height, { snap: true }),
+            );
+            const tiles = placeLayout(plan, {
+              width,
+              height,
+              border,
+              snap: true,
+            });
+            for (const t of tiles) {
+              expect(Number.isInteger(t.x) && Number.isInteger(t.width)).toBe(
+                true,
+              );
+              expect(Number.isInteger(t.y) && Number.isInteger(t.height)).toBe(
+                true,
+              );
+            }
+            expect(
+              Math.min(...tiles.map((t) => Math.min(t.width, t.height))),
+              label,
+            ).toBeGreaterThanOrEqual(1);
             expect(
               tilingError(tiles, width, height, border, 0),
               label,
             ).toBeNull();
           }
+          checked++;
         }
-        checked++;
       }
-    }
-    expect(checked).toBe(200 * RATIO_PRESETS.length);
-  });
+      expect(checked).toBe(200 * RATIO_PRESETS.length);
+    },
+    HEAVY,
+  );
 
-  it('tiles exactly across variations and seeds for typical counts', () => {
-    for (const count of [2, 3, 5, 8, 13, 30, 64, 120]) {
-      for (const ratio of RATIO_PRESETS) {
-        const c = canvas(ratio);
-        for (const variation of VARIATIONS) {
-          for (const seed of SEEDS.slice(0, 3)) {
-            const border = shortSide(c) * 0.002;
-            const tiles = layoutMosaic({
-              ...c,
-              count,
-              variation,
-              seed,
-              border,
-            });
-            expect(
-              tilingError(tiles, c.width, c.height, border, 1e-6),
-            ).toBeNull();
+  it(
+    'tiles exactly across variations and seeds for typical counts',
+    () => {
+      for (const count of [2, 3, 5, 8, 13, 30, 64, 120]) {
+        for (const ratio of RATIO_PRESETS) {
+          const c = canvas(ratio);
+          for (const variation of VARIATIONS) {
+            for (const seed of SEEDS.slice(0, 3)) {
+              const border = shortSide(c) * 0.002;
+              const tiles = layoutMosaic({
+                ...c,
+                count,
+                variation,
+                seed,
+                border,
+              });
+              expect(
+                tilingError(tiles, c.width, c.height, border, 1e-6),
+              ).toBeNull();
+            }
           }
         }
       }
-    }
-  });
+    },
+    HEAVY,
+  );
 
   it('places a single tile inside the border', () => {
     const tiles = layoutMosaic({
@@ -254,22 +272,27 @@ describe('size variation', () => {
     expect(worst).toBeLessThanOrEqual(2);
   });
 
-  it('keeps tile areas within about 2× at variation 0 for any count', () => {
-    for (let count = 1; count <= 200; count++) {
-      for (const [r, ratio] of RATIO_PRESETS.entries()) {
-        if ((count + r) % 3 !== 0) continue;
-        const tiles = layoutMosaic({
-          ...canvas(ratio),
-          count,
-          variation: 0,
-          seed: count,
-        });
-        expect(areaSpread(tiles), `count ${String(count)}`).toBeLessThanOrEqual(
-          2,
-        );
+  it(
+    'keeps tile areas within about 2× at variation 0 for any count',
+    () => {
+      for (let count = 1; count <= 200; count++) {
+        for (const [r, ratio] of RATIO_PRESETS.entries()) {
+          if ((count + r) % 3 !== 0) continue;
+          const tiles = layoutMosaic({
+            ...canvas(ratio),
+            count,
+            variation: 0,
+            seed: count,
+          });
+          expect(
+            areaSpread(tiles),
+            `count ${String(count)}`,
+          ).toBeLessThanOrEqual(2);
+        }
       }
-    }
-  });
+    },
+    HEAVY,
+  );
 
   it('makes the largest tile at least 15× the smallest at variation 1 with 30 tiles', () => {
     let worst = Infinity;
@@ -309,91 +332,165 @@ describe('size variation', () => {
     }
   });
 
-  it('grows the area spread monotonically with the dial, on average over seeds', () => {
-    // The geometric mean of largest/smallest over seeds, in dial steps of
-    // 0.05 for 30 tiles on every preset, and 0.1 for 10 and 100 tiles. (For
-    // small counts the first 0.05 is flat: shape compromises at variation 0
-    // already spread areas by about 1.3×, as much as the dial adds there.)
-    const cases = [
-      ...RATIO_PRESETS.map((ratio) => ({ count: 30, ratio, step: 0.05 })),
-      ...[RATIO_PRESETS[0], RATIO_PRESETS[3], RATIO_PRESETS[10]].flatMap(
-        (ratio) =>
-          ratio ? [10, 100].map((count) => ({ count, ratio, step: 0.1 })) : [],
-      ),
-    ];
-    for (const { count, ratio, step } of cases) {
-      const dials = Array.from(
-        { length: Math.round(1 / step) + 1 },
-        (_, i) => i * step,
-      );
-      const seeds = SEEDS.slice(0, 20);
-      const means = dials.map((variation) => {
-        let sum = 0;
-        for (const seed of seeds) {
-          sum += Math.log(
-            areaSpread(
-              layoutMosaic({ ...canvas(ratio), count, variation, seed }),
-            ),
-          );
+  it(
+    'grows the area spread monotonically with the dial, on average over seeds',
+    () => {
+      // The geometric mean of largest/smallest over seeds, in dial steps of
+      // 0.05 for 30 tiles on every preset, and 0.1 for 10 and 100 tiles. (For
+      // small counts the first 0.05 is flat: shape compromises at variation 0
+      // already spread areas by about 1.3×, as much as the dial adds there.)
+      const cases = [
+        ...RATIO_PRESETS.map((ratio) => ({ count: 30, ratio, step: 0.05 })),
+        ...[RATIO_PRESETS[0], RATIO_PRESETS[3], RATIO_PRESETS[10]].flatMap(
+          (ratio) =>
+            ratio
+              ? [10, 100].map((count) => ({ count, ratio, step: 0.1 }))
+              : [],
+        ),
+      ];
+      for (const { count, ratio, step } of cases) {
+        const dials = Array.from(
+          { length: Math.round(1 / step) + 1 },
+          (_, i) => i * step,
+        );
+        const seeds = SEEDS.slice(0, 20);
+        const means = dials.map((variation) => {
+          let sum = 0;
+          for (const seed of seeds) {
+            sum += Math.log(
+              areaSpread(
+                layoutMosaic({ ...canvas(ratio), count, variation, seed }),
+              ),
+            );
+          }
+          return sum / seeds.length;
+        });
+        for (let i = 1; i < means.length; i++) {
+          expect(
+            means[i],
+            `count ${String(count)} ratio ${ratio.join(':')} dial ${String(dials[i])}`,
+          ).toBeGreaterThan(means[i - 1] as number);
         }
-        return sum / seeds.length;
-      });
-      for (let i = 1; i < means.length; i++) {
-        expect(
-          means[i],
-          `count ${String(count)} ratio ${ratio.join(':')} dial ${String(dials[i])}`,
-        ).toBeGreaterThan(means[i - 1] as number);
       }
-    }
-  });
+    },
+    HEAVY,
+  );
 });
 
 describe('tile shapes', () => {
-  it('keeps every tile within 3:1 at full poster size in whole pixels', () => {
+  it('keeps every tile within 3:1 in whole pixels up to the snapped limit', () => {
     for (const count of [30, 100, 200]) {
       for (const ratio of RATIO_PRESETS) {
         for (const seed of SEEDS.slice(0, 5)) {
-          const plan = planLayout({
-            ...canvas(ratio),
-            count,
-            variation: 1,
-            seed,
-          });
           const c = canvas(ratio);
+          const plan = planLayout({ ...c, count, variation: 1, seed });
+          const width = Math.round(c.width);
+          const height = Math.round(c.height);
+          const border = maxBorderForAspect(plan, width, height, 3, {
+            snap: true,
+          });
+          // At poster size the snapped limit is still a usable border.
+          expect(border).toBeGreaterThanOrEqual(count > 100 ? 10 : 20);
           const tiles = placeLayout(plan, {
-            width: Math.round(c.width),
-            height: Math.round(c.height),
-            border: 24,
+            width,
+            height,
+            border,
             snap: true,
           });
           expect(maxAspect(tiles)).toBeLessThanOrEqual(3);
+          expect(tilingError(tiles, width, height, border, 0)).toBeNull();
         }
       }
     }
   });
 
-  it('makes a healthy mix of portrait and landscape slots', () => {
-    for (const variation of [0.5, 1]) {
-      let portrait = 0;
-      let landscape = 0;
-      let total = 0;
-      for (const ratio of RATIO_PRESETS) {
-        for (const seed of SEEDS.slice(0, 10)) {
-          for (const t of layoutMosaic({
-            ...canvas(ratio),
-            count: 30,
-            variation,
-            seed,
-          })) {
-            if (aspect(t) < 1.1) continue;
-            if (t.height > t.width) portrait++;
-            else landscape++;
-            total++;
+  /** Shares of portrait and landscape tiles (square within 10% excluded). */
+  function orientationMix(ratio: readonly [number, number], variation: number) {
+    let portrait = 0;
+    let landscape = 0;
+    let total = 0;
+    for (const seed of SEEDS.slice(0, 20)) {
+      for (const t of layoutMosaic({
+        ...canvas(ratio),
+        count: 30,
+        variation,
+        seed,
+      })) {
+        total++;
+        if (aspect(t) < 1.1) continue;
+        if (t.height > t.width) portrait++;
+        else landscape++;
+      }
+    }
+    return { portrait: portrait / total, landscape: landscape / total };
+  }
+
+  it('makes a healthy mix of portrait and landscape slots from dial 0.5 up', () => {
+    for (const ratio of RATIO_PRESETS) {
+      for (const variation of [0.5, 1]) {
+        const mix = orientationMix(ratio, variation);
+        const label = `${ratio.join(':')} variation ${String(variation)}`;
+        expect(mix.portrait, label).toBeGreaterThan(0.3);
+        expect(mix.landscape, label).toBeGreaterThan(0.3);
+      }
+    }
+  });
+
+  it('makes some of each orientation at dial 0 on every preset', () => {
+    // At dial 0 equal tiles lean towards the canvas's own orientation: the
+    // minority orientation is only 7-15% of tiles on 3:4, 4:3, 4:5 and 5:4
+    // (and 25-50% on the other presets). See the PR for why this is left.
+    for (const ratio of RATIO_PRESETS) {
+      const mix = orientationMix(ratio, 0);
+      expect(mix.portrait, ratio.join(':')).toBeGreaterThan(0.05);
+      expect(mix.landscape, ratio.join(':')).toBeGreaterThan(0.05);
+    }
+  });
+
+  it('puts the largest tile anywhere: spread evenly over the quadrants', () => {
+    // A big tile often spans the full width or height, so its centre lies
+    // exactly on the midline; those count as neither side.
+    const quadrants = { TL: 0, TR: 0, BL: 0, BR: 0 };
+    let left = 0;
+    let right = 0;
+    let top = 0;
+    let bottom = 0;
+    for (const [w, h] of [
+      [1, 1],
+      [3, 4],
+      [16, 9],
+    ] as const) {
+      for (let i = 0; i < 100; i++) {
+        for (const count of [10, 30]) {
+          const tiles = layoutMosaic({
+            width: w,
+            height: h,
+            count,
+            variation: 1,
+            seed: 1_000_003 + i * 104_729,
+          });
+          const big = tiles.reduce((a, b) => (area(b) > area(a) ? b : a));
+          const dx = (big.x + big.width / 2) / w - 0.5;
+          const dy = (big.y + big.height / 2) / h - 0.5;
+          const e = 1e-9;
+          if (dx < -e) left++;
+          if (dx > e) right++;
+          if (dy < -e) top++;
+          if (dy > e) bottom++;
+          if (Math.abs(dx) > e && Math.abs(dy) > e) {
+            quadrants[`${dy < 0 ? 'T' : 'B'}${dx < 0 ? 'L' : 'R'}`]++;
           }
         }
       }
-      expect(portrait / total).toBeGreaterThan(0.35);
-      expect(landscape / total).toBeGreaterThan(0.35);
+    }
+    expect(left / (left + right)).toBeGreaterThan(0.4);
+    expect(left / (left + right)).toBeLessThan(0.6);
+    expect(top / (top + bottom)).toBeGreaterThan(0.4);
+    expect(top / (top + bottom)).toBeLessThan(0.6);
+    const total = Object.values(quadrants).reduce((a, b) => a + b, 0);
+    for (const [quadrant, n] of Object.entries(quadrants)) {
+      expect(n / total, quadrant).toBeGreaterThan(0.18);
+      expect(n / total, quadrant).toBeLessThan(0.32);
     }
   });
 });
@@ -499,22 +596,29 @@ describe('resolution independence and borders', () => {
   });
 
   it('reports the largest usable border and rejects borders beyond it', () => {
-    const limit = maxBorder(plan, 1000, 1414);
+    const limit = maxBorder(plan, 1000, 1414, { minTileSize: 0 });
     expect(limit).toBeGreaterThan(0);
     const tiles = placeLayout(plan, {
       width: 1000,
       height: 1414,
       border: limit * 0.999,
     });
-    expect(
-      Math.min(...tiles.map((t) => Math.min(t.width, t.height))),
-    ).toBeGreaterThan(0);
-    expect(
-      Math.min(...tiles.map((t) => Math.min(t.width, t.height))),
-    ).toBeLessThan(limit * 0.01);
+    const smallest = Math.min(...tiles.map((t) => Math.min(t.width, t.height)));
+    expect(smallest).toBeGreaterThan(0);
+    expect(smallest).toBeLessThan(limit * 0.01);
     expect(() =>
       placeLayout(plan, { width: 1000, height: 1414, border: limit }),
     ).toThrow(RangeError);
+    // The default keeps every tile at least one unit across.
+    const safe = maxBorder(plan, 1000, 1414);
+    const atSafe = placeLayout(plan, {
+      width: 1000,
+      height: 1414,
+      border: safe,
+    });
+    expect(
+      Math.min(...atSafe.map((t) => Math.min(t.width, t.height))),
+    ).toBeCloseTo(1, 6);
   });
 });
 

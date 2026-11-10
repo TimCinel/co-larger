@@ -9,9 +9,11 @@ import type { Axis, LayoutNode, LayoutPlan, PlanOptions } from './types';
 
 /**
  * The most stretched a tile can be in a plan: long side over short side.
- * Every leaf respects it exactly when placed with no border. Borders take
- * the same width off both sides of a tile, so they stretch tiles a little
- * more; this limit leaves room for that below 3:1.
+ * Every leaf respects it exactly when placed with no border, unless the
+ * canvas is so long and thin for the tile count that even equal tiles in a
+ * row would exceed it (see planAspectLimit). Borders take the same width off
+ * both sides of a tile, so they stretch tiles a little more; this limit
+ * leaves room for that below 3:1, and maxBorderForAspect reports how much.
  */
 export const MAX_PLAN_ASPECT = 2.5;
 
@@ -42,12 +44,28 @@ const GROUP_SHAPE_WEIGHT = 0.5;
 /** Groups up to this many tiles are costed by solving them, not estimating. */
 const LOOKAHEAD = 3;
 /**
- * The dial is divided into steps this wide for choosing the tree's structure.
- * See planLayout.
+ * The dial is divided into this many steps for choosing the tree's
+ * structure. See planLayout.
  */
-const STRUCTURE_STEP = 0.1;
+const STRUCTURE_STEPS = 10;
+
 /** Seeded noise added to each candidate cut, for variety between seeds. */
 const NOISE = 0.35;
+
+/**
+ * The aspect limit a plan for this canvas keeps every tile within (with no
+ * border): MAX_PLAN_ASPECT, unless the canvas is so long and thin for the
+ * number of tiles that even a row of equal tiles would be more stretched.
+ * Then it is the canvas's own aspect divided by the count, the best possible.
+ */
+export function planAspectLimit(
+  width: number,
+  height: number,
+  count: number,
+): number {
+  const aspect = width >= height ? width / height : height / width;
+  return Math.max(MAX_PLAN_ASPECT, aspect / Math.max(1, count));
+}
 
 /**
  * Builds a mosaic plan: a guillotine tree with one leaf per slot. The plan
@@ -90,14 +108,22 @@ export function planLayout(options: PlanOptions): LayoutPlan {
   // cut runs) at the nearest step of the dial, then fit the cut positions to
   // the exact variation. Between steps the tiles grow and shrink smoothly;
   // only crossing a step boundary rearranges them.
-  const step = Math.round(variation / STRUCTURE_STEP) * STRUCTURE_STEP;
+  const step = Math.round(variation * STRUCTURE_STEPS) / STRUCTURE_STEPS;
+  const limit = planAspectLimit(width, height, count);
   const structure = new Planner(
     weightsAt(step),
     quantiles,
     order,
     seed32,
+    limit,
   ).build(order, aspect, 1);
-  const fitter = new Planner(weightsAt(variation), quantiles, order, seed32);
+  const fitter = new Planner(
+    weightsAt(variation),
+    quantiles,
+    order,
+    seed32,
+    limit,
+  );
   const root = fitter.refit(structure, aspect, 1);
   return { aspect, count, variation, seed, root };
 }
@@ -115,6 +141,8 @@ function targetQuantiles(count: number, random: () => number): number[] {
 
 interface Candidate {
   axis: Axis;
+  /** Identifies the group of tiles being cut, for seeded choices. */
+  nodeHash: number;
   /** The tiles going to the first child; the rest go to the second. */
   first: readonly number[];
   fraction: number;
@@ -132,6 +160,7 @@ class Planner {
     private readonly quantiles: readonly number[],
     order: readonly number[],
     private readonly seed: number,
+    private readonly limit: number,
   ) {
     this.position = new Int32Array(order.length);
     for (const [i, slot] of order.entries()) this.position[slot] = i;
@@ -145,20 +174,24 @@ class Planner {
     if (items.length === 1) {
       return { kind: 'leaf', slot: items[0] as number };
     }
-    const { axis, first, fraction } = this.bestCut(items, w, h);
-    const [a, b] = this.divide(items, first);
+    const best = this.bestCut(items, w, h);
+    const { axis } = best;
+    let [a, b] = this.divide(items, best.first);
+    let fraction = best.fraction;
+    // Mirror half of the cuts, chosen by seed. Costs are the same either way,
+    // but without this the largest-first candidates always put big tiles in
+    // the first (left or top) child.
+    if (hashUnit(this.seed, best.nodeHash, 0x5eed) < 0.5) {
+      [a, b] = [b, a];
+      fraction = 1 - fraction;
+    }
+    const [w1, h1, w2, h2] = childSizes(axis, w, h, fraction);
     return {
       kind: 'split',
       axis,
       fraction,
-      first:
-        axis === 'x'
-          ? this.build(a, w * fraction, h)
-          : this.build(a, w, h * fraction),
-      second:
-        axis === 'x'
-          ? this.build(b, w * (1 - fraction), h)
-          : this.build(b, w, h * (1 - fraction)),
+      first: this.build(a, w1, h1),
+      second: this.build(b, w2, h2),
     };
   }
 
@@ -189,7 +222,7 @@ class Planner {
     const along = axis === 'x' ? w : h;
     const across = axis === 'x' ? h : w;
     const ratio = across / along;
-    const limits = hardLimits(ratio, a.length, b.length);
+    const limits = hardLimits(this.limit, ratio, a.length, b.length);
     if (!limits) {
       // The parent's cut moved enough that this cut's direction no longer
       // works (it now runs along the short side). Plan this part afresh.
@@ -316,7 +349,7 @@ class Planner {
     let worst = Infinity;
     for (const axis of ['x', 'y'] as const) {
       const ratio = axis === 'x' ? h / w : w / h;
-      const limits = hardLimits(ratio, 1, 1);
+      const limits = hardLimits(this.limit, ratio, 1, 1);
       if (!limits) continue;
       const [lo, hi] = limits;
       const noise =
@@ -396,7 +429,7 @@ class Planner {
         for (let k = 1; k < count; k++) {
           const n1 = k;
           const n2 = count - k;
-          const limits = hardLimits(ratio, n1, n2);
+          const limits = hardLimits(this.limit, ratio, n1, n2);
           if (!limits) continue;
           const [lo, hi] = limits;
 
@@ -437,12 +470,14 @@ class Planner {
       }
     }
     if (best === null) {
-      // Unreachable: the cut across the long side is always feasible.
+      // Unreachable: the cut across the long side is always feasible (see
+      // hardLimits), so this would be a bug in the planner.
       throw new Error('layout planner found no valid cut');
     }
     const sequence = sequences[best.sequence] as readonly number[];
     return {
       axis: best.axis,
+      nodeHash,
       first: sequence.slice(0, best.k),
       fraction: best.fraction,
       cost: best.cost,
@@ -452,26 +487,22 @@ class Planner {
 
 /**
  * The range of fractions a cut may use. A child holding n tiles may have an
- * aspect of at most MAX_PLAN_ASPECT * n, which keeps every leaf within
- * MAX_PLAN_ASPECT. Because MAX_PLAN_ASPECT >= 2, a cut across the long side
- * of any rectangle within its limit always has a valid fraction, whatever the
- * tile counts on each side, so the planner can never get stuck. Returns null
- * when no fraction works. `ratio` is the length across the cut over the
+ * aspect of at most `limit * n`, which keeps every leaf within `limit`.
+ * Because `limit >= 2`, a cut across the long side of any rectangle within
+ * its own limit always has a valid fraction, whatever the tile counts on each
+ * side; and the root is within its limit by the choice of `limit` (see
+ * planAspectLimit). So the planner can never get stuck. Returns null when no
+ * fraction works. `ratio` is the length across the cut over the
  * length along it.
  */
 function hardLimits(
+  limit: number,
   ratio: number,
   n1: number,
   n2: number,
 ): [number, number] | null {
-  const lo = Math.max(
-    ratio / (MAX_PLAN_ASPECT * n1),
-    1 - MAX_PLAN_ASPECT * n2 * ratio,
-  );
-  const hi = Math.min(
-    MAX_PLAN_ASPECT * n1 * ratio,
-    1 - ratio / (MAX_PLAN_ASPECT * n2),
-  );
+  const lo = Math.max(ratio / (limit * n1), 1 - limit * n2 * ratio);
+  const hi = Math.min(limit * n1 * ratio, 1 - ratio / (limit * n2));
   // The limits can be met exactly at the edge, so allow for rounding.
   if (!(lo <= hi + 1e-9)) return null;
   return lo > hi ? [(lo + hi) / 2, (lo + hi) / 2] : [lo, hi];

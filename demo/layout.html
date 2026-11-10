@@ -66,8 +66,9 @@
   <body>
     <h1>Layout engine demo</h1>
     <p>
-      Development-only page (not part of the app build). Each panel is
-      <code>layoutMosaic()</code> for one canvas ratio and dial value.
+      Development-only page (not part of the app build). Each panel is one plan
+      for a canvas ratio and dial value; the border is clamped to
+      <code>maxBorderForAspect(plan, w, h, 3)</code>.
       <span class="key"
         ><span style="background: hsl(18 70% 62%)"></span>portrait slot
         <span style="background: hsl(205 60% 58%)"></span>landscape slot
