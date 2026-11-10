@@ -20,6 +20,12 @@ export default defineConfig(
         tsconfigRootDir: import.meta.dirname,
       },
     },
+    rules: {
+      // Conflicts with no-non-null-assertion (from strictTypeChecked) for
+      // indexed access under noUncheckedIndexedAccess: one asks for `x!`, the
+      // other forbids it. Keep the stricter rule and allow `x as T`.
+      '@typescript-eslint/non-nullable-type-assertion-style': 'off',
+    },
   },
   prettier,
 );

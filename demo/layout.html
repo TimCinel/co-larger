@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>co-larger layout demo</title>
+    <style>
+      body {
+        margin: 16px;
+        font:
+          13px/1.4 system-ui,
+          sans-serif;
+        color: #222;
+        background: #f4f4f2;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 4px;
+      }
+      p {
+        margin: 0 0 12px;
+        color: #555;
+      }
+      form {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 16px;
+        align-items: center;
+        margin-bottom: 16px;
+      }
+      label {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      input[type='number'] {
+        width: 64px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 40px repeat(var(--cols), max-content);
+        gap: 12px 16px;
+        align-items: end;
+      }
+      .head {
+        font-weight: 600;
+      }
+      figure {
+        margin: 0;
+      }
+      figcaption {
+        font-size: 11px;
+        color: #666;
+        margin-top: 2px;
+        font-variant-numeric: tabular-nums;
+      }
+      .key span {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        margin: 0 4px 0 10px;
+        vertical-align: -1px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Layout engine demo</h1>
+    <p>
+      Development-only page (not part of the app build). Each panel is one plan
+      for a canvas ratio and dial value; the border is clamped to
+      <code>maxBorderForAspect(plan, w, h, 3)</code>.
+      <span class="key"
+        ><span style="background: hsl(18 70% 62%)"></span>portrait slot
+        <span style="background: hsl(205 60% 58%)"></span>landscape slot
+        <span style="background: hsl(95 25% 62%)"></span>roughly square</span
+      >
+    </p>
+    <form id="controls">
+      <label
+        >Tiles <input id="count" type="number" min="1" max="500" value="30"
+      /></label>
+      <label>Seed <input id="seed" type="number" value="1" /></label>
+      <label
+        >Border (% of short side)
+        <input id="border" type="number" min="0" max="5" step="0.1" value="0.6"
+      /></label>
+      <label
+        >Live dial
+        <input id="dial" type="range" min="0" max="1" step="0.01" value="0.5" />
+        <output id="dial-value">0.50</output></label
+      >
+    </form>
+    <div id="grid" class="grid"></div>
+    <script type="module" src="./layout-demo.ts"></script>
+  </body>
+</html>
