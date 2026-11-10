@@ -36,6 +36,11 @@ export interface TileSelectionOptions {
   readonly view: CollageView;
   readonly editor: EditorStore;
   readonly photos: Pick<PhotoStore, 'getPhoto' | 'setIncluded'>;
+  /**
+   * Where keyboard focus goes if the collage becomes empty while the canvas
+   * has it (the canvas is hidden then, and focus would fall to the page).
+   */
+  readonly emptyFocus?: () => HTMLElement | null;
 }
 
 export interface TileSelection {
@@ -67,6 +72,10 @@ export function createTileSelection(
   const listeners = new Set<(state: SelectionState) => void>();
   /** The photo keyboard focus is on, in the canvas. */
   let focusedId: string | null = null;
+  /** Where the focused tile was, as fractions of the canvas. */
+  let focusCentre: { x: number; y: number } | null = null;
+  /** The canvas has focus (kept while it is hidden for an empty collage). */
+  let canvasFocused = false;
   /** Whether to draw the focus ring: keyboard use, not mouse. */
   let keyboardMode = false;
   /** The arrangement the selection was made in. */
@@ -208,8 +217,37 @@ export function createTileSelection(
     const last = view.lastRender();
     const total = last?.state.assignment.length ?? 0;
 
-    // Keep keyboard focus on a tile that exists.
-    if (focusedId !== null && tileOf(focusedId) === null) focusedId = null;
+    // The collage became empty under keyboard focus: hand focus to another
+    // control rather than let it fall to the page.
+    if (canvas.hidden && canvasFocused) {
+      canvasFocused = false;
+      options.emptyFocus?.()?.focus();
+    }
+
+    // Keep keyboard focus on a tile that exists: if the focused photo left
+    // the collage (Remove, or a re-roll) while the canvas has focus, move to
+    // the tile nearest to where it was.
+    if (focusedId !== null && tileOf(focusedId) === null) {
+      focusedId = null;
+      if (canvasFocused && last && focusCentre) {
+        let best = Infinity;
+        for (const tile of last.tiles) {
+          const dx = (tile.x + tile.width / 2) / canvas.width - focusCentre.x;
+          const dy = (tile.y + tile.height / 2) / canvas.height - focusCentre.y;
+          if (dx * dx + dy * dy < best) {
+            best = dx * dx + dy * dy;
+            focusedId = last.state.assignment[tile.slot] ?? null;
+          }
+        }
+      }
+    }
+    const focusedTile = focusedId === null ? null : tileOf(focusedId);
+    if (focusedTile) {
+      focusCentre = {
+        x: (focusedTile.x + focusedTile.width / 2) / canvas.width,
+        y: (focusedTile.y + focusedTile.height / 2) / canvas.height,
+      };
+    }
 
     const picked = selection.kind === 'idle' ? null : selection.photoId;
     const tile = picked === null ? null : tileOf(picked);
@@ -361,6 +399,7 @@ export function createTileSelection(
   canvas.addEventListener('focus', () => {
     // Keyboard focus (not a mouse click) shows the focus indicator at once,
     // before any arrow key.
+    canvasFocused = true;
     keyboardMode = canvas.matches(':focus-visible');
     if (focusedId === null && selection.kind !== 'idle') {
       focusedId = selection.photoId;
@@ -375,7 +414,11 @@ export function createTileSelection(
     }
     refresh();
   });
-  canvas.addEventListener('blur', refresh);
+  canvas.addEventListener('blur', () => {
+    // Hiding the canvas can blur it; that is not the user moving away.
+    if (!canvas.hidden) canvasFocused = false;
+    refresh();
+  });
 
   doc.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape' || selection.kind === 'idle') return;

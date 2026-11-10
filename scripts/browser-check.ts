@@ -2892,6 +2892,55 @@ async function checkSelection(
     (await kind()) === 'idle' && !(await outline.isVisible()),
   );
 
+  // Keyboard Remove keeps a usable focus target.
+  await p.getByRole('button', { name: 'Add all to collage' }).click();
+  await waitDrawn(p);
+  await p.evaluate(() => {
+    (document.activeElement as HTMLElement).blur();
+  });
+  await tabToCanvas();
+  await p.keyboard.press('ArrowRight');
+  await p.keyboard.press('Enter');
+  await p.keyboard.press('Tab');
+  await p.keyboard.press('Tab');
+  await p.keyboard.press('Enter'); // Remove
+  await waitDrawn(p);
+  check(
+    'keyboard Remove with several photos: focus stays on the canvas with a visible tile indicator',
+    (await assignment()).length === 5 && (await focusIndicator()),
+  );
+  await p.keyboard.press('ArrowRight');
+  await p.keyboard.press('Enter');
+  check(
+    'the remaining tiles can be selected by keyboard after Remove',
+    (await kind()) === 'selected',
+  );
+  await p.keyboard.press('Escape');
+  // Removing the last photo by keyboard leaves focus on a control.
+  await p.getByRole('button', { name: 'Remove all' }).click();
+  await p.locator('.thumb').first().click();
+  await waitDrawn(p);
+  await p.evaluate(() => {
+    (document.activeElement as HTMLElement).blur();
+  });
+  await tabToCanvas();
+  await p.keyboard.press('Enter');
+  await p.keyboard.press('Tab');
+  await p.keyboard.press('Tab');
+  await p.keyboard.press('Enter'); // Remove
+  await p.waitForFunction(
+    () => (window as any).__app.editor.getState().photos.length === 0,
+  );
+  const emptyFocus = await p.evaluate(() => ({
+    tag: document.activeElement?.tagName,
+    text: document.activeElement?.textContent,
+  }));
+  check(
+    'keyboard Remove of the last photo moves focus to a control, not the page',
+    emptyFocus.tag === 'BUTTON',
+    JSON.stringify(emptyFocus),
+  );
+
   if (process.argv.includes('--selection-screenshot')) {
     await p.getByRole('button', { name: 'Add all to collage' }).click();
     await waitDrawn(p);
