@@ -1,9 +1,11 @@
 export {
   createCanvasSettings,
   createSizeReadout,
+  describeCanvas,
   formatSize,
 } from './canvas-controls';
 export {
+  activePaper,
   activePreset,
   BORDER_SLIDER_MAX,
   BORDER_STEP,
@@ -14,12 +16,36 @@ export {
   DEFAULT_LONG_SIDE,
   RATIO_PRESETS,
   resizeBySide,
+  PAPER_PRESETS,
+  paperLabel,
+  parseDpi,
+  parseMm,
+  presetPhysical,
+  resizeByDpi,
+  resizeByMm,
   type BorderRange,
+  type PaperPreset,
+  type PhysicalResult,
   type RatioPreset,
   type ResizeRequest,
   type Side,
   type SizeResult,
 } from './canvas-settings';
+export {
+  checkPhysical,
+  DEFAULT_DPI,
+  formatMm,
+  isConsistent,
+  MAX_DPI,
+  MAX_MM,
+  MIN_DPI,
+  MIN_MM,
+  mmFromPixels,
+  physicalFor,
+  pixelSizeOf,
+  pixelsFromMm,
+  type PhysicalSize,
+} from './physical';
 export { createLayoutControls, describeVariation } from './controls';
 export {
   coverSource,
@@ -75,6 +101,9 @@ export {
   setCanvasSize,
   setCrop,
   setPhotos,
+  setPhysicalSize,
+  switchToPhysical,
+  switchToPixels,
   setVariation,
   shuffle,
   validateEditorState,

@@ -26,7 +26,8 @@
  *   changes.
  * - No re-roll: setBorder, setBackground, setCrop, and setCanvasSize at the
  *   same ratio (within RATIO_TOLERANCE, so changing DPI at a fixed paper
- *   size, which rounds to slightly different ratios, keeps the layout).
+ *   size, which rounds to slightly different ratios, keeps the layout),
+ *   setPhysicalSize at the same ratio, switchToPhysical and switchToPixels.
  * - Crops belong to the photo and survive re-rolls (and exclusion). They are
  *   dropped only when the photo leaves the store (forgetPhotos).
  * - Manual swaps (#8: `swapSlots` on `assignment`) do not survive a re-roll,
@@ -52,6 +53,14 @@ import {
   type PhotoShape,
 } from '../layout';
 import { DEFAULT_CROP, isDefaultCrop, normaliseCrop, type Crop } from './crop';
+import {
+  checkPhysical,
+  DEFAULT_DPI,
+  physicalFor,
+  pixelSizeOf,
+  samePhysical,
+  type PhysicalSize,
+} from './physical';
 
 /** The output canvas. Lengths are in output pixels. */
 export interface CanvasSettings {
@@ -75,6 +84,20 @@ export interface CanvasSettings {
   readonly borderFraction: number;
   /** Shown in the border and gaps: a lower-case `#rrggbb` colour. */
   readonly background: string;
+  /**
+   * How the size was specified when the user gave it in millimetres and
+   * DPI (#7); absent for a size given in pixels (the key is then missing,
+   * not undefined, so the snapshot stays plain JSON). It only describes
+   * `width` and `height`, which stay the single source of truth for layout
+   * and rendering: `width === Math.round(widthMm * dpi / 25.4)` always
+   * (see PhysicalSize), so a project reopens in the same mode with the same
+   * numbers, which deriving millimetres from pixels could not promise.
+   *
+   * What happens to it: setPhysicalSize sets it; switchToPhysical adds it
+   * for the current pixels; switchToPixels and setCanvasSize (any pixel
+   * size) drop it; setBorder, setBackground and every re-roll keep it.
+   */
+  readonly physical?: PhysicalSize;
 }
 
 /** The largest border: a quarter of the canvas's shorter side. */
@@ -256,17 +279,68 @@ export function setCanvasSize(
   width: number,
   height: number,
 ): EditorState {
-  const canvas = checkCanvas({ ...state.canvas, width, height });
-  if (
-    canvas.width === state.canvas.width &&
-    canvas.height === state.canvas.height
-  ) {
-    return state;
+  // A size in pixels is not a physical size: the description is dropped.
+  const canvas = checkCanvas({
+    ...withoutPhysical(state.canvas),
+    width,
+    height,
+  });
+  return resized(state, canvas);
+}
+
+/**
+ * Sets the canvas from a physical size: millimetres and DPI, with the pixel
+ * size derived (each side rounded to the nearest whole pixel, see
+ * pixelsFromMm). Throws a RangeError if the numbers are out of range or give
+ * a side outside 1 to MAX_CANVAS_SIDE px.
+ *
+ * Re-rolls only if the ratio changes by more than RATIO_TOLERANCE, like
+ * setCanvasSize: the same paper at another DPI keeps the arrangement, and
+ * since the border is a fraction of the shorter side its relative width
+ * does too. A paper of another ratio (A4 portrait to landscape) re-rolls.
+ * Returns `state` itself when nothing changes.
+ */
+export function setPhysicalSize(
+  state: EditorState,
+  widthMm: number,
+  heightMm: number,
+  dpi: number,
+): EditorState {
+  const physical = { widthMm, heightMm, dpi };
+  const { width, height } = pixelSizeOf(physical);
+  const canvas = checkCanvas({ ...state.canvas, width, height, physical });
+  return resized(state, canvas);
+}
+
+/**
+ * Switches to physical units, keeping the pixel size: the millimetres are
+ * the current pixels at `dpi` (default 300). Never re-rolls. Returns `state`
+ * itself if it is already in physical units (change the DPI with
+ * setPhysicalSize). Throws a RangeError if the millimetres would be out of
+ * range at this DPI.
+ */
+export function switchToPhysical(
+  state: EditorState,
+  dpi: number = DEFAULT_DPI,
+): EditorState {
+  if (state.canvas.physical !== undefined) return state;
+  const { width, height } = state.canvas;
+  const physical = physicalFor(width, height, dpi);
+  if (physical === null) {
+    throw new RangeError(
+      `${String(width)} × ${String(height)} px is out of range in millimetres at ${String(dpi)} DPI`,
+    );
   }
-  if (sameRatio(canvas.width / canvas.height, state.plan.aspect)) {
-    return { ...state, canvas };
-  }
-  return reroll(state, { canvas });
+  return { ...state, canvas: checkCanvas({ ...state.canvas, physical }) };
+}
+
+/**
+ * Switches to pixels, keeping the pixel size and dropping the physical
+ * description. Never re-rolls. Returns `state` itself if it has none.
+ */
+export function switchToPixels(state: EditorState): EditorState {
+  if (state.canvas.physical === undefined) return state;
+  return { ...state, canvas: withoutPhysical(state.canvas) };
 }
 
 /**
@@ -437,7 +511,9 @@ export interface ValidateOptions {
  *
  * - the canvas is whole pixels from 1 to MAX_CANVAS_SIDE, the background is
  *   `#rrggbb` (any case; normalised to lower case), and the border fraction
- *   is 0 to MAX_BORDER_FRACTION;
+ *   is 0 to MAX_BORDER_FRACTION; if it has a physical size, that is finite
+ *   millimetres in range and a whole DPI in range, and gives these pixels
+ *   (see checkPhysical);
  * - the variation is 0..1 and the seed a non-negative safe integer;
  * - every photo has a unique, non-empty string id and an aspect within
  *   1:MAX_PHOTO_ASPECT and MAX_PHOTO_ASPECT:1;
@@ -462,6 +538,7 @@ export function validateEditorState(
     height: canvas.height as number,
     borderFraction: canvas.borderFraction as number,
     background: canvas.background as string,
+    physical: canvas.physical as PhysicalSize | undefined,
   });
   if (typeof variation !== 'number' || !(variation >= 0 && variation <= 1)) {
     throw new RangeError('variation must be a number from 0 to 1');
@@ -677,6 +754,26 @@ function cropsFrom(keys: readonly string[], from: CropMap): CropMap {
   return out;
 }
 
+/** Applies a checked canvas: re-rolls only if its ratio changed. */
+function resized(state: EditorState, canvas: CanvasSettings): EditorState {
+  const same =
+    canvas.width === state.canvas.width &&
+    canvas.height === state.canvas.height;
+  if (same && samePhysical(canvas.physical, state.canvas.physical)) {
+    return state;
+  }
+  if (same || sameRatio(canvas.width / canvas.height, state.plan.aspect)) {
+    return { ...state, canvas };
+  }
+  return reroll(state, { canvas });
+}
+
+/** The canvas without its physical description (the key is removed). */
+function withoutPhysical(canvas: CanvasSettings): CanvasSettings {
+  const { width, height, borderFraction, background } = canvas;
+  return { width, height, borderFraction, background };
+}
+
 function checkCanvas(canvas: CanvasSettings): CanvasSettings {
   const { width, height, borderFraction } = canvas;
   for (const side of [width, height]) {
@@ -701,7 +798,10 @@ function checkCanvas(canvas: CanvasSettings): CanvasSettings {
   if (!/^#[0-9a-f]{6}$/.test(background)) {
     throw new RangeError('background must be a #rrggbb colour');
   }
-  return { width, height, borderFraction, background };
+  const checked = { width, height, borderFraction, background };
+  return canvas.physical === undefined
+    ? checked
+    : { ...checked, physical: checkPhysical(canvas.physical, width, height) };
 }
 
 function checkSeed(seed: number): number {

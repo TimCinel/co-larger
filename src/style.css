@@ -427,7 +427,8 @@ button.primary:hover:not(:disabled) {
   gap: 0.4rem;
 }
 
-.preset {
+.preset,
+.paper-preset {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -439,6 +440,8 @@ button.primary:hover:not(:disabled) {
 
 .preset[aria-pressed='true'],
 .preset[aria-pressed='true']:hover:not(:disabled),
+.paper-preset[aria-pressed='true'],
+.paper-preset[aria-pressed='true']:hover:not(:disabled),
 .swatch[aria-pressed='true'] {
   background: var(--accent);
   border-color: var(--accent);
@@ -464,6 +467,91 @@ button.primary:hover:not(:disabled) {
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
+}
+
+/* Units: a two-way segmented choice made of native radio buttons. */
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 0.6rem;
+}
+
+.segment {
+  position: relative;
+  display: block;
+}
+
+.segment input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.segment span {
+  display: block;
+  padding: 0.3rem 0.4rem;
+  text-align: center;
+  font-size: 0.85rem;
+  border: 1px solid var(--panel-border);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.segment:first-child span {
+  border-radius: 6px 0 0 6px;
+}
+
+.segment:last-child span {
+  border-radius: 0 6px 6px 0;
+  border-left-width: 0;
+}
+
+.segment input:checked + span {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.segment input:focus-visible + span {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px #000;
+}
+
+.size-fields[hidden],
+.size-physical[hidden] {
+  display: none;
+}
+
+/* Paper presets: a row per paper size, portrait then landscape. */
+.paper-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+
+.size-physical .size-fields + .size-fields {
+  margin-top: 0.5rem;
+}
+
+.dpi-row .size-field {
+  flex: none;
+  width: 4.5rem;
+}
+
+.size-derived {
+  flex: 1;
+  margin: 0;
+  padding-bottom: 0.4rem;
+  text-align: right;
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .size-times {

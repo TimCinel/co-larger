@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  activePaper,
+  checkPresetPhysical,
   activePreset,
+  parseDpi,
+  parseMm,
+  presetPhysical,
+  resizeByDpi,
+  resizeByMm,
   BORDER_SLIDER_MAX,
   borderRange,
   parseSide,
@@ -399,5 +406,191 @@ describe('borderRange', () => {
     const empty = borderRange(createEditorState());
     expect(empty.available).toBe(MAX_BORDER_FRACTION);
     expect(empty.limited).toBe(false);
+  });
+});
+
+describe('physical size input', () => {
+  const current = { widthMm: 210, heightMm: 297, dpi: 300 };
+
+  it('parses millimetres: decimals yes, anything else no', () => {
+    const ok = (text: string): number | string => {
+      const r = parseMm(text, 'widthMm');
+      return r.ok ? r.value : r.message;
+    };
+    expect(ok('297')).toBe(297);
+    expect(ok(' 148.5 ')).toBe(148.5);
+    expect(ok('148,5')).toBe(148.5);
+    expect(ok('.5')).toBe(0.5);
+    expect(ok('0.001')).toBe(0.001);
+    expect(ok('10000')).toBe(10000);
+    for (const text of [
+      'abc',
+      '1e3',
+      '-5',
+      '+5',
+      '5.',
+      '1.2345',
+      '1,000.5',
+      '12mm',
+      '0x10',
+      '१२',
+      'NaN',
+      'Infinity',
+      '1 2',
+    ]) {
+      expect(ok(text), text).toMatch(/plain number/);
+    }
+    expect(ok('')).toMatch(/empty/);
+    expect(ok('  ')).toMatch(/empty/);
+    expect(ok('0')).toMatch(/at least/);
+    expect(ok('0.0001')).toMatch(/plain number/);
+    expect(ok('10001')).toMatch(/at most/);
+    expect(ok('9'.repeat(400))).toMatch(/at most/);
+  });
+
+  it('parses DPI: whole numbers from 1 to 2400', () => {
+    const ok = (text: string): number | string => {
+      const r = parseDpi(text);
+      return r.ok ? r.value : r.message;
+    };
+    expect(ok('300')).toBe(300);
+    expect(ok('1')).toBe(1);
+    expect(ok('2400')).toBe(2400);
+    expect(ok('')).toMatch(/empty/);
+    expect(ok('0')).toMatch(/at least/);
+    expect(ok('2401')).toMatch(/at most/);
+    for (const text of ['300.5', '-300', 'abc', '3e2', '300 dpi', '1,200']) {
+      expect(ok(text), text).toMatch(/whole number/);
+    }
+  });
+
+  it('editing a side with the lock on follows in mm', () => {
+    const r = resizeByMm({
+      side: 'widthMm',
+      text: '420',
+      current,
+      lock: true,
+      ratio: 210 / 297,
+    });
+    expect(r.ok && r.physical).toEqual({
+      widthMm: 420,
+      heightMm: 594,
+      dpi: 300,
+    });
+    const h = resizeByMm({
+      side: 'heightMm',
+      text: '594',
+      current,
+      lock: true,
+      ratio: 210 / 297,
+    });
+    expect(h.ok && h.physical).toEqual({
+      widthMm: 420,
+      heightMm: 594,
+      dpi: 300,
+    });
+  });
+
+  it('editing a side with the lock off changes only that side', () => {
+    const r = resizeByMm({
+      side: 'widthMm',
+      text: '100.5',
+      current,
+      lock: false,
+      ratio: 1,
+    });
+    expect(r.ok && r.physical).toEqual({ ...current, widthMm: 100.5 });
+  });
+
+  it('re-entering the current value changes nothing', () => {
+    const r = resizeByMm({
+      side: 'widthMm',
+      text: '210.000',
+      current,
+      lock: true,
+      ratio: 0.5,
+    });
+    expect(r.ok && r.physical).toBe(current);
+    const d = resizeByDpi('300', current);
+    expect(d.ok && d.physical).toBe(current);
+  });
+
+  it('refuses sizes that would leave 1 to 20000 px, with a message', () => {
+    const big = resizeByMm({
+      side: 'widthMm',
+      text: '2000',
+      current,
+      lock: false,
+      ratio: 1,
+    });
+    expect(!big.ok && big.message).toMatch(
+      /23622 px, more than the 20000 px limit/,
+    );
+    const locked = resizeByMm({
+      side: 'widthMm',
+      text: '2000',
+      current,
+      lock: true,
+      ratio: 210 / 297,
+    });
+    expect(locked.ok).toBe(false);
+    const tiny = resizeByMm({
+      side: 'widthMm',
+      text: '0.01',
+      current,
+      lock: false,
+      ratio: 1,
+    });
+    expect(!tiny.ok && tiny.message).toMatch(/less than 1 px/);
+    const dpi = resizeByDpi('2400', { widthMm: 594, heightMm: 420, dpi: 300 });
+    expect(!dpi.ok && dpi.message).toMatch(/Choose another DPI/);
+    // Rounding the followed side must not escape the range either.
+    const followed = resizeByMm({
+      side: 'widthMm',
+      text: '9999',
+      current,
+      lock: true,
+      ratio: 1e-6,
+    });
+    expect(followed.ok).toBe(false);
+  });
+
+  it('DPI edits keep the millimetres', () => {
+    const r = resizeByDpi('600', current);
+    expect(r.ok && r.physical).toEqual({ ...current, dpi: 600 });
+  });
+
+  it('paper presets are recognised by their millimetres only', () => {
+    expect(activePaper({ widthMm: 420, heightMm: 594, dpi: 72 })).toMatchObject(
+      { name: 'A2', orientation: 'portrait' },
+    );
+    expect(activePaper({ widthMm: 420, heightMm: 594.5, dpi: 72 })).toBeNull();
+    expect(activePaper(undefined)).toBeNull();
+  });
+
+  it('a ratio preset keeps the long side in mm and the DPI', () => {
+    const p = presetPhysical(byLabel('4:3'), {
+      widthMm: 210,
+      heightMm: 297,
+      dpi: 150,
+    });
+    expect(p).toEqual({ widthMm: 297, heightMm: 222.75, dpi: 150 });
+    const q = presetPhysical(byLabel('9:16'), {
+      widthMm: 297,
+      heightMm: 210,
+      dpi: 300,
+    });
+    expect(q).toEqual({ widthMm: 167.063, heightMm: 297, dpi: 300 });
+  });
+
+  it('checks that a ratio preset fits in pixels before it is applied', () => {
+    const tiny = { widthMm: 13, heightMm: 13, dpi: 1 };
+    const refused = checkPresetPhysical(byLabel('1:2'), tiny);
+    expect(!refused.ok && refused.message).toMatch(/0 px, less than 1 px/);
+    expect(checkPresetPhysical(byLabel('1:1'), tiny).ok).toBe(true);
+    const a4 = { widthMm: 210, heightMm: 297, dpi: 300 };
+    for (const p of RATIO_PRESETS) {
+      expect(checkPresetPhysical(p, a4).ok, p.label).toBe(true);
+    }
   });
 });

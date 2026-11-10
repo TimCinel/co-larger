@@ -8,8 +8,9 @@ very large "feature" photos among many small ones. See [spec.md](spec.md) for
 the planned scope. The app is at an early stage: you can add photos (file picker
 or drag and drop), choose which are included, see them as a mosaic with a
 size-variation dial and Shuffle, and set the canvas: a ratio preset, a custom
-size in pixels, the border and the background colour. Physical sizes, swap,
-crop, undo, export and save are not built yet.
+size in pixels or in millimetres and DPI (with A4, A3 and A2 presets), the
+border and the background colour. Swap, crop, undo, export and save are not
+built yet.
 
 ## Development
 
@@ -68,7 +69,28 @@ longer side (the resolution): from the default 1920 × 1080, 16:9 is 1920 × 108
 3840 × 3840, and the preset already active does nothing. Sizes are checked by
 the pure functions in `canvas-settings.ts` (whole pixels, 1 to 20000; bad input
 gets an inline message per field and is never applied; with the lock on, the
-other side follows the active preset's exact ratio). The border slider has a
+other side follows the active preset's exact ratio).
+
+The size section has a units choice, Pixels or Millimetres (`physical.ts` holds
+the arithmetic). In millimetres there are paper presets (A4, A3 and A2, portrait
+and landscape, ISO 216), width and height in mm (up to three decimals, a point
+or a comma) and a DPI (a whole number, 1 to 2400, 300 by default). The pixel
+size is each side rounded to the nearest whole pixel, so A2 portrait at 300 DPI
+is 4961 × 7016 and A3 landscape is 4961 × 3508; a size that would leave 1 to
+20000 px is refused with an inline message. The top bar then reads for example
+"420 × 594 mm at 300 DPI · 4961 × 7016 px", and the border label adds its width
+in mm. The pixel `width` and `height` in the state stay the source of truth for
+layout and rendering; `canvas.physical` (`{widthMm, heightMm, dpi}`) is
+optional and only records how the user gave the size, so a project reopens in
+the same mode with the same numbers. It is validated against the pixels
+(finite, in range, and each side what the mm and DPI round to). It is set by
+`setPhysicalSize` and `switchToPhysical` (which keeps the pixels and converts
+them at the last DPI used, or 300), dropped by `switchToPixels` and by any
+`setCanvasSize`, and kept by border and background changes. A ratio preset in
+millimetres keeps the longer side in mm and the DPI. Changing the DPI at a fixed
+paper size changes the pixels but keeps the arrangement (within the 0.5% ratio
+tolerance) and, because the border is a fraction of the shorter side, the
+border's relative and physical width. The border slider has a
 fixed scale of 0 to 10% of the shorter side and its thumb shows what was asked
 for, so a re-roll never moves it. The part of the track the current arrangement
 cannot draw (`borderAt().max`) is hatched, and a note says what is drawn when
