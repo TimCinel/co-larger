@@ -6,5 +6,8 @@ export default defineConfig({
   base: './',
   test: {
     include: ['src/**/*.test.ts'],
+    // The layout property tests run thousands of layouts, which takes a few
+    // seconds per test; leave room for slower CI machines.
+    testTimeout: 60_000,
   },
 });
