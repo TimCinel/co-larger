@@ -177,6 +177,8 @@ export function createTileCrop(options: TileCropOptions): TileCrop {
     readonly startX: number;
     readonly startY: number;
     moving: boolean;
+    /** True for a press on the tile of a pending swap: it never pans. */
+    readonly inert: boolean;
   }
   let drag: Drag | null = null;
   let suppressClick = false;
@@ -199,7 +201,6 @@ export function createTileCrop(options: TileCropOptions): TileCrop {
       event.button !== 0 ||
       !event.isPrimary ||
       !selected ||
-      selected.swapping ||
       view.tileAtClientPoint(event.clientX, event.clientY)?.photoId !==
         selected.photoId
     ) {
@@ -214,7 +215,18 @@ export function createTileCrop(options: TileCropOptions): TileCrop {
       startX: event.clientX,
       startY: event.clientY,
       moving: false,
+      // While a swap is pending a drag is ignored entirely, and so is the
+      // click that ends it, so the swap stays pending.
+      inert: selected.swapping,
     };
+    // Every move and the release reach the canvas wherever the pointer goes
+    // (even a jump straight out of it); a press and release without moving
+    // is still a click.
+    try {
+      canvas.setPointerCapture(event.pointerId);
+    } catch {
+      // The pointer is already gone; the end events will follow.
+    }
   });
   canvas.addEventListener('pointermove', (event) => {
     const active = drag;
@@ -239,13 +251,9 @@ export function createTileCrop(options: TileCropOptions): TileCrop {
         return;
       }
       active.moving = true;
-      canvas.classList.add('panning');
-      try {
-        canvas.setPointerCapture(event.pointerId);
-      } catch {
-        // The pointer is already gone; the end events will follow.
-      }
+      if (!active.inert) canvas.classList.add('panning');
     }
+    if (active.inert) return;
     const selected = options.selected();
     const geometry =
       selected?.photoId === active.photoId
@@ -439,7 +447,7 @@ export function createTileCrop(options: TileCropOptions): TileCrop {
       canvas.classList.remove('pannable', 'panning');
       return;
     }
-    if (selected.swapping && drag) endDrag();
+    if (selected.swapping && drag && !drag.inert) endDrag();
     const crop = cropOf(editor.getState(), selected.photoId);
     if (doc.activeElement !== slider || !sliderGesture.isBusy()) {
       slider.value = String(crop.zoom);

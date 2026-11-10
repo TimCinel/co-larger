@@ -394,12 +394,49 @@ async function checkEditor(p: Page): Promise<void> {
     `${String(seen.size)} distinct`,
   );
 
-  // Portrait photos land in portrait tiles.
-  check(
-    'portrait photos mostly land in portrait tiles (synthetic set)',
-    stats.portraitInPortrait >= 0.8,
-    `${(stats.portraitInPortrait * 100).toFixed(0)}% of ${String(stats.portraits)} portraits; landscape in landscape ${(stats.landscapeInLandscape * 100).toFixed(0)}%`,
-  );
+  // Portrait photos land in portrait tiles: an aggregate over fixed seeds, so
+  // the result is the same on every run.
+  {
+    let portraits = 0;
+    let hits = 0;
+    let landscapes = 0;
+    let landHits = 0;
+    const weak: string[] = [];
+    for (let seed = 1; seed <= 20; seed++) {
+      await editorAction(p, 'shuffle', seed);
+      await waitDrawn(p);
+      const st = await drawnStats(p);
+      const h = Math.round(st.portraitInPortrait * st.portraits);
+      portraits += st.portraits;
+      hits += h;
+      if (st.portraits && h / st.portraits < 0.5) {
+        weak.push(`seed ${String(seed)}: ${String(h)}/${String(st.portraits)}`);
+      }
+      const l = Math.round(
+        st.landscapeInLandscape *
+          (await p.evaluate(
+            () =>
+              (window as any).__app.view
+                .lastRender()
+                .state.photos.filter((ph: any) => ph.aspect > 1.05).length,
+          )),
+      );
+      landscapes += await p.evaluate(
+        () =>
+          (window as any).__app.view
+            .lastRender()
+            .state.photos.filter((ph: any) => ph.aspect > 1.05).length,
+      );
+      landHits += l;
+    }
+    check(
+      'portrait photos mostly land in portrait tiles (synthetic set, seeds 1 to 20)',
+      portraits > 0 && hits / portraits >= 0.8,
+      `${String(hits)}/${String(portraits)} portraits = ${((100 * hits) / portraits).toFixed(0)}%; landscape in landscape ${String(landHits)}/${String(landscapes)}; weakest: ${weak.join('; ') || 'none under 50%'}`,
+    );
+    await editorAction(p, 'shuffle', 1);
+    await waitDrawn(p);
+  }
 
   // Toggling a photo in the tray re-rolls; toggling back restores it.
   const beforeToggle = await arrangementOf(p);
@@ -3562,6 +3599,95 @@ async function checkCrop(
     `${String(shapes.size)} tile shapes;${detail}`,
   );
 
+  // A press on the selected tile, then a jump straight out of the canvas.
+  await editorAction(p, 'setCrop', markerId, { x: 0.5, y: 0.5, zoom: 3 });
+  await waitDrawn(p);
+  await select();
+  await resetLog();
+  await p.evaluate(() => {
+    const w = window as any;
+    document
+      .querySelector('.collage-canvas')!
+      .addEventListener('pointerdown', (e) => {
+        w.__pid = (e as PointerEvent).pointerId;
+      });
+  });
+  let cropBeforeJump = await cropOfMarker();
+  t = await markerTile();
+  await p.mouse.move(t.cx, t.cy);
+  await p.mouse.down();
+  await p.mouse.move(5, 5);
+  await p.mouse.up();
+  await sleep(300);
+  let cropAfterJump = await cropOfMarker();
+  check(
+    'a press on the selected tile and a jump out of the canvas still pans: crop changed, exactly one commit, tile still selected',
+    JSON.stringify(cropBeforeJump) !== JSON.stringify(cropAfterJump) &&
+      (await commits()) === 1 &&
+      (await kind()) === 'selected',
+    `${JSON.stringify(cropAfterJump)} commits ${String(await commits())} ${await kind()}`,
+  );
+  // A pan ended by pointercancel commits what was panned, once, and leaves
+  // nothing stuck: the next drag pans normally.
+  await resetLog();
+  cropBeforeJump = await cropOfMarker();
+  t = await markerTile();
+  await p.mouse.move(t.cx, t.cy);
+  await p.mouse.down();
+  await p.mouse.move(t.cx + 30, t.cy + 20, { steps: 4 });
+  await sleep(60);
+  await p.evaluate(() => {
+    const id = (window as any).__pid as number;
+    document
+      .querySelector('.collage-canvas')!
+      .dispatchEvent(
+        new PointerEvent('pointercancel', { pointerId: id, bubbles: true }),
+      );
+  });
+  await p.mouse.up();
+  await sleep(300);
+  cropAfterJump = await cropOfMarker();
+  check(
+    'a pan ended by pointercancel commits once and the tile stays selected',
+    JSON.stringify(cropBeforeJump) !== JSON.stringify(cropAfterJump) &&
+      (await commits()) === 1 &&
+      (await kind()) === 'selected',
+    `commits ${String(await commits())} ${await kind()}`,
+  );
+  t = await markerTile();
+  await p.mouse.move(t.cx, t.cy);
+  await p.mouse.down();
+  await p.mouse.move(t.cx - 30, t.cy - 20, { steps: 4 });
+  await p.mouse.up();
+  await sleep(300);
+  check(
+    'after a cancelled pan no gesture is stuck: the next drag is one more commit',
+    (await commits()) === 2 &&
+      !(await p.evaluate(() => (window as any).__app.editor.isDragging())),
+    String(await commits()),
+  );
+  // Escape during a pan commits what was panned (once) and deselects.
+  await select();
+  await resetLog();
+  t = await markerTile();
+  await p.mouse.move(t.cx, t.cy);
+  await p.mouse.down();
+  await p.mouse.move(t.cx + 30, t.cy + 20, { steps: 4 });
+  await sleep(60);
+  await p.keyboard.press('Escape');
+  await p.mouse.move(t.cx + 60, t.cy + 40, { steps: 3 });
+  await p.mouse.up();
+  await sleep(300);
+  check(
+    'Escape during a pan commits it once and deselects; the later moves and release do nothing',
+    (await commits()) === 1 &&
+      (await kind()) === 'idle' &&
+      !(await p.evaluate(() => (window as any).__app.editor.isDragging())),
+    `commits ${String(await commits())} ${await kind()}`,
+  );
+  await editorAction(p, 'setCrop', markerId, { x: 0.78, y: 0.35, zoom: 3 });
+  await waitDrawn(p);
+
   // Swap into a differently shaped tile.
   await p.getByRole('button', { name: 'Shuffle' }).click();
   await waitDrawn(p);
@@ -3602,18 +3728,13 @@ async function checkCrop(
   await sleep(100);
   const afterPendingDrag = await kind();
   check(
-    'a drag on the tile while a swap is pending is ignored (0 commits, crop unchanged)',
+    'a drag on the tile while a swap is pending is ignored entirely: no pan, 0 commits, and the swap is still pending',
     (await commits()) === 0 &&
       (await canvasHash()) === hashPending &&
-      afterPendingDrag !== 'selected',
+      afterPendingDrag === 'swapping',
     `${afterPendingDrag} ${String(await commits())}`,
   );
-  if (afterPendingDrag === 'idle') {
-    // A click ending the drag cancels the pending swap, as a click on the
-    // same tile always did: start the swap again.
-    await select();
-    await menu.getByRole('button', { name: 'Swap' }).click();
-  }
+  // One click on a second tile completes the swap: no restart needed.
   await p.mouse.click(target.x, target.y);
   await waitDrawn(p);
   const shapeAfter = await markerTile();
