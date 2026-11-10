@@ -86,11 +86,12 @@ export function pixelSizeOf(physical: PhysicalSize): {
 }
 
 /**
- * True when `pixels` is what `mm` at `dpi` rounds to, with a hair of slack
- * for floating point at the half-pixel boundary.
+ * True when `pixels` is exactly what `mm` at `dpi` converts to (see
+ * {@link pixelsFromMm}), so a stored description can never claim a size
+ * that does not produce its pixels, even at a half-pixel boundary.
  */
 export function isConsistent(pixels: number, mm: number, dpi: number): boolean {
-  return Math.abs(pixels - (mm * dpi) / MM_PER_INCH) <= 0.5 + 1e-9;
+  return pixels === pixelsFromMm(mm, dpi);
 }
 
 /**

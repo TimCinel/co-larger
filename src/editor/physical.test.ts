@@ -3,6 +3,7 @@ import {
   checkPhysical,
   DEFAULT_DPI,
   formatMm,
+  isConsistent,
   MAX_DPI,
   mmFromPixels,
   physicalFor,
@@ -159,6 +160,32 @@ describe('mm, DPI and pixels', () => {
     ];
     for (const [name, value] of bad) {
       expect(() => checkPhysical(value, 4961, 7016), name).toThrow(RangeError);
+    }
+  });
+
+  it('isConsistent is exact, also at a half-pixel boundary', () => {
+    // 38.1 mm at 1 DPI is exactly 1.5 px, which converts to 2.
+    expect(pixelsFromMm(38.1, 1)).toBe(2);
+    expect(isConsistent(2, 38.1, 1)).toBe(true);
+    expect(isConsistent(1, 38.1, 1)).toBe(false);
+    expect(() =>
+      checkPhysical({ widthMm: 38.1, heightMm: 38.1, dpi: 1 }, 1, 2),
+    ).toThrow(RangeError);
+    expect(
+      checkPhysical({ widthMm: 38.1, heightMm: 38.1, dpi: 1 }, 2, 2),
+    ).toEqual({ widthMm: 38.1, heightMm: 38.1, dpi: 1 });
+  });
+
+  it('every size the actions produce is exactly consistent', () => {
+    for (const dpi of [1, 25, 72, 300, 2400]) {
+      for (const mm of [0.5, 13, 38.1, 148.5, 210, 297, 420, 594]) {
+        const px = pixelsFromMm(mm, dpi);
+        if (px < 1 || px > 20000) continue;
+        expect(isConsistent(px, mm, dpi), `${String(mm)}@${String(dpi)}`).toBe(
+          true,
+        );
+        expect(isConsistent(px, mmFromPixels(px, dpi), dpi)).toBe(true);
+      }
     }
   });
 });

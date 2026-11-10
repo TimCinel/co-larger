@@ -2176,6 +2176,39 @@ async function checkPhysicalSizes(p: Page): Promise<void> {
     !(await message.isVisible()) && (await sizeText()) === '4961x7016',
   );
 
+  // A ratio preset whose size would not fit in pixels is refused inline
+  // (13 x 13 mm at 1 DPI, then 1:2 would give a 0 px side), never thrown.
+  await editorAction(p, 'setPhysicalSize', 13, 13, 1);
+  await waitDrawn(p);
+  const tinyBase =
+    JSON.stringify(await canvasInfo(p)) + JSON.stringify(await physical());
+  const consoleErrors: string[] = [];
+  const onError = (e: Error): void => {
+    consoleErrors.push(e.message);
+  };
+  p.on('pageerror', onError);
+  commits = await commitsDuring(async () => {
+    await p.locator('.preset', { hasText: /^1:2$/ }).click();
+  });
+  p.off('pageerror', onError);
+  check(
+    'a ratio preset that would give a side under 1 px (1:2 from 13 mm at 1 DPI) shows an inline message, applies nothing, commits nothing and throws nothing',
+    commits === 0 &&
+      (await message.isVisible()) &&
+      /1:2.*less than 1 px/.test(await message.innerText()) &&
+      consoleErrors.length === 0 &&
+      JSON.stringify(await canvasInfo(p)) + JSON.stringify(await physical()) ===
+        tinyBase,
+    `${await message.innerText()} ${consoleErrors.join(',')}`,
+  );
+  await p.locator('.preset', { hasText: /^1:1$/ }).click();
+  check(
+    'another preset that fits clears the message',
+    !(await message.isVisible()),
+  );
+  await editorAction(p, 'setPhysicalSize', 420, 594, 300);
+  await waitDrawn(p);
+
   // 11. Switching modes keeps the size.
   const a2size = await sizeText();
   commits = await commitsDuring(async () => {

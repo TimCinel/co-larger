@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   activePaper,
+  checkPresetPhysical,
   activePreset,
   parseDpi,
   parseMm,
@@ -580,5 +581,16 @@ describe('physical size input', () => {
       dpi: 300,
     });
     expect(q).toEqual({ widthMm: 167.063, heightMm: 297, dpi: 300 });
+  });
+
+  it('checks that a ratio preset fits in pixels before it is applied', () => {
+    const tiny = { widthMm: 13, heightMm: 13, dpi: 1 };
+    const refused = checkPresetPhysical(byLabel('1:2'), tiny);
+    expect(!refused.ok && refused.message).toMatch(/0 px, less than 1 px/);
+    expect(checkPresetPhysical(byLabel('1:1'), tiny).ok).toBe(true);
+    const a4 = { widthMm: 210, heightMm: 297, dpi: 300 };
+    for (const p of RATIO_PRESETS) {
+      expect(checkPresetPhysical(p, a4).ok, p.label).toBe(true);
+    }
   });
 });

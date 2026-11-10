@@ -22,6 +22,7 @@ import {
   BORDER_STEP,
   borderRange,
   checkPhysicalFits,
+  checkPresetPhysical,
   lockRatioFor,
   PAPER_PRESETS,
   paperLabel,
@@ -137,11 +138,21 @@ export function createCanvasSettings(
     button.append(icon, doc.createTextNode(p.label));
     button.addEventListener('click', () => {
       clearErrors();
+      // In millimetres it keeps the longer side in mm and the DPI; refuse
+      // (with a message) a size that would not fit in pixels.
+      const current = editor.getState().canvas.physical;
+      if (current) {
+        const fit = checkPresetPhysical(p, current);
+        if (!fit.ok) {
+          errors.set('paper', `${p.label}: ${fit.message}`);
+          showErrors();
+          return;
+        }
+      }
       // The ratio changes, the resolution (the longer side) does not.
       editor.dispatch((state) => {
         const { physical } = state.canvas;
         if (physical) {
-          // In millimetres it keeps the longer side in mm and the DPI.
           const next = presetPhysical(p, physical);
           return setPhysicalSize(state, next.widthMm, next.heightMm, next.dpi);
         }
@@ -192,13 +203,19 @@ export function createCanvasSettings(
   unitRadios.physical.addEventListener('change', () => {
     if (!unitRadios.physical.checked) return;
     clearErrors();
-    editor.dispatch((state) => {
-      // Keep the pixel size: the DPI is the last one used, or the default
-      // when that would not fit in millimetres.
-      const { width, height } = state.canvas;
-      const dpi = physicalFor(width, height, lastDpi) ? lastDpi : DEFAULT_DPI;
-      return switchToPhysical(state, dpi);
-    });
+    // Keep the pixel size: the DPI is the last one used, or the default
+    // when that would not fit in millimetres.
+    const { width, height } = editor.getState().canvas;
+    const dpi = physicalFor(width, height, lastDpi) ? lastDpi : DEFAULT_DPI;
+    if (!physicalFor(width, height, dpi)) {
+      errors.set(
+        'paper',
+        `${formatSize(width, height)} cannot be shown in millimetres at ${String(dpi)} DPI.`,
+      );
+      showErrors();
+    } else {
+      editor.dispatch((state) => switchToPhysical(state, dpi));
+    }
     syncFields();
   });
 

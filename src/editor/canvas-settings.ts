@@ -321,6 +321,18 @@ export function presetPhysical(
     : { widthMm: short, heightMm: long, dpi: current.dpi };
 }
 
+/**
+ * The physical size choosing a ratio preset gives, checked to fit 1 to
+ * MAX_CANVAS_SIDE px per side, or why it does not (for example 1:2 from a
+ * 13 mm canvas at 1 DPI would have a side under 1 px).
+ */
+export function checkPresetPhysical(
+  p: RatioPreset,
+  current: PhysicalSize,
+): PhysicalResult {
+  return checkPhysicalFits(presetPhysical(p, current), 'widthMm');
+}
+
 export type MmSide = 'widthMm' | 'heightMm';
 
 const mmName = (side: MmSide): string =>
