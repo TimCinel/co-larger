@@ -11,6 +11,7 @@ import type { EditorState } from '../editor/state';
 import type { Decoder } from '../photos/decode';
 import { PhotoStore, type NewPhoto } from '../photos/store';
 import {
+  MAX_INFLATED_BYTES,
   MAX_PHOTO_BYTES,
   MAX_PROJECT_JSON_BYTES,
   parseProject,
@@ -20,6 +21,7 @@ import {
 } from './format';
 import {
   checkZipEntry,
+  inflateZipEntry,
   readZipDirectory,
   readZipEntry,
   readZipText,
@@ -50,6 +52,10 @@ export interface OpenOptions {
 }
 
 const DEFAULT_CONCURRENCY = 2;
+
+/** "512 MB", for the message about the memory bound. */
+const megabytes = (bytes: number): string =>
+  `${String(Math.round(bytes / (1024 * 1024)))} MB`;
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : 'unknown problem';
@@ -82,6 +88,16 @@ export async function openProject(
   );
   const manifestEntry = entries.find((entry) => entry.path === PROJECT_FILE);
   if (!manifestEntry) {
+    const nested = entries.find(
+      (entry) =>
+        /^[^/]+\/project\.json$/.test(entry.path) &&
+        !entry.path.startsWith('__MACOSX/'),
+    );
+    if (nested) {
+      throw new ProjectError(
+        `This zip has project.json inside a folder ("${nested.path}"), but it must be at the top level of the zip. Open the folder, select its contents (project.json and photos) and compress those instead of the folder itself.`,
+      );
+    }
     throw new ProjectError(
       'This zip has no project.json, so it is not a co-larger project.',
     );
@@ -97,6 +113,7 @@ export async function openProject(
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   const files = new Map<string, File>();
   const entryOf = new Map<string, ZipEntry>();
+  let inflatedBytes = 0;
   for (const photo of project.photos) {
     const entry = byPath.get(photo.path);
     if (!entry) {
@@ -107,23 +124,29 @@ export async function openProject(
     if (entry.size > MAX_PHOTO_BYTES) {
       throw new ProjectError(`The photo "${photo.name}" is too large.`);
     }
-    if (entry.method !== 0) {
-      throw new ProjectError(
-        `The photo "${photo.name}" is stored compressed in this zip; co-larger stores photos as they are.`,
-      );
-    }
-    // A stored entry is a slice of the archive: nothing is copied. The saved
-    // name, type and modification time make the same fingerprint as the
-    // original file, so dropping the original again is a duplicate.
-    const data = await readZipEntry(archive, entry);
     entryOf.set(photo.id, entry);
-    files.set(
-      photo.id,
-      new File([data], photo.name, {
-        type: photo.type,
-        lastModified: photo.lastModified,
-      }),
-    );
+    if (entry.method === 0) {
+      // A stored entry is a slice of the archive: nothing is copied. The
+      // saved name, type and modification time make the same fingerprint as
+      // the original file, so dropping the original again is a duplicate.
+      const data = await readZipEntry(archive, entry);
+      files.set(
+        photo.id,
+        new File([data], photo.name, {
+          type: photo.type,
+          lastModified: photo.lastModified,
+        }),
+      );
+    } else {
+      // A deflated entry is inflated later, once, inside the bounded
+      // workers. What that keeps in memory is bounded now, by declared size.
+      inflatedBytes += entry.size;
+      if (inflatedBytes > MAX_INFLATED_BYTES) {
+        throw new ProjectError(
+          `The compressed photos in this zip would need more than ${megabytes(MAX_INFLATED_BYTES)} of memory to open. Re-zip the photos without compression ("store"), or open fewer of them.`,
+        );
+      }
+    }
   }
 
   // Regenerate previews and thumbnails with bounded concurrency.
@@ -142,9 +165,28 @@ export async function openProject(
       const photo = project.photos[index];
       if (!photo) return;
       try {
-        // Check the photo's CRC-32 first, streaming: a damaged entry
-        // refuses the whole project before anything is replaced.
-        await checkZipEntry(archive, entryOf.get(photo.id) as ZipEntry, signal);
+        const entry = entryOf.get(photo.id) as ZipEntry;
+        if (entry.method === 8) {
+          // Inflate once, checking length and CRC-32 on the way; the
+          // inflated copy is the file the photo is decoded from.
+          const data = await inflateZipEntry(
+            archive,
+            entry,
+            photo.type,
+            signal,
+          );
+          files.set(
+            photo.id,
+            new File([data], photo.name, {
+              type: photo.type,
+              lastModified: photo.lastModified,
+            }),
+          );
+        } else {
+          // Check the photo's CRC-32 first, streaming: a damaged entry
+          // refuses the whole project before anything is replaced.
+          await checkZipEntry(archive, entry, signal);
+        }
         decoded[index] = await decodeOne(photo, files, decode);
       } catch (error) {
         failure ??= { error };

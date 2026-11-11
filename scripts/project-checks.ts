@@ -7,7 +7,15 @@
  * temp folder that is removed).
  */
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate';
@@ -268,6 +276,7 @@ async function expectError(
   p: Page,
   file: Buffer,
   pattern: RegExp,
+  screenshot?: string,
 ): Promise<{ ok: boolean; message: string }> {
   await openFile(p, {
     name: 'bad.zip',
@@ -282,6 +291,12 @@ async function expectError(
     { timeout: 120_000 },
   );
   const message = await p.locator('.project-dialog-body').innerText();
+  if (screenshot) {
+    await p.screenshot({
+      path: screenshot,
+      clip: { x: 0, y: 0, width: 1280, height: 800 },
+    });
+  }
   await p.getByRole('button', { name: 'OK' }).click();
   await p.waitForFunction(
     () => !document.querySelector<HTMLDialogElement>('.project-dialog')!.open,
@@ -343,6 +358,14 @@ export async function checkProject(
   try {
     const small = await checkSmall(browser, origin, check, tmp, options);
     await checkOpfs(browser, origin, check, small);
+    await checkDeflated(
+      browser,
+      origin,
+      check,
+      tmp,
+      small,
+      options.screenshots,
+    );
     await checkRoundTrips(browser, origin, check, small.zipPath);
     if (!process.env.SKIP_LARGE)
       await checkLarge(browser, origin, check, tmp, 100);
@@ -1010,6 +1033,213 @@ async function checkSmall(
 
   for (const page of [A, B, C, cancelPage, D]) await page.context.close();
   return { zipPath, exportBefore, state: before.state };
+}
+
+/** Stray entries Finder's Archive Utility adds to a zip it makes. */
+const STRAY: Record<string, Uint8Array> = {
+  '__MACOSX/._project.json': new Uint8Array(120).fill(7),
+  '__MACOSX/photos/._stray.jpg': new Uint8Array(120).fill(9),
+  '.DS_Store': new Uint8Array(6148).fill(1),
+  'photos/.DS_Store': new Uint8Array(6148).fill(2),
+};
+
+/** Where in `zip` the `nth` central directory entry's data starts, or -1. */
+function dataStart(zip: Buffer, nth: number): number {
+  let seen = 0;
+  for (let i = 0; i < zip.length - 46; i++) {
+    if (zip.readUInt32LE(i) === 0x02014b50 && seen++ === nth) {
+      const local = zip.readUInt32LE(i + 42);
+      return (
+        local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28)
+      );
+    }
+  }
+  return -1;
+}
+
+/** Photos re-zipped with DEFLATE (#43), by fflate and by the system `zip`. */
+async function checkDeflated(
+  browser: Browser,
+  origin: string,
+  check: Check,
+  tmp: string,
+  small: SmallResult,
+  screenshots?: string,
+): Promise<void> {
+  console.log('\n  DEFLATE-compressed photos (issue #43)');
+  const files = unzipSync(new Uint8Array(readFileSync(small.zipPath)));
+  const photoPaths = Object.keys(files).filter((n) => n.startsWith('photos/'));
+  const photoHashes = photoPaths.map((n) => sha(files[n]!)).sort();
+
+  const zips: { label: string; path: string }[] = [];
+  // fflate: every entry deflated, plus the strays.
+  const deflated: Record<string, [Uint8Array, { level: 6 }]> = {};
+  for (const [n, d] of Object.entries({ ...files, ...STRAY }))
+    deflated[n] = [d, { level: 6 }];
+  const fflatePath = join(tmp, 'deflated-fflate.zip');
+  writeFileSync(fflatePath, zipSync(deflated));
+  zips.push({ label: 'fflate', path: fflatePath });
+  // fflate: a mix, with entries alternately stored and deflated.
+  const mixed: Record<string, [Uint8Array, { level: 0 | 6 }]> = {};
+  Object.entries({ ...files, ...STRAY }).forEach(([n, d], i) => {
+    mixed[n] = [d, { level: i % 2 ? 6 : 0 }];
+  });
+  const mixedPath = join(tmp, 'mixed-fflate.zip');
+  writeFileSync(mixedPath, zipSync(mixed));
+  zips.push({ label: 'fflate mixed', path: mixedPath });
+  // The system zip, laid out as Finder would leave it (strays included).
+  const haveZip = spawnSync('zip', ['-v'], { stdio: 'ignore' }).status === 0;
+  if (haveZip) {
+    const dir = join(tmp, 'tree');
+    mkdirSync(join(dir, 'photos'), { recursive: true });
+    mkdirSync(join(dir, '__MACOSX', 'photos'), { recursive: true });
+    for (const [n, d] of Object.entries({ ...files, ...STRAY }))
+      writeFileSync(join(dir, n), d);
+    const systemPath = join(tmp, 'deflated-system.zip');
+    const run = spawnSync('zip', ['-r', '-q', systemPath, '.'], { cwd: dir });
+    check('the system zip command made a zip', run.status === 0);
+    zips.push({ label: 'system zip', path: systemPath });
+  } else {
+    console.log('  (no zip command: system zip check skipped)');
+  }
+
+  for (const { label, path } of zips) {
+    const bytes = readFileSync(path);
+    const listed = Object.keys(unzipSync(new Uint8Array(bytes)));
+    const photoMethods: number[] = [];
+    unzipSync(new Uint8Array(bytes), {
+      filter: (file) => {
+        if (file.name.startsWith('photos/') && !file.name.endsWith('.DS_Store'))
+          photoMethods.push(file.compression);
+        return false;
+      },
+    });
+    check(
+      `${label}: the zip has DEFLATE photo entries and stray __MACOSX and .DS_Store entries`,
+      photoMethods.includes(8) &&
+        listed.includes('.DS_Store') &&
+        listed.some((n) => n.startsWith('__MACOSX/')),
+      `photo methods ${photoMethods.join(',')}`,
+    );
+
+    const P = await newPage(browser, origin);
+    const q = P.page;
+    await openFile(q, path, false);
+    await waitOpened(q);
+    const opened = await capture(q);
+    const hashes = Object.values(await hashOriginals(q)).sort();
+    check(
+      `${label}: opens, restoring the saved layout, tray and every photo's bytes`,
+      opened.state === small.state &&
+        opened.store.length === 7 &&
+        JSON.stringify(hashes) === JSON.stringify(photoHashes),
+      opened.selected,
+    );
+    check(
+      `${label}: an export is byte-identical to the one made before saving`,
+      (await exportPng(q)) === small.exportBefore,
+    );
+
+    // Save again: a normal stored zip that reopens identically.
+    const resaved = join(tmp, `resaved-${label.replace(/ /g, '-')}.zip`);
+    await downloadVia(q, () => q.locator('.project-save').click(), resaved);
+    const resavedBytes = readFileSync(resaved);
+    const resavedFiles = unzipSync(new Uint8Array(resavedBytes));
+    check(
+      `${label}: saving it again stores every entry without compression, photos unchanged`,
+      methods(resavedBytes).every((m) => m === 0) &&
+        photoPaths.every((n) => sha(resavedFiles[n]!) === sha(files[n]!)),
+    );
+    const R = await newPage(browser, origin);
+    await openFile(R.page, resaved, false);
+    await waitOpened(R.page);
+    check(
+      `${label}: the re-saved project reopens with the same state and export`,
+      (await capture(R.page)).state === small.state &&
+        (await exportPng(R.page)) === small.exportBefore,
+    );
+    check(
+      `${label}: no page errors`,
+      P.errors.length === 0 && R.errors.length === 0,
+      [...P.errors, ...R.errors].join('; '),
+    );
+    await P.context.close();
+    await R.context.close();
+  }
+
+  // Failures leave the open project intact. The fflate zip lists project.json
+  // first, then the photos, so central entries 1 and 2 are photos.
+  const E = await newPage(browser, origin);
+  const e = E.page;
+  await openFile(e, small.zipPath, false);
+  await waitOpened(e);
+  const intact = (await capture(e)).state;
+  const base = new Uint8Array(readFileSync(fflatePath));
+  const wrongCrc = patchCentral(base, 2, (v, at) => {
+    v.setUint32(at + 16, v.getUint32(at + 16, true) ^ 0xdeadbeef, true);
+  });
+  const crc = await expectError(e, wrongCrc, /damaged/);
+  check(
+    'a deflated photo with a wrong CRC is refused clearly',
+    crc.ok,
+    crc.message,
+  );
+  const corrupt = Buffer.from(base);
+  const first = dataStart(corrupt, 2);
+  for (let k = 0; k < 8; k++) corrupt[first + k] = 0xff;
+  const stream = await expectError(e, corrupt, /damaged/);
+  check(
+    'a corrupt DEFLATE stream is refused clearly',
+    first > 0 && stream.ok,
+    stream.message,
+  );
+  const wrongLength = patchCentral(base, 2, (v, at) => {
+    v.setUint32(at + 24, v.getUint32(at + 24, true) + 1, true);
+  });
+  const length = await expectError(e, wrongLength, /damaged/);
+  check(
+    'a deflated photo with the wrong length is refused clearly',
+    length.ok,
+    length.message,
+  );
+  const big = 300 * 1024 * 1024;
+  const huge = patchCentral(
+    new Uint8Array(
+      patchCentral(base, 1, (v, at) => {
+        v.setUint32(at + 24, big, true);
+      }),
+    ),
+    2,
+    (v, at) => {
+      v.setUint32(at + 24, big, true);
+    },
+  );
+  const bound = await expectError(
+    e,
+    huge,
+    /512 MB.*without compression/,
+    screenshots ? join(screenshots, 'issue-43-memory-bound.png') : undefined,
+  );
+  check(
+    'more inflated photo data than the memory bound is refused, naming the limit',
+    bound.ok,
+    bound.message,
+  );
+  const unsupported = patchCentral(base, 2, (v, at) => {
+    v.setUint16(at + 10, 12, true);
+  });
+  const method = await expectError(e, unsupported, /unsupported compression/);
+  check(
+    'an unsupported compression method is refused clearly',
+    method.ok,
+    method.message,
+  );
+  const after = await capture(e);
+  check(
+    'after each refusal the project that was open is untouched',
+    after.state === intact && after.store.length === 7,
+  );
+  await E.context.close();
 }
 
 interface SmallResult {

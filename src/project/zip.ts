@@ -13,7 +13,9 @@
  * the limits before touching any data, and hands out each stored entry as a
  * Blob slice of the archive: zero copies, nothing in memory until a photo is
  * decoded. Entries stored with deflate are decompressed with the platform's
- * DecompressionStream, with a hard cap, so a zip bomb cannot expand.
+ * DecompressionStream, with a hard cap, so a zip bomb cannot expand. A
+ * deflated photo is inflated once, by `inflateZipEntry`, which checks its
+ * length and CRC-32 on the way and returns the bytes as a Blob.
  */
 import { Zip, ZipPassThrough } from 'fflate';
 import { BackingFileError } from '../photos/backing';
@@ -444,6 +446,76 @@ export async function readZipEntry(
   return new Blob(parts as BlobPart[], { type });
 }
 
+/**
+ * Inflates a deflated entry once, in a single streaming pass: the platform's
+ * DecompressionStream does the inflating off the main thread, and each chunk
+ * is counted and run through CRC-32 as it arrives and kept as it is. The
+ * result is a Blob of exactly the entry's bytes, so a photo is never
+ * inflated a second time to check it. Refuses (ProjectError) more bytes than
+ * the entry declares, fewer, a CRC-32 mismatch, or a stream that is not valid
+ * deflate; a BackingFileError if the archive cannot be read; and the
+ * signal's reason if aborted. The caller bounds how much of this is held.
+ */
+export async function inflateZipEntry(
+  archive: Blob,
+  entry: ZipEntry,
+  type = '',
+  signal?: AbortSignal,
+): Promise<Blob> {
+  if (entry.method !== 8) throw new ProjectError(`"${entry.path}" is stored.`);
+  const raw = archive.slice(
+    entry.dataOffset,
+    entry.dataOffset + entry.compressedSize,
+  );
+  const reader = raw
+    .stream()
+    .pipeThrough(new DecompressionStream('deflate-raw'))
+    .getReader();
+  const crc = new Crc32();
+  let parts: BlobPart[] = [];
+  let pending = 0;
+  let total = 0;
+  try {
+    for (;;) {
+      signal?.throwIfAborted();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch {
+        signal?.throwIfAborted();
+        // The compressed bytes were read from the archive; a failure here is
+        // the stream being invalid, unless the archive itself went away.
+        try {
+          await archive
+            .slice(entry.dataOffset, entry.dataOffset + 1)
+            .arrayBuffer();
+        } catch {
+          throw new BackingFileError();
+        }
+        throw DAMAGED_DATA(entry.path);
+      }
+      if (chunk.done) break;
+      total += chunk.value.length;
+      if (total > entry.size) throw DAMAGED_DATA(entry.path);
+      crc.update(chunk.value);
+      parts.push(chunk.value as Uint8Array<ArrayBuffer>);
+      pending += chunk.value.length;
+      if (pending >= INFLATE_FLUSH_BYTES) {
+        // Fold small chunks into one Blob so the part list stays short.
+        parts = [new Blob(parts)];
+        pending = 0;
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  if (total !== entry.size) throw DAMAGED_DATA(entry.path);
+  if (crc.value !== entry.crc) throw DAMAGED(entry.path);
+  return new Blob(parts, { type });
+}
+
+const INFLATE_FLUSH_BYTES = 8 * 1024 * 1024;
+
 /** An entry's content as text (UTF-8), for project.json. */
 export async function readZipText(
   archive: Blob,
@@ -511,6 +583,12 @@ export class Crc32 {
 export const DAMAGED = (path: string): ProjectError =>
   new ProjectError(
     `This project file is damaged: "${path}" does not match its checksum. Save it again from the original, or use a good copy.`,
+  );
+
+/** A compressed entry that cannot be unpacked to its declared length. */
+export const DAMAGED_DATA = (path: string): ProjectError =>
+  new ProjectError(
+    `This project file is damaged: the data of "${path}" is damaged or incomplete. Save it again from the original, or use a good copy.`,
   );
 
 /**

@@ -14,19 +14,40 @@ collage-project.colarger.zip
 
 ## Zip
 
-- Every entry uses the zip "store" method: no compression. Photos are
-  already compressed, and storing keeps saving and opening fast and light on
-  memory. Saved photos are byte for byte the originals.
+- Writers store: every entry uses the zip "store" method (no compression).
+  Photos are already compressed, and storing keeps saving and opening fast and
+  light on memory. Saved photos are byte for byte the originals.
+- Readers accept Store and DEFLATE for photos (and for `project.json`), so a
+  project unpacked, edited and re-zipped by a system tool (Finder, `zip -r`)
+  opens. Any other method (bzip2, LZMA, ...) and encrypted entries are
+  refused. Saving always writes a stored zip, even for a project opened from
+  a deflated one.
 - Excluded photos are saved too, so the tray comes back whole.
-- Opening checks the CRC-32 of `project.json` and of every photo, streaming
-  (nothing is held in memory twice), before the current project is replaced. A
-  mismatch is refused with "this project file is damaged".
-- Photos must be stored. A zip re-zipped by a system tool (compressed, or
-  reordered) still works if the photos stay stored, and `project.json` may be
-  deflated; a deflated photo is refused with a clear message (co-larger does
-  not unpack photos, to keep memory flat). A comment in the end record,
-  data descriptors and bytes after the end record are accepted. ZIP64 and
-  encrypted entries are refused.
+- Opening checks the CRC-32 of `project.json` and of every photo, streaming,
+  before the current project is replaced. A mismatch is refused with "this
+  project file is damaged". A stored photo is checked in a streaming pass and
+  stays a slice of the zip (nothing is held in memory twice). A deflated photo
+  is inflated once, by the browser's `DecompressionStream('deflate-raw')`
+  (native, off the main thread, streaming), checking its length and CRC-32 as
+  the data goes by; the inflated bytes are kept as the photo's file, so the
+  photo is never inflated a second time. Inflation runs with the same bounded
+  concurrency as decoding (two photos at once) and stops on Cancel.
+- Memory bound: inflated photos are real copies in memory until the project is
+  saved again (a save through a file handle rebinds every photo to the new
+  stored file and releases them). Opening refuses a project whose deflated
+  photos add up to more than 512 MiB, by their declared sizes and before
+  inflating any of them, with a message naming the limit and suggesting to
+  re-zip without compression. Inflation never produces more than a photo's
+  declared size, so the bound is exact. 512 MiB is about a hundred 5 MB
+  photos; it leaves a desktop tab room for the previews, thumbnails and decoder
+  working memory that come on top, and stored photos (the usual case) do not
+  count against it at all.
+- Stray entries (`__MACOSX/` resource forks, `.DS_Store`, folder entries) that
+  a system zip adds are ignored like any other file nobody lists, as long as
+  their names are safe and their method is Store or DEFLATE. `project.json`
+  must be at the root of the zip (zipping the containing folder from Finder
+  puts it one level down, which is refused with a message saying so and
+  suggesting compressing the folder's contents instead).
 - Archives are limited to 4 GB (no ZIP64), 10 000 entries, 5 000 photos and
   1 GB per photo. `project.json` is limited to 32 MB.
 - Names must be relative paths with no `..`, empty or `.` segments, no
@@ -92,8 +113,9 @@ decodes to the size the manifest says, and that the whole thing can be
 restored. Only then is the current project replaced, in one step. Any failure,
 or Cancel, leaves the current project untouched.
 
-The opened photos are slices of the zip file you chose, not copies, so keep
-that file where it is while you work on the project.
+The opened stored photos are slices of the zip file you chose, not copies, so
+keep that file where it is while you work on the project. Deflated photos are
+in-memory copies and do not depend on the file.
 
 ## Saving over the file you opened
 

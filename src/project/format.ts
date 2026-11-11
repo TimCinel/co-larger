@@ -29,6 +29,18 @@ export const MAX_PROJECT_JSON_BYTES = 32 * 1024 * 1024;
 export const MAX_PHOTOS = 5000;
 /** Largest single photo in a project, in bytes. */
 export const MAX_PHOTO_BYTES = 1024 * 1024 * 1024;
+/**
+ * Most bytes of photos inflated from DEFLATE entries that opening may hold in
+ * memory at once (512 MiB). Stored photos are slices of the zip and cost
+ * nothing; a deflated photo has to be a real in-memory copy until the project
+ * is saved again. 512 MiB is room for about a hundred 5 MB phone photos and
+ * stays well under what a desktop tab can hold (a tab holds this, plus
+ * previews, plus the decoder's working memory), while it refuses a project
+ * that would otherwise take the tab down. The check is on declared sizes,
+ * before anything is inflated, and inflation never produces more than the
+ * declaration, so the bound is exact.
+ */
+export const MAX_INFLATED_BYTES = 512 * 1024 * 1024;
 /** Longest path or file name we accept, in characters. */
 export const MAX_PATH_LENGTH = 255;
 
