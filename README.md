@@ -108,6 +108,75 @@ grid. The settings panel comes before the tray in tab order.
 The build uses relative asset URLs, so `dist/` can be hosted at the root of a
 domain or under any sub-path.
 
+## Run with Docker
+
+The app ships as a small multi-architecture image (`linux/amd64` and
+`linux/arm64`) on Docker Hub: [`timcinel/co-larger`](https://hub.docker.com/r/timcinel/co-larger).
+It is unprivileged nginx serving the static site, with no Node in it. Photos
+never leave the browser; the container serves files and nothing else.
+
+```sh
+docker run --rm -p 8080:8080 timcinel/co-larger
+# open http://localhost:8080/
+```
+
+Tags: `latest`, and the 12-character git commit (`timcinel/co-larger:<commit>`)
+that the image was built from. Pin the commit tag, or the digest, in
+deployments.
+
+- **Port:** 8080 (the container runs as uid 101, so it cannot bind port 80).
+- **Health:** `GET /healthz` returns `200 ok`. Use it for Docker and Kubernetes
+  probes.
+- **Read-only root filesystem:** works. nginx writes only to `/tmp`, so run
+  with `--read-only --tmpfs /tmp` (Kubernetes: an `emptyDir` at `/tmp`).
+- **Caching and compression:** files under `assets/` have content hashes and are
+  cached for a year; `index.html` is always revalidated. Text assets are gzipped.
+- **Security headers:** a Content-Security-Policy limited to the app's own
+  files plus `blob:` (photo previews, export, save) and `data:` images, and
+  `nosniff`, `no-referrer`, `X-Frame-Options: DENY` and a restrictive
+  Permissions-Policy. TLS and HSTS are the reverse proxy's job.
+
+### Behind a reverse proxy, under a sub-path
+
+The site uses relative URLs, so it works at any path. Have the proxy strip the
+prefix and redirect `/collage` to `/collage/` (the trailing slash matters,
+because relative URLs resolve against it). With nginx:
+
+```nginx
+location = /collage { return 301 /collage/; }
+location /collage/ {
+    proxy_pass http://co-larger:8080/;   # trailing slash strips /collage/
+}
+```
+
+A Kubernetes example (Deployment and Service, non-root, read-only root
+filesystem, probes on `/healthz`) is in [docs/kubernetes.md](docs/kubernetes.md).
+
+### Rebuilding and publishing the image
+
+The image is built and pushed from a developer's machine, for both
+architectures at once, with one command (CI does not build images yet; see
+issue #37):
+
+```sh
+docker login   # Docker Hub, once
+docker/build.sh
+```
+
+The script refuses to run with uncommitted changes, so every image matches a
+commit, and pushes one manifest list tagged with the short commit and `latest`
+(and with the version from `package.json` once it is not `0.0.0`). `PUSH=0
+docker/build.sh` builds for the local architecture only, without pushing.
+
+To check an image the way it was verified, run it and point a real Chrome at it
+(needs Chrome; add `--subpath` to check it behind a proxy under `/collage/`):
+
+```sh
+docker run -d --rm --name co-larger -p 8080:8080 timcinel/co-larger
+node scripts/docker-check.ts http://localhost:8080/
+docker stop co-larger
+```
+
 ## Licence
 
 [MIT](LICENSE)
