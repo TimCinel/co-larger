@@ -12,6 +12,11 @@
 # (needs a Docker with the containerd image store).
 # Set EXPECT_VERSION to fail unless package.json has that version (CI passes
 # the release tag, so an image is never pushed under the wrong version).
+# Publishing (PUSH=1) first runs docker/release-tags.sh: the release tag must
+# exist on the remote at HEAD, an existing version is never overwritten
+# (ALLOW_RETAG=1 deliberately rebuilds one, by hand only), and latest moves
+# only for the highest release. REMOTE names the remote (default: core if it
+# exists, else origin).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -31,14 +36,20 @@ if [ -n "${EXPECT_VERSION:-}" ] && [ "$EXPECT_VERSION" != "$VERSION" ]; then
   exit 1
 fi
 
-TAGS=(-t "$REPO:latest" -t "$REPO:$REV")
-# 0.0.0 is the placeholder before the first release; it is not a version.
-if [ "$VERSION" != "0.0.0" ]; then TAGS+=(-t "$REPO:$VERSION"); fi
-
 if [ "${PUSH:-1}" = 0 ]; then
+  TAGS=(-t "$REPO:latest" -t "$REPO:$REV")
+  # 0.0.0 is the placeholder before the first release; it is not a version.
+  if [ "$VERSION" != "0.0.0" ]; then TAGS+=(-t "$REPO:$VERSION"); fi
   TARGET=(--load)
   PLATFORM=${PLATFORM:-}
 else
+  # Publishing: docker/release-tags.sh decides which tags may be pushed
+  # (never an existing version, latest only for the highest release).
+  if ! release_tags=$(docker/release-tags.sh "$VERSION" "$FULL"); then
+    exit 1
+  fi
+  TAGS=()
+  for t in $release_tags; do TAGS+=(-t "$REPO:$t"); done
   TARGET=(--push)
   PLATFORM=linux/amd64,linux/arm64
 fi
@@ -59,6 +70,6 @@ docker buildx build ${PLATFORM:+--platform "$PLATFORM"} -f Dockerfile \
 if [ "${PUSH:-1}" = 0 ]; then
   echo "Built $REPO:$REV${PLATFORM:+ for $PLATFORM} locally (not pushed)"
 else
-  echo "Pushed $REPO:$REV (also latest)"
-  docker buildx imagetools inspect "$REPO:$REV"
+  for t in $release_tags; do echo "Pushed $REPO:$t"; done
+  docker buildx imagetools inspect "$REPO:$VERSION"
 fi

@@ -16,24 +16,39 @@ code or credentials.
 
 - `lock-<12 hex>-<8 hex>` (from `ci/tag.sh`): the first 12 hex digits of the
   sha256 of `package-lock.json`, then the first 8 of the sha256 of
-  `ci/Dockerfile`. A tag names the image's content, so it is never reused for a
-  different image, and nobody has to bump a revision number by hand.
-- `latest`: the image for `master`'s current lockfile and `ci/Dockerfile`, for
-  people. CI does not rely on it (see below).
+  `ci/Dockerfile`. The tag is a key for the image's inputs, not a hash of the
+  image: the lockfile and the Dockerfile (which pins the base image by digest)
+  decide what is in it. Changing only the build scripts or labels keeps the
+  key, so the existing image is kept; change `ci/Dockerfile` to force a new
+  one. Nobody bumps a revision number by hand.
+- `latest`: the image for `master`'s newest build, for people. CI does not
+  rely on it (see below).
 - Older tags (`lock-cddf86d9b162`, `lock-cddf86d9b162-r2`) were built by hand
   before CI did it.
+
+A `lock-*` tag is written once and never overwritten.
 
 ## What is automatic
 
 The "Builder image" workflow (`.forgejo/workflows/builder-image.yaml`) runs
-when `package-lock.json`, `ci/Dockerfile`, `ci/build.sh` or `ci/tag.sh` changes:
+when the image's inputs (`package-lock.json`, `ci/Dockerfile`) or the scripts
+that build and publish it (`ci/build.sh`, `ci/tag.sh`, `ci/hub-tag.sh`, the
+workflow) change:
 
-- On `master`, it runs `PUSH=1 ci/build.sh`, which builds `linux/amd64` and
-  pushes `:<tag>` and `:latest`. If `:<tag>` already exists (for example the
-  lockfile went back to an earlier state), it is not rebuilt; `:latest` is
-  pointed at it. It logs in with the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`
-  Actions secrets.
-- On pull requests, it only builds (`PUSH=0`), without secrets.
+- On `master`, it logs in with the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`
+  Actions secrets and runs `PUSH=1 ci/build.sh`:
+  - `ci/hub-tag.sh` asks Docker Hub whether `:<tag>` exists. A definite
+    "missing" (HTTP 404) builds and pushes it; a definite "found" (HTTP 200
+    naming the tag) skips the build; anything else (network error, rate
+    limit, server error, odd answer) fails the job, so a failed lookup can
+    never overwrite a tag.
+  - `:latest` moves to `:<tag>` only if the commit is still master's tip,
+    checked with `git ls-remote` just before moving it. An older run that
+    finishes late pushes its `lock-*` tag and leaves `:latest` alone.
+  - Runs are serialised by the workflow's `concurrency` group (queued, not
+    cancelled). Forgejo documents this as best-effort; the two rules above
+    keep a rare overlap harmless.
+- On pull requests, it only builds (`PUSH=0`) and does not log in.
 
 The image is `linux/amd64` only: the runners are amd64 and have no arm64
 emulation, and the `npm ci` in `ci/Dockerfile` would need it.
@@ -45,11 +60,13 @@ container image is fixed before any of its steps run, so CI has two jobs:
 
 1. "Pick builder image" (in the small `docker:cli` image) fetches
    `package-lock.json` and `ci/` at the commit under test and runs
-   `ci/resolve-image.sh`, which asks Docker Hub's web API whether the tag from
-   `ci/tag.sh` exists. If it does, that is the image. If not (a pull request
-   that changes the lockfile or `ci/Dockerfile`, or `master` in the minutes
-   before the new image is pushed), it takes the most recently pushed `lock-*`
-   tag. Any error falls back to `:latest`.
+   `ci/resolve-image.sh`. It uses the tag from `ci/tag.sh` if Docker Hub's web
+   API answers with a JSON body naming it. Otherwise (a pull request that
+   changes the lockfile or `ci/Dockerfile`, `master` in the minutes before the
+   new image is pushed, or a Docker Hub problem) it takes the newest valid
+   `lock-*` name from the 100 most recently updated tags. If that fails too,
+   it uses `:latest`. Each request has a time limit, so the script always
+   finishes within about 20 seconds and always prints a usable image.
 2. "Lint, type check, test and build" runs in that image. Its install step
    compares the checkout's lockfile hash with the image's: if they match (the
    normal case) it links the baked `node_modules`, with no install at all;
@@ -65,16 +82,38 @@ tag: in a test (issue #37) a tag re-pushed to Docker Hub was still served with
 its old content more than ten minutes later, to both `docker pull` and a job's
 container. A moved `:latest` might never reach CI. A new tag is a cache miss,
 so it is fetched from Docker Hub, which is why tags are never re-pushed and CI
-asks for the exact tag. The cost is the extra small job, about 15 to 20
-seconds per run (another job start and a small image pull).
+asks for the exact tag. The cost is the extra small job: about 7 seconds, plus
+waiting for a free runner.
+
+`ci/test-scripts.sh` (`npm run test:scripts`, part of `npm run check` and CI)
+tests `ci/resolve-image.sh`, `ci/hub-tag.sh`, the publishing decisions of
+`ci/build.sh` and `docker/release-tags.sh` with stubbed network, Docker and
+Git.
+
+## Security model
+
+Anyone who can push a branch to this repository can use the Docker Hub
+publishing token. Forgejo hides secrets only from pull requests opened from
+forks; a pull request from a branch in this repository runs that branch's
+version of the workflows with the secrets available, so a changed workflow
+could read the token. The workflows here log in only on `master` and on
+release tags, but that is not a security boundary.
+
+The mitigations are the owner's:
+
+- use a Docker Hub access token scoped to only `timcinel/co-larger` and
+  `timcinel/co-larger-builder`, with read and write but not delete or admin;
+- limit who has push access to the repository;
+- rotate the token (and update the `DOCKERHUB_TOKEN` secret) when someone's
+  access ends or a leak is suspected.
 
 ## Building by hand
 
 Not normally needed. `ci/build.sh` builds without pushing (`PUSH=0`, the
 default). To rebuild from CI, run the "Builder image" workflow on `master` from
 the Actions page (`workflow_dispatch`). Pushing by hand needs `docker login` to
-Docker Hub and `PUSH=1 ci/build.sh`. Either way an existing tag is not rebuilt:
-change `ci/Dockerfile` to get a new image.
+Docker Hub and `PUSH=1 ci/build.sh`; it follows the same rules. An existing
+tag is never rebuilt: change `ci/Dockerfile` to get a new image.
 
 ## Browser checks in CI
 
@@ -82,5 +121,6 @@ change `ci/Dockerfile` to get a new image.
 browser checks have flaked locally, the runner is about five times slower than
 a development machine, so timing-sensitive checks would flake more there, and
 every job pulls the whole image again (each job gets a fresh Docker daemon;
-the image is already about 500 MB), so Chrome would make every run slower. They stay a local check before merging
-changes to the editor or import (see issue #37).
+the image is already about 500 MB), so Chrome would make every run slower.
+They stay a local check before merging changes to the editor or import (see
+issue #37).

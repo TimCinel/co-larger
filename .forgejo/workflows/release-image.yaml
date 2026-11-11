@@ -1,7 +1,9 @@
 # Builds the app image (Dockerfile) for linux/amd64 and linux/arm64 with
 # docker/build.sh. On a release tag (YYYY.MM.N) it pushes
-# docker.io/timcinel/co-larger:<version>, :<12-character commit> and :latest.
-# On pull requests that touch the image it only builds, without secrets.
+# docker.io/timcinel/co-larger:<version> and :<12-character commit>, and
+# :latest when the tag is the highest release; it never overwrites an
+# existing version (docker/release-tags.sh). On pull requests that touch the
+# image it only builds, without logging in.
 # No emulation is needed for arm64: the Dockerfile's build stage runs on the
 # runner's own platform and the arm64 stage only copies files. See
 # docs/releasing.md.
@@ -15,7 +17,16 @@ on:
       - Dockerfile
       - .dockerignore
       - docker/**
+      - ci/hub-tag.sh
       - .forgejo/workflows/release-image.yaml
+
+# Releases publish one at a time, queued rather than cancelled. Forgejo's
+# concurrency is best-effort, so docker/release-tags.sh also refuses to
+# overwrite a version and moves latest only for the highest release.
+# Pull request builds push nothing and are grouped per branch.
+concurrency:
+  group: release-image-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
 
 jobs:
   release-image:
@@ -26,8 +37,8 @@ jobs:
     container:
       image: docker.io/library/docker:29.9.3-cli
     steps:
-      - name: Install Node (for actions/checkout and docker/build.sh) and bash
-        run: apk add --no-cache nodejs bash
+      - name: Install Node (for actions/checkout and docker/build.sh), bash and curl
+        run: apk add --no-cache nodejs bash curl
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
@@ -56,6 +67,12 @@ jobs:
         if: github.event_name == 'push'
         env:
           EXPECT_VERSION: ${{ github.ref_name }}
+          # Lets docker/release-tags.sh list the release tags (git ls-remote)
+          # with the job token, without putting the token on a command line.
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
         run: docker/build.sh
       - name: Log out
         if: always()

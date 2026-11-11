@@ -76,5 +76,7 @@ jobs:
         run: npm run typecheck
       - name: Test
         run: npm test
+      - name: Test image scripts
+        run: npm run test:scripts
       - name: Build
         run: npm run build
