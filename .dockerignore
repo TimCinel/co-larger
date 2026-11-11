@@ -1,0 +1,14 @@
+# Allow-list: nothing enters the build context unless it is named here, so
+# node_modules, .git, local files, photos and secrets can never be sent to the
+# Docker daemon or end up in an image.
+*
+!package.json
+!package-lock.json
+!index.html
+!vite.config.ts
+!tsconfig.json
+!src/
+!docker/nginx.conf
+!docker/security-headers.conf
+**/*.test.ts
+**/.DS_Store

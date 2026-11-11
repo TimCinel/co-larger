@@ -15,7 +15,7 @@ major difference: tile sizes are configurable, from uniform to a few very large
 - Static, client-side web app. Photos never leave the browser. No backend.
 - Desktop browsers only in v1 (mouse and keyboard).
 - Good enough for print: posters up to A2 at 300 DPI.
-- MIT licensed. Self-hosted as a static site (likely GitHub Pages).
+- MIT licensed. Ships as a multi-architecture (amd64 and arm64) Docker image that serves the static site, for self-hosting; any static host also works.
 - Stack: TypeScript and Vite.
 
 ## v1 scope
