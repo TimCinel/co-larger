@@ -4047,7 +4047,7 @@ async function checkImportOnce(
   check(
     '#35: 20 more photos leave the showing collage (state and canvas pixels) unchanged until the batch completes',
     mid.during > 0 && mid.allSame,
-    `${String(mid.during)} frames sampled mid-import; state ${String(mid.stateSame)}, pixels ${String(mid.pixelsSame)}, canvas ${String(mid.dims)}`,
+    `${String(mid.during)} frames sampled mid-import; state ${String(mid.stateSame)}, pixels ${String(mid.pixelsSame)}, canvas ${mid.dims}`,
   );
   check(
     '#35: then the collage re-rolls exactly once, with all 70',
