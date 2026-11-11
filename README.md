@@ -60,8 +60,14 @@ plain, JSON-serialisable `EditorState` (canvas settings, dial, seed, plan,
 assignment, per-photo crops), changed only by pure actions in `state.ts` and
 held by an `EditorStore` with subscribe/notify. `renderCollage` (`render.ts`)
 draws a state onto any 2D context at any size; the editor calls it with
-decoded previews and thumbnails from a bounded `ImageCache`, and the export
-will call it with the originals. The cover-and-crop maths is `coverSource` in
+decoded images from a bounded `ImageCache`, and the export calls it with the
+originals. The cache holds each photo as a thumbnail, a preview or, for a tile
+larger than its preview on screen (a big tile on a high-density display, or a
+zoomed crop), a decode of the original at the size the tile needs
+(`image-source.ts`), within a hard 256 MB budget that counts decodes in flight
+and degrades the smallest tiles first (`image-plan.ts`). Originals are not
+decoded while the dial or a crop is being dragged. `npm run check:browser
+--port <n>` uses another dev server port. The cover-and-crop maths is `coverSource` in
 `crop.ts`. `npm run check:browser` also checks the collage, the dial and
 Shuffle; with `--dir` it reports frame times while dragging the dial.
 
