@@ -12,6 +12,7 @@ import {
   createSizeReadout,
   createUndoControls,
   createTileSelection,
+  SELECTION_DEFERRED,
   EditorStore,
   FrameScheduler,
   type CollageView,
@@ -54,16 +55,17 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   const doc = root.ownerDocument;
   const store = options.store ?? new PhotoStore();
   const frames = new FrameScheduler(doc.defaultView as Window);
-  // Tray changes reach the editor once per frame, so an import of many
-  // photos re-rolls once per frame rather than once per photo.
+  const importer = new PhotoImporter(store, {
+    decode: options.decode ?? decodePhoto,
+  });
+  // Tray changes reach the editor once per frame, and not at all while an
+  // import runs: the collage is laid out once, when the import finishes.
   const editor = new EditorStore({
     photoStore: store,
+    imports: importer,
     scheduleSync: (sync) => {
       frames.request('photos', sync);
     },
-  });
-  const importer = new PhotoImporter(store, {
-    decode: options.decode ?? decodePhoto,
   });
 
   const shell = doc.createElement('div');
@@ -139,6 +141,7 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     view,
     editor,
     photos: store,
+    imports: importer,
     frames,
     emptyFocus: () => addButton,
   });
@@ -146,6 +149,7 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     doc,
     editor,
     photos: store,
+    imports: importer,
     frames,
     selection,
     canvas: view.canvas,
@@ -186,6 +190,20 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   workspace.append(settings, stage);
   shell.append(header, workspace);
   root.replaceChildren(shell);
+
+  // Include changes (tile Remove, tray toggles, Remove all, Add all) wait
+  // for a running import: say so once per import.
+  let toldDeferred = false;
+  store.subscribe((change) => {
+    if (change.kind !== 'included' || !importer.isBusy() || toldDeferred) {
+      return;
+    }
+    toldDeferred = true;
+    notices.show(SELECTION_DEFERRED);
+  });
+  importer.subscribe(() => {
+    if (!importer.isBusy()) toldDeferred = false;
+  });
 
   const addFiles = (files: File[], folders: string[] = []): void => {
     void importer.enqueue(files).then((summary) => {

@@ -28,7 +28,7 @@
 import type { PhotoStore } from '../photos';
 import { History, HISTORY_LIMIT } from './history';
 import type { EditorState } from './state';
-import type { EditorStore } from './store';
+import type { EditorStore, ImportActivity } from './store';
 
 export interface UndoManagerOptions {
   readonly editor: EditorStore;
@@ -39,6 +39,11 @@ export interface UndoManagerOptions {
    */
   readonly prepare?: () => void;
   readonly limit?: number;
+  /**
+   * While an import runs, undo and redo do nothing, and adding photos is
+   * not a boundary yet: the commit that lays out the whole import is.
+   */
+  readonly imports?: ImportActivity;
   /**
    * True while a pointer is held down in a continuous gesture (a drag of
    * the dial, a slider or the crop). Undo and redo then do nothing, so the
@@ -61,9 +66,12 @@ export class UndoManager {
   private readonly isGestureHeld: () => boolean;
   private readonly onHistoryCleared: (message: string) => void;
   private readonly photos: UndoManagerOptions['photos'];
+  private readonly imports: ImportActivity | undefined;
   private applying = false;
   /** Photos imported whose first commit has not happened yet. */
   private unseen = new Set<string>();
+  /** Photos were added during the running import: it is a boundary. */
+  private importAdded = false;
   private readonly listeners = new Set<() => void>();
 
   constructor(options: UndoManagerOptions) {
@@ -72,10 +80,22 @@ export class UndoManager {
     this.isGestureHeld = options.isGestureHeld ?? (() => false);
     this.onHistoryCleared = options.onHistoryCleared ?? (() => undefined);
     this.photos = options.photos;
+    this.imports = options.imports;
     this.history = new History(
       this.editor.getState(),
       options.limit ?? HISTORY_LIMIT,
     );
+    this.imports?.subscribe(() => {
+      if (!this.imports?.isBusy() && this.importAdded) {
+        // The editor has just made its one sync (it subscribed first). The
+        // boundary holds even if that changed nothing, for example when
+        // every new photo was excluded meanwhile.
+        this.importAdded = false;
+        this.unseen.clear();
+        if (!this.applying) this.boundary(this.editor.getState(), 'Adding');
+      }
+      this.changed();
+    });
     this.editor.subscribe((state, change) => {
       if (change.transient) {
         this.changed();
@@ -99,6 +119,12 @@ export class UndoManager {
       if (change.kind === 'included') return;
       if (change.kind === 'added') {
         for (const id of change.ids) this.unseen.add(id);
+        // Mid-import the collage does not change; the commit that lays out
+        // the whole import is the boundary (once, with one toast).
+        if (this.imports?.isBusy()) {
+          this.importAdded = true;
+          return;
+        }
       }
       // For removals the editor has already forgotten the photos (it
       // subscribed first, and the listener above treated that as the
@@ -112,12 +138,12 @@ export class UndoManager {
 
   /** Undo is possible, counting a gesture still to be committed. */
   canUndo(): boolean {
-    if (this.isGestureHeld()) return false;
+    if (this.isGestureHeld() || this.imports?.isBusy()) return false;
     return this.history.canUndo || this.editor.isDragging();
   }
 
   canRedo(): boolean {
-    if (this.isGestureHeld()) return false;
+    if (this.isGestureHeld() || this.imports?.isBusy()) return false;
     return this.history.canRedo && !this.editor.isDragging();
   }
 
@@ -162,7 +188,7 @@ export class UndoManager {
 
   private step(back: boolean): StepResult {
     // A pointer drag in progress is left alone: it commits once on release.
-    if (this.isGestureHeld()) return 'busy';
+    if (this.isGestureHeld() || this.imports?.isBusy()) return 'busy';
     this.prepare();
     // An unfinished gesture becomes its own entry first.
     this.editor.commitPending();

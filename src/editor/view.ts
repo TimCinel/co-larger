@@ -40,6 +40,12 @@ export interface CollageView {
     readonly state: EditorState;
     readonly tiles: readonly Tile[];
     readonly missing: number;
+    /**
+     * Image decodes still queued or running when the draw finished. A tile
+     * may show its thumbnail while its preview decodes, so pixels are final
+     * only at 0 (another draw follows each decode).
+     */
+    readonly pending: number;
   } | null;
   /**
    * Calls `listener` after every draw (and after the canvas is hidden for an
@@ -153,7 +159,13 @@ export function createCollageView(options: CollageViewOptions): CollageView {
         (cache.isFailed(id) ? 'failed' : null),
     );
     tiles = result.tiles;
-    last = { state, tiles, missing: result.missing };
+    const { queued, loading } = cache.stats();
+    last = {
+      state,
+      tiles,
+      missing: result.missing,
+      pending: queued + loading,
+    };
   }
 
   const scheduleRender = (): void => {

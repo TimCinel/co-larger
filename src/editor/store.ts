@@ -17,8 +17,17 @@
  * - Store to editor (the user toggled photos in the tray, or imported more):
  *   the editor's photos are set from the store's included photos, which
  *   re-rolls if the set changed (setPhotos). This runs once per frame (or
- *   microtask) after store changes, so an import of many photos re-rolls
- *   once per frame, not once per photo.
+ *   microtask) after store changes.
+ * - Imports lay out once. The PhotoImporter adds photos to the PhotoStore
+ *   one at a time, so the tray fills progressively, but it exposes `isBusy()`
+ *   (true until its whole queue, including later drops, is finished) and
+ *   notifies when that changes (`ImportActivity`). While busy, the sync does
+ *   nothing: the collage on screen stays exactly as it is, and tray toggles
+ *   (which only change include flags) wait too. When the importer goes idle
+ *   the editor syncs once, at once, so the import re-rolls once, or not at
+ *   all if nothing was added. The tray (and "N / M selected") therefore describes
+ *   what the collage will contain after the import. Removals are not
+ *   deferred. Undo and Redo do nothing while an import runs (see below).
  * - Editor to store (undo, redo, opening a project): {@link
  *   EditorStore.restore} replaces the whole snapshot and sets the store's
  *   include flags to match it in one step. The sync then finds the sets
@@ -55,11 +64,17 @@
  *   history is cleared and the re-roll the import causes is the new
  *   baseline (with a toast if there were steps to lose), so undo never
  *   crosses an import (photos cannot be un-added).
- *   Queued tray syncs are applied before every undo, so `restore` never
- *   runs between an import and its sync: it cannot exclude imported photos
- *   the snapshot does not name. Undo during a running import works on the
- *   steps since the latest batch of photos; undo or redo during an export
- *   is safe because export renders from its own snapshot.
+ *   One import is one boundary: photos added while the import is busy only
+ *   mark the import, and when it goes idle (just after the editor's one
+ *   sync) the history is cleared once, with one toast if there was history,
+ *   whether or not the final collage changed (the user may have excluded
+ *   every new photo meanwhile). Queued tray syncs are applied before every undo,
+ *   so `restore` never runs between an import and its sync: it cannot
+ *   exclude imported photos the snapshot does not name. While an import is
+ *   running, Undo and Redo are disabled and do nothing ('busy'), because a
+ *   restore would set the include flags to the snapshot's and drop the
+ *   photos the import has added so far; undo or redo during an export is
+ *   safe because export renders from its own snapshot.
  * - A tray sync that lands mid-drag commits the partial drag (one extra
  *   entry), which is acceptable: each is a real change the user made.
  *
@@ -110,12 +125,27 @@ export type EditorPhotoSource = Pick<
   'getPhoto' | 'getPlacementPhotos' | 'setIncludedIds' | 'subscribe'
 >;
 
+/**
+ * Whether an import is running (the PhotoImporter, in the app). While busy
+ * the editor does not sync from the PhotoStore; it syncs once when the
+ * listener fires and `isBusy()` is false.
+ */
+export interface ImportActivity {
+  isBusy(): boolean;
+  subscribe(listener: () => void): () => void;
+}
+
 export interface EditorStoreOptions extends CreateOptions {
   /**
    * The photo store to keep in step with (see the module comment). Its
    * included photos become the initial photos (overriding `photos`).
    */
   readonly photoStore?: EditorPhotoSource;
+  /**
+   * Defers the store-to-editor sync while an import is running (see the
+   * module comment).
+   */
+  readonly imports?: ImportActivity;
   /**
    * Runs the store-to-editor sync after a store change. Defaults to a
    * microtask; the app passes an animation-frame scheduler.
@@ -136,6 +166,7 @@ export class EditorStore {
   private provisional = false;
   private syncQueued = false;
   private readonly photoStore: EditorPhotoSource | undefined;
+  private readonly imports: ImportActivity | undefined;
   private readonly scheduleSync: (sync: () => void) => void;
   private readonly listeners = new Set<EditorListener>();
   private readonly onListenerError: (error: unknown) => void;
@@ -145,6 +176,7 @@ export class EditorStore {
 
   constructor(options: EditorStoreOptions = {}) {
     this.photoStore = options.photoStore;
+    this.imports = options.imports;
     this.state = createEditorState({
       ...options,
       photos: this.photoStore?.getPlacementPhotos() ?? options.photos,
@@ -177,6 +209,14 @@ export class EditorStore {
       } else {
         this.queueSync();
       }
+    });
+
+    // The import went idle: lay out whatever it added, once. Does nothing
+    // if nothing changed (every file failed or was a duplicate).
+    // At once, not on a frame: the history boundary (undo-manager.ts) runs
+    // right after, and must see the import's one layout already applied.
+    this.imports?.subscribe(() => {
+      if (!this.imports?.isBusy()) this.syncFromStore();
     });
   }
 
@@ -335,11 +375,17 @@ export class EditorStore {
     this.syncQueued = true;
     this.scheduleSync(() => {
       this.syncQueued = false;
-      const store = this.photoStore;
-      if (store) {
-        this.dispatch((state) => setPhotos(state, store.getPlacementPhotos()));
-      }
+      this.syncFromStore();
     });
+  }
+
+  private syncFromStore(): void {
+    // Mid-import: the collage stays as it is. The idle event syncs.
+    if (this.imports?.isBusy()) return;
+    const store = this.photoStore;
+    if (store) {
+      this.dispatch((state) => setPhotos(state, store.getPlacementPhotos()));
+    }
   }
 
   /**

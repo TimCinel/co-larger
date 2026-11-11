@@ -92,6 +92,20 @@ export class PhotoImporter {
     };
   }
 
+  /**
+   * True from the first file queued until the last one is added, skipped or
+   * failed (the queue is then empty). Unlike `getProgress().active` it is
+   * still true while the last photo is being added to the store, so a store
+   * listener never sees a photo arrive while this reads false.
+   */
+  isBusy(): boolean {
+    return this.jobs.length > 0;
+  }
+
+  /**
+   * Calls `listener` on every progress change; when `isBusy()` is false the
+   * queue has just gone idle, which is the "import finished" event.
+   */
   subscribe(listener: ImportProgressListener): () => void {
     this.listeners.add(listener);
     return () => {

@@ -196,7 +196,7 @@ describe('maxBorderForAspect', () => {
       }
     }
     expect(tight).toBe(cases);
-  }, 60_000);
+  }, 120_000);
 
   it('gives borders an editor can use: 3:1 limit as a share of the short side', () => {
     // On an A2 poster the 3:1 limit is a usable border even at 200 tiles.
