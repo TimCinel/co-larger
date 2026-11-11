@@ -129,10 +129,12 @@ export {
   type EditorListener,
   type EditorPhotoSource,
   type EditorStoreOptions,
+  type ImportActivity,
 } from './store';
 export { createCollageView, type CollageView } from './view';
 export {
   createTileSelection,
+  SELECTION_DEFERRED,
   type TileSelection,
   type TileSelectionOptions,
 } from './tile-selection';

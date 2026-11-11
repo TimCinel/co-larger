@@ -102,6 +102,11 @@ async function waitDrawn(p: Page, timeout = 30000): Promise<void> {
         last !== null &&
         last.state === state &&
         last.missing === 0 &&
+        // No thumbnail standing in for a preview still decoding: the pixels
+        // are final. (A draw follows every decode.)
+        last.pending === 0 &&
+        // The import is over: its one layout has been made.
+        document.querySelector<HTMLElement>('.progress')!.hidden &&
         state.photos.length === included.length &&
         included.every((id) => state.photos.some((ph: any) => ph.id === id))
       );
@@ -4128,6 +4133,112 @@ async function checkImportOnce(
   await ctx.close();
 }
 
+/** Include changes during an import wait for it, and say so once (issue #35). */
+async function checkDeferredSelection(
+  browser: import('playwright-core').Browser,
+): Promise<void> {
+  const ctx = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+  });
+  const p = await ctx.newPage();
+  const errors: string[] = [];
+  p.on('pageerror', (e) => errors.push(e.message));
+  await p.goto(origin);
+  await p.waitForSelector('.tray');
+  const named = (files: SyntheticPhoto[], prefix: string): SyntheticPhoto[] =>
+    files.map((f) => ({ ...f, name: `${prefix}-${f.name}` }));
+  await p.setInputFiles(
+    'input[type=file]',
+    named(await makeSyntheticPhotos(p, 6, 0.5), 'a'),
+  );
+  await p.waitForFunction(
+    () => (window as any).__app.store.getPhotos().length === 6,
+  );
+  await waitDrawn(p);
+  const message = 'Changes to the selection apply when the import finishes.';
+  const toasts = (): Promise<number> =>
+    p.locator('.notice', { hasText: message }).count();
+  const live = (): Promise<string> =>
+    p.evaluate(
+      () =>
+        document.querySelector('.sr-only[aria-live=polite]')?.textContent ?? '',
+    );
+  const shown = (): Promise<string> =>
+    p.evaluate(() =>
+      JSON.stringify(
+        (window as any).__app.editor.getState().photos.map((x: any) => x.id),
+      ),
+    );
+
+  // Start a long import (60 photos) and act while it runs.
+  const more = named(await makeSyntheticPhotos(p, 60, 0.5), 'b');
+  await p.setInputFiles('input[type=file]', more);
+  await p.waitForFunction(
+    () => (window as any).__app.store.getPhotos().length > 8,
+  );
+  const before = await shown();
+  const midImport = (): Promise<boolean> =>
+    p.evaluate(
+      () =>
+        !document.querySelector<HTMLElement>('.progress')!.hidden &&
+        (window as any).__app.store.getPhotos().length < 66,
+    );
+  check(
+    '#35: the import is still running for the selection checks',
+    await midImport(),
+  );
+
+  // Tile Remove: the screen reader is told it waits, not that it was removed.
+  const target = await p.evaluate(() => {
+    const { tiles } = (window as any).__app.view.lastRender();
+    const t = tiles[0];
+    const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    const r = c.getBoundingClientRect();
+    return {
+      x: r.left + ((t.x + t.width / 2) * r.width) / c.width,
+      y: r.top + ((t.y + t.height / 2) * r.height) / c.height,
+    };
+  });
+  await p.mouse.click(target.x, target.y);
+  await p.locator('.tile-menu').getByRole('button', { name: 'Remove' }).click();
+  check(
+    '#35: tile Remove during an import announces that it waits',
+    (await live()) === message,
+    await live(),
+  );
+  check(
+    '#35: and shows one toast, with the collage unchanged',
+    (await toasts()) === 1 && (await shown()) === before,
+  );
+  // A tray toggle, Remove all and Add all: still one toast for this import.
+  await p.getByRole('button', { name: 'Remove all' }).click();
+  await p.getByRole('button', { name: 'Add all to collage' }).click();
+  check(
+    '#35: other include changes in the same import add no second toast',
+    (await toasts()) === 1 && (await shown()) === before && (await midImport()),
+  );
+
+  await p.waitForFunction(
+    () => document.querySelector<HTMLElement>('.progress')!.hidden,
+    undefined,
+    { timeout: 60000 },
+  );
+  await waitDrawn(p);
+  check(
+    '#35: when the import finishes the selection applies (everything added back)',
+    (await p.evaluate(
+      () => (window as any).__app.editor.getState().photos.length,
+    )) === 66,
+  );
+
+  check(
+    '#35: no page errors in the selection checks',
+    errors.length === 0,
+    errors.join(' | '),
+  );
+  await ctx.close();
+}
+
 /** The collage canvas's pixels. */
 function canvasPixels(p: Page): Promise<number[]> {
   return p.evaluate(() => {
@@ -4858,6 +4969,18 @@ if (process.argv.includes('--export-only')) {
   await server.close();
   process.exit(failures === 0 ? 0 : 1);
 }
+// `--only selection,undo,import`: just those self-contained checks.
+const onlyIndex = process.argv.indexOf('--only');
+if (onlyIndex >= 0) {
+  const names = (process.argv[onlyIndex + 1] ?? '').split(',');
+  if (names.includes('selection')) await checkSelection(browser);
+  if (names.includes('undo')) await checkUndo(browser);
+  if (names.includes('import')) await checkImportOnce(browser);
+  if (names.includes('deferred')) await checkDeferredSelection(browser);
+  await browser.close();
+  await server.close();
+  process.exit(failures === 0 ? 0 : 1);
+}
 const context = await browser.newContext({
   viewport: { width: 1280, height: 800 },
 });
@@ -5228,6 +5351,7 @@ await checkSelection(browser);
 await checkCrop(browser);
 await checkUndo(browser);
 await checkImportOnce(browser);
+await checkDeferredSelection(browser);
 await checkCropPerformance(browser);
 await checkExport(browser, origin, check, {
   screenshots: process.argv.includes('--export-screenshot')

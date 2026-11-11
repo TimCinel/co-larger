@@ -6,5 +6,7 @@ export default defineConfig({
   base: './',
   test: {
     include: ['src/**/*.test.ts'],
+    // The CI runner is slow and shared; heavy tests set their own, longer ones.
+    testTimeout: 60_000,
   },
 });

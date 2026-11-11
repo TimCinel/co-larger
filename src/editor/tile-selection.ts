@@ -28,10 +28,14 @@ import {
   type SelectionState,
 } from './selection';
 import { swapTiles, type EditorState } from './state';
-import type { EditorStore } from './store';
+import type { EditorStore, ImportActivity } from './store';
 import type { FrameScheduler } from './frames';
 import { createTileCrop } from './tile-crop';
 import type { CollageView } from './view';
+
+/** Said (toast and screen reader) when an include change waits for an import. */
+export const SELECTION_DEFERRED =
+  'Changes to the selection apply when the import finishes.';
 
 export interface TileSelectionOptions {
   readonly doc: Document;
@@ -45,6 +49,8 @@ export interface TileSelectionOptions {
    * has it (the canvas is hidden then, and focus would fall to the page).
    */
   readonly emptyFocus?: () => HTMLElement | null;
+  /** While an import runs, include changes wait for it (see store.ts). */
+  readonly imports?: Pick<ImportActivity, 'isBusy'>;
 }
 
 export interface TileSelection {
@@ -391,7 +397,11 @@ export function createTileSelection(
     // Exactly as unticking it in the tray: the editor follows the photo
     // store (and re-rolls) in its next sync.
     photos.setIncluded(photoId, false);
-    announce(`Removed ${name} from the collage.`);
+    announce(
+      options.imports?.isBusy()
+        ? SELECTION_DEFERRED
+        : `Removed ${name} from the collage.`,
+    );
     canvas.focus();
   });
 

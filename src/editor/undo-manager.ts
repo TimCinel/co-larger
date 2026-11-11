@@ -70,6 +70,8 @@ export class UndoManager {
   private applying = false;
   /** Photos imported whose first commit has not happened yet. */
   private unseen = new Set<string>();
+  /** Photos were added during the running import: it is a boundary. */
+  private importAdded = false;
   private readonly listeners = new Set<() => void>();
 
   constructor(options: UndoManagerOptions) {
@@ -84,6 +86,14 @@ export class UndoManager {
       options.limit ?? HISTORY_LIMIT,
     );
     this.imports?.subscribe(() => {
+      if (!this.imports?.isBusy() && this.importAdded) {
+        // The editor has just made its one sync (it subscribed first). The
+        // boundary holds even if that changed nothing, for example when
+        // every new photo was excluded meanwhile.
+        this.importAdded = false;
+        this.unseen.clear();
+        if (!this.applying) this.boundary(this.editor.getState(), 'Adding');
+      }
       this.changed();
     });
     this.editor.subscribe((state, change) => {
@@ -111,7 +121,10 @@ export class UndoManager {
         for (const id of change.ids) this.unseen.add(id);
         // Mid-import the collage does not change; the commit that lays out
         // the whole import is the boundary (once, with one toast).
-        if (this.imports?.isBusy()) return;
+        if (this.imports?.isBusy()) {
+          this.importAdded = true;
+          return;
+        }
       }
       // For removals the editor has already forgotten the photos (it
       // subscribed first, and the listener above treated that as the

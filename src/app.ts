@@ -12,6 +12,7 @@ import {
   createSizeReadout,
   createUndoControls,
   createTileSelection,
+  SELECTION_DEFERRED,
   EditorStore,
   FrameScheduler,
   type CollageView,
@@ -140,6 +141,7 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     view,
     editor,
     photos: store,
+    imports: importer,
     frames,
     emptyFocus: () => addButton,
   });
@@ -188,6 +190,20 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   workspace.append(settings, stage);
   shell.append(header, workspace);
   root.replaceChildren(shell);
+
+  // Include changes (tile Remove, tray toggles, Remove all, Add all) wait
+  // for a running import: say so once per import.
+  let toldDeferred = false;
+  store.subscribe((change) => {
+    if (change.kind !== 'included' || !importer.isBusy() || toldDeferred) {
+      return;
+    }
+    toldDeferred = true;
+    notices.show(SELECTION_DEFERRED);
+  });
+  importer.subscribe(() => {
+    if (!importer.isBusy()) toldDeferred = false;
+  });
 
   const addFiles = (files: File[], folders: string[] = []): void => {
     void importer.enqueue(files).then((summary) => {

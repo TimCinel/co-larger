@@ -99,9 +99,10 @@ describe('import defers the editor sync', () => {
     }
     await done;
     expect(t.photos.getPhotos()).toHaveLength(5);
-    expect(t.commits).toHaveLength(0);
-    t.runFrame();
+    // The one layout happens as the import goes idle, not a frame later.
     expect(t.editor.getState().photos).toHaveLength(5);
+    expect(t.commits).toHaveLength(1);
+    t.runFrame();
     expect(t.commits).toHaveLength(1);
   });
 
@@ -217,5 +218,52 @@ describe('import defers the editor sync', () => {
     t.runFrame();
     expect(t.toasts).toEqual([]);
     expect(t.manager.canUndo()).toBe(true);
+  });
+
+  it('is a boundary even if every new photo ends up excluded', async () => {
+    const t = setup();
+    const first = t.importer.enqueue(t.files('a', 3));
+    await t.release(3);
+    await first;
+    t.editor.shuffle();
+    expect(t.manager.canUndo()).toBe(true);
+    const before = t.editor.getState();
+
+    // One good photo, then undecodable files keep the import running.
+    const done = t.importer.enqueue([
+      ...t.files('b', 1),
+      ...t.files('x', 3, 'bad'),
+    ]);
+    await t.release();
+    t.photos.setAllIncluded(false); // "Remove all", mid-import
+    t.runFrame();
+    expect(t.editor.getState()).toBe(before);
+    await t.release(3);
+    await done;
+
+    expect(t.editor.getState().photos).toHaveLength(0);
+    expect(t.toasts).toEqual(['Adding photos cleared the undo history.']);
+    expect(t.manager.canUndo()).toBe(false);
+    expect(t.manager.undo()).toBe('empty');
+    t.runFrame();
+    expect(t.toasts).toHaveLength(1);
+
+    // Re-including one of them afterwards works, and undo never throws.
+    const id = t.photos.getPhotos().at(-1)?.id ?? '';
+    t.photos.setIncluded(id, true);
+    t.runFrame();
+    expect(t.editor.getState().photos.map((p) => p.id)).toEqual([id]);
+    expect(t.toasts).toHaveLength(1);
+    expect(() => t.manager.undo()).not.toThrow();
+    expect(() => t.manager.redo()).not.toThrow();
+  });
+
+  it('with no history, an import that adds photos gives no toast', async () => {
+    const t = setup();
+    const done = t.importer.enqueue(t.files('a', 2));
+    await t.release(2);
+    await done;
+    expect(t.toasts).toEqual([]);
+    expect(t.manager.canUndo()).toBe(false);
   });
 });

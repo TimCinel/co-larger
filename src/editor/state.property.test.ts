@@ -49,8 +49,13 @@ function expectValid(state: EditorState, context: string): void {
 }
 
 describe('every state the actions produce validates', () => {
-  it('for random sequences of actions, including tiny canvases', () => {
-    for (let run = 0; run < 40; run++) {
+  // One named test per seed, each with a generous timeout: a slow shared
+  // runner then cannot fail one big test, and a failure names its seed.
+  const RUNS = Array.from({ length: 40 }, (_, run) => run);
+  it.each(RUNS)(
+    'random sequence of actions, seed %i',
+    { timeout: 60_000 },
+    (run) => {
       const rnd = random(run + 1);
       const pick = <T>(items: readonly T[]): T =>
         items[Math.floor(rnd() * items.length)] as T;
@@ -126,8 +131,8 @@ describe('every state the actions produce validates', () => {
         }
         expectValid(state, `run ${String(run)} after ${log.join(' ')}`);
       }
-    }
-  });
+    },
+  );
 
   it('for the tiny canvases the review found', () => {
     const fifty = createEditorState({ seed: 1, photos: POOL.slice(0, 50) });

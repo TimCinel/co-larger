@@ -24,8 +24,8 @@
  *   notifies when that changes (`ImportActivity`). While busy, the sync does
  *   nothing: the collage on screen stays exactly as it is, and tray toggles
  *   (which only change include flags) wait too. When the importer goes idle
- *   the editor syncs once, so the import re-rolls once, or not at all if
- *   nothing was added. The tray (and "N / M selected") therefore describes
+ *   the editor syncs once, at once, so the import re-rolls once, or not at
+ *   all if nothing was added. The tray (and "N / M selected") therefore describes
  *   what the collage will contain after the import. Removals are not
  *   deferred. Undo and Redo do nothing while an import runs (see below).
  * - Editor to store (undo, redo, opening a project): {@link
@@ -65,8 +65,10 @@
  *   baseline (with a toast if there were steps to lose), so undo never
  *   crosses an import (photos cannot be un-added).
  *   One import is one boundary: photos added while the import is busy only
- *   mark themselves unseen, and the single sync at the end clears the
- *   history (one toast). Queued tray syncs are applied before every undo,
+ *   mark the import, and when it goes idle (just after the editor's one
+ *   sync) the history is cleared once, with one toast if there was history,
+ *   whether or not the final collage changed (the user may have excluded
+ *   every new photo meanwhile). Queued tray syncs are applied before every undo,
  *   so `restore` never runs between an import and its sync: it cannot
  *   exclude imported photos the snapshot does not name. While an import is
  *   running, Undo and Redo are disabled and do nothing ('busy'), because a
@@ -211,8 +213,10 @@ export class EditorStore {
 
     // The import went idle: lay out whatever it added, once. Does nothing
     // if nothing changed (every file failed or was a duplicate).
+    // At once, not on a frame: the history boundary (undo-manager.ts) runs
+    // right after, and must see the import's one layout already applied.
     this.imports?.subscribe(() => {
-      if (!this.imports?.isBusy()) this.queueSync();
+      if (!this.imports?.isBusy()) this.syncFromStore();
     });
   }
 
@@ -371,13 +375,17 @@ export class EditorStore {
     this.syncQueued = true;
     this.scheduleSync(() => {
       this.syncQueued = false;
-      // Mid-import: the collage stays as it is. The idle event syncs.
-      if (this.imports?.isBusy()) return;
-      const store = this.photoStore;
-      if (store) {
-        this.dispatch((state) => setPhotos(state, store.getPlacementPhotos()));
-      }
+      this.syncFromStore();
     });
+  }
+
+  private syncFromStore(): void {
+    // Mid-import: the collage stays as it is. The idle event syncs.
+    if (this.imports?.isBusy()) return;
+    const store = this.photoStore;
+    if (store) {
+      this.dispatch((state) => setPhotos(state, store.getPlacementPhotos()));
+    }
   }
 
   /**
