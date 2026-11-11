@@ -3,14 +3,21 @@ import { describe, expect, it } from 'vitest';
 import type { Decoder } from '../photos/decode';
 import { fileFingerprint, PhotoStore } from '../photos/store';
 import { planSave, reboundFiles, saveProjectStream } from './save';
-import { streamToBlob } from './zip';
-import { FORMAT_VERSION, ProjectError, serialiseProject } from './format';
+import { Crc32, streamToBlob } from './zip';
+import {
+  FORMAT_VERSION,
+  MAX_INFLATED_BYTES,
+  ProjectError,
+  serialiseProject,
+} from './format';
 import { openProject, type OpenProgress } from './open';
 import { readZipDirectory } from './zip';
 import {
   fakeDecode,
   makePhoto,
   makeZip,
+  rawZip,
+  type RawEntry,
   saveToBlob,
   stateFor,
   withByte,
@@ -232,20 +239,216 @@ describe('openProject', () => {
       });
       expect(await failure(big)).toMatch(/too large/);
     });
+  });
 
-    it('a photo stored compressed', async () => {
-      const { zipSync, unzipSync, strFromU8 } = await import('fflate');
+  describe('deflated photos (#43)', () => {
+    /** The saved project re-zipped: photos whose path has a `deflate` part use DEFLATE. */
+    async function rezipped(deflate: readonly string[]): Promise<Blob> {
+      const { zipSync, unzipSync } = await import('fflate');
       const files = unzipSync(
         new Uint8Array(await (await saved()).arrayBuffer()),
       );
-      const json = strFromU8(files['project.json'] as Uint8Array);
-      const archive = new Blob([
-        zipSync(
-          { ...files, 'project.json': new TextEncoder().encode(json) },
-          { level: 6 },
+      const out: Record<string, [Uint8Array, { level: 0 | 6 }]> = {};
+      for (const [name, data] of Object.entries(files)) {
+        out[name] = [
+          data,
+          { level: deflate.some((d) => name.includes(d)) ? 6 : 0 },
+        ];
+      }
+      return new Blob([zipSync(out)]);
+    }
+
+    /**
+     * The saved project.json with every photo as a hand-made DEFLATE entry
+     * (correct unless `change` overrides a field of the directory entry).
+     */
+    async function rawProject(
+      change: (original: Uint8Array) => Partial<RawEntry> = () => ({}),
+    ): Promise<Blob> {
+      const { unzipSync, deflateSync } = await import('fflate');
+      const files = unzipSync(
+        new Uint8Array(await (await saved()).arrayBuffer()),
+      );
+      const crc = (data: Uint8Array): number => {
+        const c = new Crc32();
+        c.update(data);
+        return c.value;
+      };
+      return rawZip(
+        Object.entries(files).map(([name, data]) =>
+          name === 'project.json'
+            ? { name, data }
+            : {
+                name,
+                method: 8,
+                data: deflateSync(data),
+                crc: crc(data),
+                size: data.length,
+                ...change(data),
+              },
         ),
-      ]);
-      expect(await failure(archive)).toMatch(/stored compressed/);
+      );
+    }
+
+    async function methodsOf(archive: Blob): Promise<number[]> {
+      return (await readZipDirectory(archive, 1 << 30)).map((e) => e.method);
+    }
+
+    it('opens a project whose photos are all deflated, with the same bytes', async () => {
+      const archive = await rezipped(['photos/']);
+      expect(await methodsOf(archive)).toContain(8);
+      const opened = await open(archive);
+      expect(opened.photos).toHaveLength(3);
+      expect(opened.state).toEqual(stateFor(photos));
+      for (const [i, photo] of opened.photos.entries()) {
+        const original = (photos[i] as (typeof photos)[number]).file;
+        expect(await photo.file.text()).toBe(await original.text());
+        expect(fileFingerprint(photo.file)).toBe(fileFingerprint(original));
+        expect(photo.file.type).toBe('image/jpeg');
+      }
+    });
+
+    it('opens a mix of stored and deflated photos', async () => {
+      const archive = await rezipped(['photo-2', 'photo-7']);
+      expect(new Set(await methodsOf(archive))).toEqual(new Set([0, 8]));
+      const opened = await open(archive);
+      for (const [i, photo] of opened.photos.entries()) {
+        const original = (photos[i] as (typeof photos)[number]).file;
+        expect(await photo.file.text()).toBe(await original.text());
+      }
+    });
+
+    it('inflates each deflated photo exactly once and leaves stored ones alone', async () => {
+      const archive = await rezipped(['photo-2', 'photo-7']);
+      const Original = globalThis.DecompressionStream;
+      let made = 0;
+      globalThis.DecompressionStream = class extends Original {
+        constructor(format: CompressionFormat) {
+          super(format);
+          made++;
+        }
+      };
+      try {
+        await open(archive);
+      } finally {
+        globalThis.DecompressionStream = Original;
+      }
+      // project.json and photo-1 are stored: one inflation per deflated photo.
+      expect(made).toBe(2);
+    });
+
+    it('a project opened from deflated photos saves as a stored zip that reopens identically', async () => {
+      const opened = await open(await rezipped(['photos/']));
+      const store = new PhotoStore();
+      store.addPhotos(opened.photos);
+      const plan = planSave(opened.state, store.getPhotos());
+      const archive = await streamToBlob(saveProjectStream(plan));
+      expect(new Set(await methodsOf(archive))).toEqual(new Set([0]));
+      // The inflated copies give way to slices of the saved file.
+      store.rebindFiles(await reboundFiles(plan, archive));
+      const again = await open(archive);
+      expect(again.state).toEqual(opened.state);
+      for (const [i, photo] of store.getPhotos().entries()) {
+        const reopened = (again.photos[i] as { file: File }).file;
+        expect(await photo.file.text()).toBe(await reopened.text());
+        expect(photo.file).not.toBe((opened.photos[i] as { file: File }).file);
+      }
+    });
+
+    describe('refuses, with a message, and builds nothing', () => {
+      it('a corrupt deflate stream', async () => {
+        const archive = await rawProject(() => ({
+          data: new Uint8Array([0xff, 0xff, 0xff, 0xff, 0x13, 0x37]),
+        }));
+        expect(await failure(archive)).toMatch(/damaged/);
+      });
+
+      it('a wrong CRC-32', async () => {
+        const archive = await rawProject(() => ({ crc: 0x12345678 }));
+        expect(await failure(archive)).toMatch(/damaged.*checksum/);
+      });
+
+      it('a declared length that is too short', async () => {
+        const archive = await rawProject((data) => ({
+          size: data.length - 1,
+        }));
+        expect(await failure(archive)).toMatch(/damaged/);
+      });
+
+      it('a declared length that is too long', async () => {
+        const archive = await rawProject((data) => ({
+          size: data.length + 1,
+        }));
+        expect(await failure(archive)).toMatch(/damaged/);
+      });
+
+      it('more compressed photos than the memory bound, naming the limit and a way out', async () => {
+        // The sizes are only declared: the check is made before inflating.
+        const archive = await rawProject(() => ({
+          size: Math.floor(MAX_INFLATED_BYTES / 2),
+        }));
+        const message = await failure(archive);
+        expect(message).toMatch(/512 MB/);
+        expect(message).toMatch(/without compression/);
+      });
+
+      it('declared lengths within the bound pass the memory check', async () => {
+        const archive = await rawProject(() => ({
+          size: Math.floor(MAX_INFLATED_BYTES / 3),
+        }));
+        // They then fail on the real length, not on memory.
+        expect(await failure(archive)).not.toMatch(/memory/);
+      });
+
+      it('a method other than store and deflate', async () => {
+        const archive = await rawProject(() => ({ method: 12 }));
+        expect(await failure(archive)).toMatch(/unsupported compression/);
+      });
+
+      it('an encrypted photo', async () => {
+        const archive = await rawProject(() => ({ flags: 1 }));
+        expect(await failure(archive)).toMatch(/encrypted/);
+      });
+
+      it('and leaves a live project untouched', async () => {
+        const live = new PhotoStore();
+        live.addPhotos(photos.map((p) => ({ ...p })));
+        const before = live.getPhotos();
+        await failure(await rawProject(() => ({ crc: 5 })));
+        expect(live.getPhotos()).toEqual(before);
+      });
+    });
+
+    it('ignores the entries a system zip adds (__MACOSX, .DS_Store)', async () => {
+      const { zipSync, unzipSync } = await import('fflate');
+      const files = unzipSync(
+        new Uint8Array(await (await saved()).arrayBuffer()),
+      );
+      const entries: Record<string, [Uint8Array, { level: 6 }]> = {};
+      for (const [name, data] of Object.entries(files)) {
+        entries[name] = [data, { level: 6 }];
+      }
+      entries['__MACOSX/._project.json'] = [new Uint8Array(120), { level: 6 }];
+      entries['__MACOSX/photos/._photo-1-beach.jpg'] = [
+        new Uint8Array(120),
+        { level: 6 },
+      ];
+      entries['.DS_Store'] = [new Uint8Array(6148), { level: 6 }];
+      entries['photos/.DS_Store'] = [new Uint8Array(6148), { level: 6 }];
+      const archive = new Blob([zipSync(entries)]);
+      expect((await open(archive)).photos).toHaveLength(3);
+    });
+
+    it('stops when aborted', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      await expect(
+        openProject(await rezipped(['photos/']), {
+          decode: fakeDecode,
+          signal: controller.signal,
+          yieldToMain: instantly,
+        }),
+      ).rejects.toThrow();
     });
   });
 
