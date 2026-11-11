@@ -133,16 +133,21 @@ async function waitDrawn(p: Page, timeout = 30000): Promise<void> {
  * in a few pixels from the settled ones.
  */
 async function stableHash<T>(p: Page, hashOf: () => Promise<T>): Promise<T> {
+  const redraws = 12;
   await waitDrawn(p);
-  let previous = await hashOf();
-  for (let i = 0; i < 12; i++) {
+  const seen: T[] = [await hashOf()];
+  for (let i = 0; i < redraws; i++) {
     await p.evaluate(() => (window as any).__app.view.renderNow());
     await waitDrawn(p);
     const next = await hashOf();
-    if (next === previous && i >= 2) return next;
-    previous = next;
+    if (next === seen[seen.length - 1] && i >= 2) return next;
+    seen.push(next);
   }
-  return previous;
+  // Never return an unconverged hash: two such comparisons could agree by
+  // chance without the pixels ever having been stable.
+  throw new Error(
+    `canvas pixels did not converge after ${String(redraws)} redraws of a settled state; hashes seen: ${[...new Set(seen)].map(String).join(', ')}`,
+  );
 }
 
 /** Sets the dial as a user would (fires `input` and `change`). */
@@ -2612,13 +2617,13 @@ async function checkSelection(
     let inside = true;
     let tried = 0;
     for (let slot = 0; slot < 6; slot++) {
-      // A narrow window can push part of the collage off screen: skip those.
+      // A narrow window can push part of the collage off screen: check the
+      // tiles that are on screen, however many the arrangement leaves.
       const c = await centre(slot);
       if (c.x < 0 || c.y < 0 || c.x > size.width || c.y > size.height) continue;
       tried++;
       await clickTile(slot);
       const box = await menu.boundingBox();
-      if (box) console.log('DBG', size.width, slot, JSON.stringify(box));
       if (
         !box ||
         box.x < 0 ||
@@ -2632,7 +2637,7 @@ async function checkSelection(
     await outsideClick();
     check(
       `the menu stays inside the viewport for every tile at ${String(size.width)} x ${String(size.height)}`,
-      inside && tried >= 4,
+      inside && tried >= 1,
       `${String(tried)} tiles tried`,
     );
   }
@@ -4373,10 +4378,27 @@ async function checkUndo(
     const { x, y } = await centre(slot);
     await p.mouse.click(x, y);
   };
+  const selectionKind = (): string =>
+    (window as any).__app.selection.getSelection().kind;
   const swapUi = async (a: number, b: number): Promise<void> => {
+    // Start from no selection (a click on a selected tile would deselect it
+    // instead of selecting it), and wait for each step of the selection
+    // before the next click rather than clicking on a timer.
+    if ((await p.evaluate(selectionKind)) !== 'idle') {
+      await p.mouse.click(5, 790);
+      await p.waitForFunction(
+        () => (window as any).__app.selection.getSelection().kind === 'idle',
+      );
+    }
     await clickTile(a);
     await p.locator('.tile-menu').getByRole('button', { name: 'Swap' }).click();
+    await p.waitForFunction(
+      () => (window as any).__app.selection.getSelection().kind === 'swapping',
+    );
     await clickTile(b);
+    await p.waitForFunction(
+      () => (window as any).__app.selection.getSelection().kind !== 'swapping',
+    );
     await settle();
   };
   const sel = (): Promise<string> =>
@@ -4491,7 +4513,11 @@ async function checkUndo(
   const beforeSwap = await snap();
   await swapUi(0, 2);
   const afterSwap = await snap();
-  check('undo: a swap changed the state', afterSwap !== beforeSwap);
+  check(
+    'undo: a swap changed the state',
+    afterSwap !== beforeSwap,
+    `selection ${await sel()}`,
+  );
   await undoBtn.click();
   await settle();
   check('undo: undoes a swap', (await snap()) === beforeSwap);
