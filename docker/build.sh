@@ -33,6 +33,9 @@ fi
 docker buildx build ${PLATFORM:+--platform "$PLATFORM"} -f Dockerfile \
   --provenance=false --sbom=false \
   --label org.opencontainers.image.title=co-larger \
+  --label "org.opencontainers.image.description=co-larger: a client-side photo collage maker, served as a static site by nginx" \
+  --label "org.opencontainers.image.version=$REV" \
+  --label org.opencontainers.image.url=https://git.core.home.timcinel.com/tim/co-larger \
   --label org.opencontainers.image.source=https://git.core.home.timcinel.com/tim/co-larger \
   --label "org.opencontainers.image.revision=$FULL" \
   --label "org.opencontainers.image.created=$CREATED" \
