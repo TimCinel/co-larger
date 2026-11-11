@@ -10,14 +10,27 @@ jobs:
     name: Lint, type check, test and build
     runs-on: general-ci
     container:
-      image: docker.io/library/node:24-bookworm
+      # Docker Hub builder image with dependencies pre-installed (see
+      # ci/README.md). Rebuild with ci/build.sh after changing
+      # package-lock.json, then update this tag. CI still works, only more
+      # slowly, when the image is stale.
+      image: docker.io/timcinel/co-larger-builder:lock-cddf86d9b162-r2
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
       - name: Install dependencies
-        run: npm ci
+        # The image has node_modules ready in /opt/deps for one lockfile
+        # (hash in /opt/deps/lock.sha256). If the checkout's lockfile matches,
+        # link it (no unpack: that is CPU-bound on this runner); otherwise
+        # install normally, using the image's npm cache where it can.
+        run: |
+          if [ "$(sha256sum package-lock.json | cut -d' ' -f1)" = "$(cat /opt/deps/lock.sha256)" ]; then
+            ln -s /opt/deps/node_modules node_modules
+          else
+            npm ci --prefer-offline --no-audit --no-fund
+          fi
       - name: Lint
         run: npm run lint
       - name: Type check
