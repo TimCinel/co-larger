@@ -33,6 +33,10 @@ npm run dev
 | `npm run check`         | Run lint, type check, tests and build, as CI does.                  |
 | `npm run check:browser` | Real-browser check of import and editor (local only; needs Chrome). |
 
+CI runs in a builder image with dependencies pre-fetched. After changing
+`package-lock.json`, rebuild it with `ci/build.sh` (see `ci/README.md`) and
+update the tag in `.forgejo/workflows/ci.yaml`.
+
 The layout engine (`src/layout/`) is a pure TypeScript library. To see it
 working, run `npm run dev` and open `/demo/layout.html`: a development-only page
 that draws layouts as coloured rectangles at several dial values. Its "View"
