@@ -231,6 +231,19 @@ export class PhotoStore {
     this.notify({ kind: 'removed', ids: removed.map((photo) => photo.id) });
   }
 
+  /**
+   * Points photos at new `File`s with the same content (after a project was
+   * saved to a file, the photos read from that file). Silent: nothing about
+   * a photo's identity, size, order or flags changes, so no listener has
+   * anything to do. Unknown ids are ignored.
+   */
+  rebindFiles(files: ReadonlyMap<string, File>): void {
+    this.photos = this.photos.map((photo) => {
+      const file = files.get(photo.id);
+      return file ? { ...photo, file } : photo;
+    });
+  }
+
   /** Removes every photo (for example before loading a project). */
   clear(): void {
     this.removePhotos(this.photos.map((photo) => photo.id));

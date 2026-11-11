@@ -18,7 +18,13 @@ import {
   PROJECT_FILE,
   type ManifestPhoto,
 } from './format';
-import { readZipDirectory, readZipEntry, readZipText } from './zip';
+import {
+  checkZipEntry,
+  readZipDirectory,
+  readZipEntry,
+  readZipText,
+  type ZipEntry,
+} from './zip';
 
 /** A validated project, ready to be installed. */
 export interface OpenedProject {
@@ -84,11 +90,13 @@ export async function openProject(
     throw new ProjectError('project.json is too large.');
   }
   signal?.throwIfAborted();
+  await checkZipEntry(archive, manifestEntry, signal);
   const project = parseProject(await readZipText(archive, manifestEntry));
 
   // Every listed file must exist (extra files in the zip are ignored).
   const byPath = new Map(entries.map((entry) => [entry.path, entry]));
   const files = new Map<string, File>();
+  const entryOf = new Map<string, ZipEntry>();
   for (const photo of project.photos) {
     const entry = byPath.get(photo.path);
     if (!entry) {
@@ -108,6 +116,7 @@ export async function openProject(
     // name, type and modification time make the same fingerprint as the
     // original file, so dropping the original again is a duplicate.
     const data = await readZipEntry(archive, entry);
+    entryOf.set(photo.id, entry);
     files.set(
       photo.id,
       new File([data], photo.name, {
@@ -133,6 +142,9 @@ export async function openProject(
       const photo = project.photos[index];
       if (!photo) return;
       try {
+        // Check the photo's CRC-32 first, streaming: a damaged entry
+        // refuses the whole project before anything is replaced.
+        await checkZipEntry(archive, entryOf.get(photo.id) as ZipEntry, signal);
         decoded[index] = await decodeOne(photo, files, decode);
       } catch (error) {
         failure ??= { error };

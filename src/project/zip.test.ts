@@ -2,8 +2,10 @@
 import { strToU8, unzipSync, zipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import { ProjectError } from './format';
-import { makeZip } from './test-helpers';
+import { makeZip, rawZip, withByte } from './test-helpers';
 import {
+  checkZipEntry,
+  Crc32,
   createZipStream,
   MAX_ENTRIES,
   readZipDirectory,
@@ -135,7 +137,7 @@ describe('writing', () => {
       streamToBlob(
         createZipStream([{ path: 'a', data: broken, lastModified: 1e12 }]),
       ),
-    ).rejects.toThrow('gone');
+    ).rejects.toThrow(/can no longer be read/);
   });
 });
 
@@ -286,5 +288,289 @@ describe('readZipText', () => {
     const archive = makeZip({ 'project.json': strToU8('{"name":"café"}') });
     const [entry] = await readZipDirectory(archive, BIG);
     expect(await readZipText(archive, entry!)).toBe('{"name":"café"}');
+  });
+});
+
+describe('Crc32', () => {
+  it('matches the standard check value, in any chunking', () => {
+    const data = strToU8('123456789');
+    const whole = new Crc32();
+    whole.update(data);
+    expect(whole.value).toBe(0xcbf43926);
+    const pieces = new Crc32();
+    for (const byte of data) pieces.update(Uint8Array.of(byte));
+    expect(pieces.value).toBe(0xcbf43926);
+    expect(new Crc32().value).toBe(0);
+  });
+
+  it('agrees with the checksum fflate wrote, for long data', async () => {
+    const data = bytes(100_003, 9);
+    const archive = new Blob([zipSync({ a: data }, { level: 0 })]);
+    const [entry] = await readZipDirectory(archive, BIG);
+    const crc = new Crc32();
+    crc.update(data.subarray(0, 12_345));
+    crc.update(data.subarray(12_345));
+    expect(crc.value).toBe(entry?.crc);
+    await expect(checkZipEntry(archive, entry!)).resolves.toBeUndefined();
+  });
+});
+
+describe('checkZipEntry', () => {
+  const data = bytes(5000, 4);
+
+  it('passes an entry with the right checksum, ours or deflated', async () => {
+    const archive = await streamToBlob(
+      createZipStream([
+        { path: 'a', data: new Blob([data]), lastModified: 1e12 },
+      ]),
+    );
+    const [entry] = await readZipDirectory(archive, BIG);
+    await expect(checkZipEntry(archive, entry!)).resolves.toBeUndefined();
+    const packed = new Blob([zipSync({ b: data }, { level: 6 })]);
+    const [deflated] = await readZipDirectory(packed, BIG);
+    await expect(checkZipEntry(packed, deflated!)).resolves.toBeUndefined();
+  });
+
+  it('refuses a changed byte, a wrong checksum and a wrong size', async () => {
+    const good = rawZip([{ name: 'a', data }]);
+    const [entry] = await readZipDirectory(good, BIG);
+    const flipped = await withByte(good, entry!.dataOffset + 10, (b) => b ^ 1);
+    await expect(checkZipEntry(flipped, entry!)).rejects.toThrow(/damaged/);
+    const wrongCrc = rawZip([{ name: 'a', data, crc: entry!.crc ^ 1 }]);
+    const [e2] = await readZipDirectory(wrongCrc, BIG);
+    await expect(checkZipEntry(wrongCrc, e2!)).rejects.toThrow(/damaged/);
+    await expect(
+      checkZipEntry(good, { ...entry!, size: 4999, compressedSize: 5000 }),
+    ).rejects.toThrow(/damaged/);
+  });
+
+  it('refuses a deflated entry that is corrupt or expands past its size', async () => {
+    const packed = zipSync({ b: new Uint8Array(10_000) }, { level: 6 });
+    const [entry] = await readZipDirectory(new Blob([packed]), BIG);
+    const bad = await withByte(
+      new Blob([packed]),
+      entry!.dataOffset + 2,
+      (b) => b ^ 0xff,
+    );
+    await expect(checkZipEntry(bad, entry!)).rejects.toThrow(/damaged/);
+    await expect(
+      checkZipEntry(new Blob([packed]), { ...entry!, size: 100 }),
+    ).rejects.toThrow(/damaged/);
+  });
+
+  it('stops when aborted', async () => {
+    const good = rawZip([{ name: 'a', data }]);
+    const [entry] = await readZipDirectory(good, BIG);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      checkZipEntry(good, entry!, controller.signal),
+    ).rejects.toThrow();
+  });
+
+  it('reports an unreadable archive as a lost file', async () => {
+    const good = rawZip([{ name: 'a', data }]);
+    const [entry] = await readZipDirectory(good, BIG);
+    const broken = new Blob([data]);
+    broken.slice = () => {
+      const part = new Blob([data]);
+      part.stream = () =>
+        new ReadableStream({
+          pull(controller) {
+            controller.error(new DOMException('gone', 'NotFoundError'));
+          },
+        });
+      return part;
+    };
+    await expect(checkZipEntry(broken, entry!)).rejects.toThrow(
+      /can no longer be read/,
+    );
+  });
+});
+
+describe('hostile archives', () => {
+  const ok = new Uint8Array([1, 2, 3]);
+  const reject = async (blob: Blob, message: RegExp): Promise<void> => {
+    const error = await readZipDirectory(blob, BIG).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(error, String(message)).toBeInstanceOf(ProjectError);
+    expect((error as Error).message).toMatch(message);
+  };
+
+  it('huge declared sizes', async () => {
+    await reject(
+      rawZip([
+        { name: 'a', data: ok, size: 0xf0000000, compressedSize: 0xf0000000 },
+      ]),
+      /damaged|too large/,
+    );
+    await readZipDirectory(rawZip([{ name: 'a', data: ok }]), 1 << 30);
+    await reject(
+      rawZip([
+        { name: 'a', data: ok, size: 0xf0000000, compressedSize: 0xf0000000 },
+      ]).slice(0),
+      /damaged|too large/,
+    );
+    const limited = await readZipDirectory(
+      rawZip([{ name: 'a', data: ok }]),
+      2,
+    ).then(
+      () => 'ok',
+      (e: unknown) => (e as Error).message,
+    );
+    expect(limited).toMatch(/too large/);
+    await reject(
+      rawZip([
+        { name: 'a', data: ok, size: 0xffffffff, compressedSize: 0xffffffff },
+      ]),
+      /damaged|too large|ZIP64/,
+    );
+  });
+
+  it('a declared size that does not match the data', async () => {
+    await reject(rawZip([{ name: 'a', data: ok, size: 10 }]), /inconsistent/);
+    await reject(
+      rawZip([{ name: 'a', data: ok, size: 10, compressedSize: 10 }]),
+      /damaged/,
+    );
+  });
+
+  it('thousands of entries: the limit holds, and the limit itself works', async () => {
+    const make = (n: number) =>
+      rawZip(Array.from({ length: n }, (_, i) => ({ name: `f${String(i)}` })));
+    expect(await readZipDirectory(make(MAX_ENTRIES), BIG)).toHaveLength(
+      MAX_ENTRIES,
+    );
+    await reject(make(MAX_ENTRIES + 1), /limit/);
+  });
+
+  it('names with .., absolute paths, backslashes and drive letters', async () => {
+    for (const name of [
+      '../x',
+      'a/../../x',
+      '/etc/passwd',
+      'a\\b',
+      'C:\\x',
+      'c:x',
+      './x',
+      'a//b',
+      '..\\x',
+    ]) {
+      await reject(rawZip([{ name, data: ok }]), /unsafe/);
+    }
+  });
+
+  it('duplicate names', async () => {
+    await reject(
+      rawZip([
+        { name: 'a', data: ok },
+        { name: 'a', data: ok },
+      ]),
+      /twice/,
+    );
+  });
+
+  it('names that are not UTF-8 are read, not fatal', async () => {
+    const entries = await readZipDirectory(
+      rawZip([{ name: Uint8Array.of(0x70, 0xff, 0xfe, 0x2e, 0x6a), data: ok }]),
+      BIG,
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.path).toContain('\ufffd');
+  });
+
+  it('a zip64 archive is refused clearly', async () => {
+    await reject(rawZip([{ name: 'a', data: ok }], { count: 0xffff }), /ZIP64/);
+    await reject(
+      rawZip([{ name: 'a', data: ok }], { zip64Locator: true }),
+      /ZIP64/,
+    );
+  });
+
+  it('a comment in the end record, and garbage after it', async () => {
+    const withComment = rawZip([{ name: 'a', data: ok }], {
+      comment: 'made by someone',
+    });
+    expect(await readZipDirectory(withComment, BIG)).toHaveLength(1);
+    const trailing = rawZip([{ name: 'a', data: ok }], {
+      trailing: bytes(500, 5),
+    });
+    expect(await readZipDirectory(trailing, BIG)).toHaveLength(1);
+    const both = rawZip([{ name: 'a', data: ok }], {
+      comment: 'PK\u0005\u0006 inside',
+      trailing: bytes(40, 6),
+    });
+    expect(await readZipDirectory(both, BIG)).toHaveLength(1);
+  });
+
+  it('data descriptors (sizes after the data), as our own writer and many tools write', async () => {
+    const archive = rawZip([{ name: 'a', data: ok, flags: 8 }]);
+    const [entry] = await readZipDirectory(archive, BIG);
+    expect(entry?.size).toBe(3);
+    await checkZipEntry(archive, entry!);
+  });
+
+  it('a deflated entry is read, but a stored photo is expected (see open)', async () => {
+    const packed = new Blob([
+      zipSync({ a: new Uint8Array(100) }, { level: 6 }),
+    ]);
+    const [entry] = await readZipDirectory(packed, BIG);
+    expect(entry?.method).toBe(8);
+  });
+
+  it('an encrypted entry and an unknown method', async () => {
+    await reject(rawZip([{ name: 'a', data: ok, flags: 1 }]), /encrypted/);
+    await reject(rawZip([{ name: 'a', data: ok, method: 12 }]), /unsupported/);
+  });
+
+  it('truncated at any point: a clear error, never another exception', async () => {
+    const archive = rawZip([
+      { name: 'project.json', data: strToU8('{"a":1}') },
+      { name: 'photos/a.jpg', data: bytes(300, 1) },
+    ]);
+    for (let cut = 0; cut < archive.size; cut += 3) {
+      const error = await readZipDirectory(archive.slice(0, cut), BIG).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      if (error !== null) expect(error).toBeInstanceOf(ProjectError);
+    }
+  });
+
+  it('a random byte changed anywhere: readable or a clear error, never a crash or hang', async () => {
+    const archive = await streamToBlob(
+      createZipStream([
+        {
+          path: 'project.json',
+          data: new Blob(['{"a":1}']),
+          lastModified: 1e12,
+        },
+        {
+          path: 'photos/a.jpg',
+          data: new Blob([bytes(400, 2)]),
+          lastModified: 1e12,
+        },
+      ]),
+    );
+    let x = 12345;
+    for (let i = 0; i < 300; i++) {
+      x = (x * 1103515245 + 12345) & 0x7fffffff;
+      const mutated = await withByte(
+        archive,
+        x % archive.size,
+        (b) => b ^ (1 + (x % 255)),
+      );
+      try {
+        const entries = await readZipDirectory(mutated, BIG);
+        for (const entry of entries)
+          await checkZipEntry(mutated, entry).catch((e: unknown) => {
+            expect(e).toBeInstanceOf(ProjectError);
+          });
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProjectError);
+      }
+    }
   });
 });

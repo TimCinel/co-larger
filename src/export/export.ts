@@ -8,6 +8,7 @@
  * The browser pieces (canvas, decoding, yielding) are injected so the flow
  * is testable in Node.
  */
+import { BACKING_FILE_MESSAGE, isReadable } from '../photos/backing';
 import {
   cropOf,
   renderCollageAsync,
@@ -68,7 +69,7 @@ export type ExportProgress =
     }
   | { readonly phase: 'encoding' };
 
-export type ExportFailure = 'too-large' | 'decode';
+export type ExportFailure = 'too-large' | 'decode' | 'unreadable';
 
 /** Why an export stopped, with a message fit to show. */
 export class ExportError extends Error {
@@ -147,6 +148,11 @@ export async function exportCollage(
       try {
         decoded = await deps.decode(photo.file, decodeSize);
       } catch {
+        // A file that was moved, deleted or replaced after the project was
+        // opened is not a photo this browser cannot decode: say which.
+        if (!(await isReadable(photo.file))) {
+          throw new ExportError('unreadable', BACKING_FILE_MESSAGE, photo.name);
+        }
         throw new ExportError(
           'decode',
           `Could not read ${photo.name}: this browser cannot decode the original photo, so the export was stopped.`,

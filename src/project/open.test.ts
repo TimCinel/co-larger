@@ -1,15 +1,19 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-dynamic-delete -- tests tamper with untyped JSON */
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-dynamic-delete, @typescript-eslint/no-non-null-assertion -- tests tamper with untyped JSON */
 import { describe, expect, it } from 'vitest';
 import type { Decoder } from '../photos/decode';
-import { fileFingerprint } from '../photos/store';
+import { fileFingerprint, PhotoStore } from '../photos/store';
+import { planSave, reboundFiles, saveProjectStream } from './save';
+import { streamToBlob } from './zip';
 import { FORMAT_VERSION, ProjectError, serialiseProject } from './format';
 import { openProject, type OpenProgress } from './open';
+import { readZipDirectory } from './zip';
 import {
   fakeDecode,
   makePhoto,
   makeZip,
   saveToBlob,
   stateFor,
+  withByte,
 } from './test-helpers';
 
 const instantly = (): Promise<void> => Promise.resolve();
@@ -245,6 +249,82 @@ describe('openProject', () => {
     });
   });
 
+  describe('checksums', () => {
+    it('refuses a project.json whose content no longer matches its CRC', async () => {
+      const archive = await saved();
+      const entries = await readZipDirectory(archive, 1 << 30);
+      const manifest = entries.find((e) => e.path === 'project.json')!;
+      const text = await archive
+        .slice(manifest.dataOffset, manifest.dataOffset + manifest.size)
+        .text();
+      // Change #ffffff (the default background) to #0fffff, keep the length.
+      const at = text.indexOf('#ffffff');
+      expect(at).toBeGreaterThan(0);
+      const damaged = await withByte(
+        archive,
+        manifest.dataOffset + at + 1,
+        () => 0x30,
+      );
+      expect(await failure(damaged)).toMatch(
+        /project file is damaged.*project\.json/,
+      );
+    });
+
+    it('refuses a photo whose bytes no longer match, before decoding any', async () => {
+      const archive = await saved();
+      const entries = await readZipDirectory(archive, 1 << 30);
+      const photo = entries.find((e) => e.path.startsWith('photos/photo-7'))!;
+      const damaged = await withByte(
+        archive,
+        photo.dataOffset + photo.size - 1,
+        (b) => b ^ 1,
+      );
+      const decoded: string[] = [];
+      const decode: Decoder = (file) => {
+        decoded.push(file.name);
+        return fakeDecode(file);
+      };
+      const message = await failure(damaged, decode);
+      expect(message).toMatch(/damaged.*dog\.jpg|damaged.*photo-7/);
+    });
+
+    it('refuses a wrong CRC in the directory', async () => {
+      const archive = await saved();
+      const entries = await readZipDirectory(archive, 1 << 30);
+      const photo = entries[1]!;
+      // The directory entry's CRC field: find it by scanning for the signature.
+      const bytes = new Uint8Array(await archive.arrayBuffer());
+      const view = new DataView(bytes.buffer);
+      let seen = 0;
+      for (let i = 0; i < bytes.length - 46; i++) {
+        if (view.getUint32(i, true) === 0x02014b50 && seen++ === 1) {
+          view.setUint32(i + 16, photo.crc ^ 0xdeadbeef, true);
+          break;
+        }
+      }
+      expect(await failure(new Blob([bytes]))).toMatch(/damaged/);
+    });
+  });
+
+  it('every single changed byte gives a result or a clear error, never another exception', async () => {
+    const archive = await saved();
+    const total = archive.size;
+    let x = 7;
+    for (let i = 0; i < 150; i++) {
+      x = (x * 1103515245 + 12345) & 0x7fffffff;
+      const mutated = await withByte(
+        archive,
+        x % total,
+        (b) => b ^ (1 + (x % 255)),
+      );
+      try {
+        await open(mutated);
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProjectError);
+      }
+    }
+  });
+
   it('stops when aborted and produces nothing', async () => {
     const controller = new AbortController();
     const decode: Decoder = async (file) => {
@@ -269,5 +349,49 @@ describe('openProject', () => {
     });
     const opened = await open(makeZip({ 'project.json': text }));
     expect(opened.photos).toEqual([]);
+  });
+
+  describe('rebinding photos to a saved file', () => {
+    it('gives every photo a slice of the saved archive with the same content, name, type and time', async () => {
+      const plan = planSave(stateFor(photos), photos);
+      const archive = await streamToBlob(saveProjectStream(plan));
+      const files = await reboundFiles(plan, archive);
+      expect([...files.keys()]).toEqual(photos.map((p) => p.id));
+      for (const photo of photos) {
+        const file = files.get(photo.id) as File;
+        expect(await file.text()).toBe(await photo.file.text());
+        expect([file.name, file.type, file.lastModified]).toEqual([
+          photo.file.name,
+          photo.file.type,
+          photo.file.lastModified,
+        ]);
+      }
+    });
+
+    it('refuses a saved file that lacks a photo', async () => {
+      const plan = planSave(stateFor(photos), photos);
+      await expect(
+        reboundFiles(plan, makeZip({ 'project.json': '{}' })),
+      ).rejects.toThrow(/does not contain/);
+    });
+
+    it('PhotoStore.rebindFiles swaps files silently', () => {
+      const store = new PhotoStore();
+      store.addPhotos(photos.map((p) => ({ ...p })));
+      const seen: string[] = [];
+      store.subscribe((c) => seen.push(c.kind));
+      const replacement = new File(['x'], 'beach.jpg', { lastModified: 5 });
+      store.rebindFiles(
+        new Map([
+          ['photo-1', replacement],
+          ['nope', replacement],
+        ]),
+      );
+      expect(store.getPhoto('photo-1')?.file).toBe(replacement);
+      expect(store.getPhotos().map((p) => p.id)).toEqual(
+        photos.map((p) => p.id),
+      );
+      expect(seen).toEqual([]);
+    });
   });
 });

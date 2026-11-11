@@ -21,14 +21,21 @@ import { downloadBlob } from '../export/controls';
 import type { EditorStore } from '../editor/store';
 import type { Decoder } from '../photos/decode';
 import type { PhotoStore } from '../photos/store';
+import { BackingFileError } from '../photos/backing';
 import { ProjectError } from './format';
 import { openProject, type OpenedProject } from './open';
-import { planSave, PROJECT_FILE_NAME, saveProjectStream } from './save';
+import {
+  planSave,
+  PROJECT_FILE_NAME,
+  reboundFiles,
+  saveProjectStream,
+} from './save';
 import { streamToBlob } from './zip';
 
 /** The part of the File System Access API's file handle that is used. */
 export interface SaveFileHandle {
   createWritable(): Promise<WritableStream<Uint8Array>>;
+  getFile(): Promise<File>;
 }
 
 /** Asks the user where to save; null if the browser has no such dialog. */
@@ -74,7 +81,7 @@ export interface ProjectControlsOptions {
   >;
   readonly photos: Pick<
     PhotoStore,
-    'getPhotos' | 'getTotalCount' | 'subscribe'
+    'getPhotos' | 'getTotalCount' | 'subscribe' | 'rebindFiles'
   >;
   readonly imports: {
     isBusy(): boolean;
@@ -289,10 +296,38 @@ export function createProjectControls(
         });
         let size: number;
         if (handle) {
+          // The file may be the very zip the photos were opened from, and
+          // those photos read from it while this writes. That is safe because
+          // createWritable() (no `keepExistingData`) writes to a separate
+          // swap file and replaces the target only when it is closed: until
+          // then every read of the original sees the original. So there is
+          // no in-place write, and any failure or Cancel aborts the writable,
+          // which discards the swap file and leaves the target untouched.
           const writable = await handle.createWritable();
-          await stream.pipeTo(writable, { signal: run.signal });
-          size = plan.totalBytes;
+          try {
+            await stream.pipeTo(writable, { signal: run.signal });
+          } catch (error) {
+            await writable.abort(error).catch(() => undefined);
+            throw error;
+          }
+          // The target now holds the new zip, so photos that were slices of
+          // the old file may be invalid. Point every photo at the new file.
+          const written = await handle.getFile();
+          size = written.size;
+          try {
+            photos.rebindFiles(await reboundFiles(plan, written));
+          } catch (error) {
+            const reason = error instanceof Error ? error.message : '';
+            throw new ProjectError(
+              `The project was saved, but could not be read back (${reason}). Open it again from the saved file before continuing.`,
+            );
+          }
         } else {
+          // The download path: the whole zip is assembled in a Blob from
+          // readable sources first, and only a complete Blob is handed to the
+          // browser, which writes it to a temporary download file and renames
+          // it. A source that cannot be read fails the save before any
+          // download starts, and the source is never also the output.
           const blob = await streamToBlob(stream);
           run.signal.throwIfAborted();
           downloadBlob(doc, blob, PROJECT_FILE_NAME);
@@ -308,7 +343,7 @@ export function createProjectControls(
           status.textContent = 'Save cancelled';
         } else {
           failure.textContent =
-            error instanceof ProjectError
+            error instanceof ProjectError || error instanceof BackingFileError
               ? error.message
               : 'Could not save the project. A photo may have been moved or changed on disk since it was added.';
         }
@@ -387,7 +422,7 @@ export function createProjectControls(
         return;
       }
       const message =
-        error instanceof ProjectError
+        error instanceof ProjectError || error instanceof BackingFileError
           ? error.message
           : 'Could not open this file.';
       status.textContent = '';

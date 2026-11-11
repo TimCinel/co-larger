@@ -20,7 +20,11 @@ import {
   type UndoControls,
 } from './editor';
 import { browserDeps, createExportControls } from './export';
-import { classifyDrop, createProjectControls } from './project';
+import {
+  classifyDrop,
+  createProjectControls,
+  type ProjectControls,
+} from './project';
 import { installDropTarget } from './ui/dropzone';
 import { createNotices, summaryMessages } from './ui/notices';
 import { createTray } from './ui/tray';
@@ -44,6 +48,8 @@ export interface App {
   readonly selection: TileSelection;
   /** Undo and redo: the history of committed changes. */
   readonly undo: UndoControls;
+  /** Save and open project (#12). */
+  readonly project: ProjectControls;
 }
 
 /**
@@ -289,5 +295,5 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   importer.subscribe(showProgress);
 
   // The drop overlay is shown through the `dragging` class on the shell.
-  return { store, editor, view, selection, undo };
+  return { store, editor, view, selection, undo, project };
 }

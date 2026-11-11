@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access -- tests tamper with untyped JSON */
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return -- tests tamper with untyped JSON */
 import { describe, expect, it } from 'vitest';
 import { createEditorState } from '../editor/state';
 import {
@@ -387,6 +387,128 @@ describe('parseProject', () => {
   it('ignores unknown extra fields', () => {
     const parsed = parseProject(tampered((j) => (j.future = { a: 1 })));
     expect('future' in parsed).toBe(false);
+  });
+});
+
+describe('a hostile project.json', () => {
+  it('prototype keys are not special', () => {
+    const json = JSON.parse(text());
+    const raw = JSON.stringify(json)
+      .replace(
+        '{"format"',
+        '{"__proto__":{"polluted":1},"constructor":{"x":1},"format"',
+      )
+      .replace(
+        '"crops":{}',
+        '"crops":{"__proto__":{"x":1,"y":0.5,"zoom":2},"constructor":{"x":1,"y":0.5,"zoom":2}}',
+      );
+    let outcome: unknown;
+    try {
+      outcome = parseProject(raw);
+    } catch (error) {
+      outcome = error;
+    }
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(outcome instanceof ProjectError || typeof outcome === 'object').toBe(
+      true,
+    );
+    if (!(outcome instanceof ProjectError)) {
+      const parsed = outcome as ReturnType<typeof parseProject>;
+      expect(Object.getPrototypeOf(parsed.state.crops)).toBe(null);
+    }
+  });
+
+  it('an id named like a prototype key or with path characters is fine', () => {
+    const odd = [
+      makePhoto('__proto__', 'a.jpg', 400, 300),
+      makePhoto('constructor', 'b.jpg', 300, 400),
+      makePhoto('../x\\y/z', 'c.jpg', 500, 500),
+    ];
+    const parsed = parseProject(
+      serialiseProject(buildProject(stateFor(odd), sources(odd))),
+    );
+    expect(parsed.photos.map((p) => p.id)).toEqual([
+      '__proto__',
+      'constructor',
+      '../x\\y/z',
+    ]);
+    expect(parsed.photos.every((p) => isSafePath(p.path))).toBe(true);
+  });
+
+  it('enormous arrays are refused quickly', () => {
+    const started = Date.now();
+    for (const change of [
+      (j: any) => (j.photos = new Array<unknown>(1_000_000).fill(null)),
+      (j: any) => (j.state.assignment = new Array<number>(500_000).fill(0)),
+      (j: any) =>
+        (j.state.photos = new Array<unknown>(500_000).fill({
+          id: 'a',
+          aspect: 1,
+        })),
+    ]) {
+      expect(() => parseProject(tampered(change))).toThrow(ProjectError);
+    }
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it('wrong types everywhere give a ProjectError, never another exception', () => {
+    const weird: unknown[] = [
+      null,
+      [],
+      {},
+      'x',
+      Number.POSITIVE_INFINITY,
+      -1,
+      true,
+      0.5,
+      '__proto__',
+    ];
+    const paths: string[][] = [
+      ['format'],
+      ['version'],
+      ['state'],
+      ['photos'],
+      ['state', 'canvas'],
+      ['state', 'plan'],
+      ['state', 'assignment'],
+      ['state', 'crops'],
+      ['state', 'photos'],
+      ['state', 'seed'],
+      ['photos', '0'],
+      ['photos', '0', 'id'],
+      ['photos', '0', 'path'],
+      ['photos', '0', 'name'],
+      ['photos', '0', 'type'],
+      ['photos', '0', 'included'],
+      ['photos', '0', 'width'],
+      ['photos', '0', 'aspect'],
+      ['photos', '0', 'lastModified'],
+    ];
+    for (const path of paths) {
+      for (const value of weird) {
+        const raw = tampered((j) => {
+          let at = j;
+          for (const key of path.slice(0, -1)) at = at[key];
+          at[path[path.length - 1] as string] = value;
+        });
+        try {
+          parseProject(raw);
+        } catch (error) {
+          expect(error, `${path.join('.')} = ${String(value)}`).toBeInstanceOf(
+            ProjectError,
+          );
+        }
+      }
+    }
+  });
+
+  it('the same file named twice, and ids that collide', () => {
+    expect(() =>
+      parseProject(tampered((j) => (j.photos[2].path = j.photos[0].path))),
+    ).toThrow(/share the file path/);
+    expect(() =>
+      parseProject(tampered((j) => (j.photos[2].id = j.photos[0].id))),
+    ).toThrow(/share the id/);
   });
 });
 

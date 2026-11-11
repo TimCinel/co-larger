@@ -14,7 +14,12 @@ import {
   PROJECT_FILE,
   serialiseProject,
 } from './format';
-import { createZipStream, MAX_ARCHIVE_BYTES, type ZipSource } from './zip';
+import {
+  createZipStream,
+  MAX_ARCHIVE_BYTES,
+  readZipDirectory,
+  type ZipSource,
+} from './zip';
 
 /** The default name of a saved project. */
 export const PROJECT_FILE_NAME = 'collage-project.colarger.zip';
@@ -27,6 +32,8 @@ export interface SavePlan {
   readonly sources: readonly ZipSource[];
   /** Total bytes of the sources, for progress. */
   readonly totalBytes: number;
+  /** Each photo saved, with its path in the zip and the file it came from. */
+  readonly photos: readonly { id: string; path: string; file: File }[];
 }
 
 /**
@@ -62,14 +69,17 @@ export function planSave(
     { path: PROJECT_FILE, data: json, lastModified: Date.now() },
   ];
   let totalBytes = json.size;
+  const saved: { id: string; path: string; file: File }[] = [];
   photos.forEach((photo, index) => {
     if (photo.file.size > MAX_PHOTO_BYTES) {
       throw new ProjectError(
         `"${photo.file.name}" is too large to save in a project (over 1 GB).`,
       );
     }
+    const path = (project.photos[index] as { path: string }).path;
+    saved.push({ id: photo.id, path, file: photo.file });
     sources.push({
-      path: (project.photos[index] as { path: string }).path,
+      path,
       data: photo.file,
       lastModified: photo.file.lastModified,
     });
@@ -80,7 +90,7 @@ export function planSave(
       'This project is too large to save as one zip (4 GB or more). Remove some photos and try again.',
     );
   }
-  return { sources, totalBytes };
+  return { sources, totalBytes, photos: saved };
 }
 
 export interface SaveOptions {
@@ -100,4 +110,38 @@ export function saveProjectStream(
       options.onProgress?.(bytes, Math.max(0, entry - 1));
     },
   });
+}
+
+/**
+ * After a project is saved to a file, the photos should read from that file:
+ * the file they were opened from may just have been replaced (saving over the
+ * project you opened). Reads the saved archive's directory and returns, for
+ * every saved photo, a File that is a slice of it (the entry's offset and
+ * length from the directory, with the original name, type and time). Throws
+ * if the saved file does not hold what was written.
+ */
+export async function reboundFiles(
+  plan: SavePlan,
+  saved: Blob,
+): Promise<Map<string, File>> {
+  const entries = await readZipDirectory(saved, MAX_PHOTO_BYTES);
+  const byPath = new Map(entries.map((entry) => [entry.path, entry]));
+  const files = new Map<string, File>();
+  for (const photo of plan.photos) {
+    const entry = byPath.get(photo.path);
+    if (entry?.method !== 0 || entry.size !== photo.file.size) {
+      throw new ProjectError(
+        `The saved file does not contain "${photo.file.name}" as expected.`,
+      );
+    }
+    files.set(
+      photo.id,
+      new File(
+        [saved.slice(entry.dataOffset, entry.dataOffset + entry.size)],
+        photo.file.name,
+        { type: photo.file.type, lastModified: photo.file.lastModified },
+      ),
+    );
+  }
+  return files;
 }

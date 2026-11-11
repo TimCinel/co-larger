@@ -16,6 +16,7 @@
  * DecompressionStream, with a hard cap, so a zip bomb cannot expand.
  */
 import { Zip, ZipPassThrough } from 'fflate';
+import { BackingFileError } from '../photos/backing';
 import { isSafePath, ProjectError } from './format';
 
 /** What to put in the archive. */
@@ -116,7 +117,16 @@ export function createZipStream(
               zip.add(file);
               current = { reader: source.data.stream().getReader(), file };
             }
-            const { value, done } = await current.reader.read();
+            let chunk: ReadableStreamReadResult<Uint8Array>;
+            try {
+              chunk = await current.reader.read();
+            } catch {
+              signal?.throwIfAborted();
+              // A photo's file cannot be read (moved, deleted, replaced):
+              // the whole save fails, and nothing is kept.
+              throw new BackingFileError();
+            }
+            const { value, done } = chunk;
             signal?.throwIfAborted();
             if (done) {
               current.file.push(new Uint8Array(0), true);
@@ -200,7 +210,12 @@ async function bytesAt(
   start: number,
   length: number,
 ): Promise<DataView> {
-  const buffer = await blob.slice(start, start + length).arrayBuffer();
+  let buffer: ArrayBuffer;
+  try {
+    buffer = await blob.slice(start, start + length).arrayBuffer();
+  } catch {
+    throw new BackingFileError();
+  }
   if (buffer.byteLength !== length) {
     throw new ProjectError('This zip file is truncated or damaged.');
   }
@@ -238,6 +253,20 @@ export async function readZipDirectory(
   blob: Blob,
   maxEntryBytes: number,
 ): Promise<ZipEntry[]> {
+  try {
+    return await readDirectory(blob, maxEntryBytes);
+  } catch (error) {
+    if (error instanceof ProjectError || error instanceof BackingFileError) {
+      throw error;
+    }
+    throw new ProjectError('This zip file is damaged.');
+  }
+}
+
+async function readDirectory(
+  blob: Blob,
+  maxEntryBytes: number,
+): Promise<ZipEntry[]> {
   if (blob.size < EOCD_SIZE) throw new ProjectError(NOT_A_ZIP);
   if (blob.size > MAX_ARCHIVE_BYTES) {
     throw new ProjectError('This zip is too large (4 GB or more) to open.');
@@ -247,14 +276,18 @@ export async function readZipDirectory(
   let eocd = -1;
   for (let at = tailLength - EOCD_SIZE; at >= 0; at--) {
     if (tail.getUint32(at, true) !== EOCD_SIGNATURE) continue;
-    // The comment length must account for the rest of the file.
-    if (at + EOCD_SIZE + tail.getUint16(at + 20, true) === tailLength) {
+    // The comment must fit in the file; anything after it is ignored.
+    if (at + EOCD_SIZE + tail.getUint16(at + 20, true) <= tailLength) {
       eocd = at;
       break;
     }
   }
   if (eocd < 0) throw new ProjectError(NOT_A_ZIP);
 
+  // A ZIP64 end-of-central-directory locator sits just before the record.
+  if (eocd >= 20 && tail.getUint32(eocd - 20, true) === 0x07064b50) {
+    throw new ProjectError('This zip uses ZIP64, which is not supported.');
+  }
   const count = tail.getUint16(eocd + 10, true);
   const directorySize = tail.getUint32(eocd + 12, true);
   const directoryOffset = tail.getUint32(eocd + 16, true);
@@ -418,4 +451,111 @@ export async function readZipText(
 ): Promise<string> {
   const blob = await readZipEntry(archive, entry);
   return new TextDecoder('utf-8').decode(await blob.arrayBuffer());
+}
+
+const CRC_TABLE = (() => {
+  // Slicing-by-8: eight 256-entry tables, one per byte position.
+  const table = new Uint32Array(256 * 8);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c;
+  }
+  for (let n = 0; n < 256; n++) {
+    let c = table[n] as number;
+    for (let k = 1; k < 8; k++) {
+      c = (table[c & 255] as number) ^ (c >>> 8);
+      table[k * 256 + n] = c;
+    }
+  }
+  return table;
+})();
+
+/** A streaming CRC-32 (the zip checksum): feed chunks, then read `value`. */
+export class Crc32 {
+  private crc = 0xffff_ffff;
+
+  update(data: Uint8Array): void {
+    const t = CRC_TABLE;
+    let c = this.crc;
+    let i = 0;
+    const end = data.length - 8;
+    for (; i <= end; i += 8) {
+      const a =
+        c ^
+        ((data[i] as number) |
+          ((data[i + 1] as number) << 8) |
+          ((data[i + 2] as number) << 16) |
+          ((data[i + 3] as number) << 24));
+      c =
+        (t[1792 + (a & 255)] as number) ^
+        (t[1536 + ((a >>> 8) & 255)] as number) ^
+        (t[1280 + ((a >>> 16) & 255)] as number) ^
+        (t[1024 + (a >>> 24)] as number) ^
+        (t[768 + (data[i + 4] as number)] as number) ^
+        (t[512 + (data[i + 5] as number)] as number) ^
+        (t[256 + (data[i + 6] as number)] as number) ^
+        (t[data[i + 7] as number] as number);
+    }
+    for (; i < data.length; i++) {
+      c = (t[(c ^ (data[i] as number)) & 255] as number) ^ (c >>> 8);
+    }
+    this.crc = c >>> 0;
+  }
+
+  get value(): number {
+    return (this.crc ^ 0xffff_ffff) >>> 0;
+  }
+}
+
+export const DAMAGED = (path: string): ProjectError =>
+  new ProjectError(
+    `This project file is damaged: "${path}" does not match its checksum. Save it again from the original, or use a good copy.`,
+  );
+
+/**
+ * Checks an entry's CRC-32 and size by streaming its content once, a chunk
+ * at a time (a deflated entry is checked after decompression, never past
+ * its declared size), so no photo is ever held in memory. Throws a
+ * ProjectError for a mismatch, a BackingFileError if the archive cannot be
+ * read, and the signal's reason if aborted.
+ */
+export async function checkZipEntry(
+  archive: Blob,
+  entry: ZipEntry,
+  signal?: AbortSignal,
+): Promise<void> {
+  const raw = archive.slice(
+    entry.dataOffset,
+    entry.dataOffset + entry.compressedSize,
+  );
+  let stream: ReadableStream<Uint8Array<ArrayBuffer>> = raw.stream();
+  if (entry.method === 8) {
+    stream = stream.pipeThrough(new DecompressionStream('deflate-raw'));
+  }
+  const reader = stream.getReader();
+  const crc = new Crc32();
+  let total = 0;
+  try {
+    for (;;) {
+      signal?.throwIfAborted();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try {
+        chunk = await reader.read();
+      } catch {
+        signal?.throwIfAborted();
+        if (entry.method === 8) throw DAMAGED(entry.path);
+        throw new BackingFileError();
+      }
+      if (chunk.done) break;
+      total += chunk.value.length;
+      if (total > entry.size) throw DAMAGED(entry.path);
+      crc.update(chunk.value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+  if (total !== entry.size || crc.value !== entry.crc) {
+    throw DAMAGED(entry.path);
+  }
 }

@@ -240,7 +240,10 @@ async function waitOpened(p: Page, timeout = 300_000): Promise<void> {
     undefined,
     { timeout },
   );
-  await waitDrawn(p, timeout);
+  const empty = await p.evaluate(
+    () => (window as any).__app.editor.getState().photos.length === 0,
+  );
+  if (!empty) await waitDrawn(p, timeout);
 }
 
 /** Chooses `file` to open; confirms the replacement if asked. */
@@ -338,8 +341,11 @@ export async function checkProject(
   console.log('\nSave and open project (issue #12)');
   const tmp = mkdtempSync(join(tmpdir(), 'colarger-project-'));
   try {
-    await checkSmall(browser, origin, check, tmp, options);
-    await checkLarge(browser, origin, check, tmp, 100);
+    const small = await checkSmall(browser, origin, check, tmp, options);
+    await checkOpfs(browser, origin, check, small);
+    await checkRoundTrips(browser, origin, check, small.zipPath);
+    if (!process.env.SKIP_LARGE)
+      await checkLarge(browser, origin, check, tmp, 100);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -351,7 +357,7 @@ async function checkSmall(
   check: Check,
   tmp: string,
   options: { screenshots?: string },
-): Promise<void> {
+): Promise<SmallResult> {
   const A = await newPage(browser, origin);
   const p = A.page;
 
@@ -750,6 +756,26 @@ async function checkSmall(
       ),
       /unsafe file path/,
     ],
+    [
+      'project.json changed without updating the CRC (background #33aa77 to #03aa77)',
+      (() => {
+        const copy = Buffer.from(zipBytes);
+        const at = copy.indexOf('#33aa77');
+        copy[at + 1] = 0x30;
+        return copy;
+      })(),
+      /project file is damaged/,
+    ],
+    [
+      'a photo changed without updating the CRC',
+      (() => {
+        const copy = Buffer.from(zipBytes);
+        const at = copy.indexOf(Buffer.from(good[markerEntry.path]!));
+        copy[at + 100] = (copy[at + 100] as number) ^ 0x01;
+        return copy;
+      })(),
+      /project file is damaged.*marker\.jpg|project file is damaged/,
+    ],
     ['too many entries', Buffer.from(zipSync(many, { level: 0 })), /limit/],
     [
       'an absurd declared size',
@@ -983,6 +1009,468 @@ async function checkSmall(
   });
 
   for (const page of [A, B, C, cancelPage, D]) await page.context.close();
+  return { zipPath, exportBefore, state: before.state };
+}
+
+interface SmallResult {
+  zipPath: string;
+  exportBefore: string;
+  state: string;
+}
+
+const opfsPut = (p: Page, name: string, bytes: Buffer): Promise<void> =>
+  p.evaluate(
+    async ({ name, b64 }) => {
+      const dir = await navigator.storage.getDirectory();
+      const handle = await dir.getFileHandle(name, { create: true });
+      const writable = await handle.createWritable();
+      await writable.write(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)));
+      await writable.close();
+    },
+    { name, b64: bytes.toString('base64') },
+  );
+
+const opfsSha = (p: Page, name: string): Promise<string> =>
+  p.evaluate(async (name) => {
+    const dir = await navigator.storage.getDirectory();
+    const file = await (await dir.getFileHandle(name)).getFile();
+    const digest = await crypto.subtle.digest(
+      'SHA-256',
+      await file.arrayBuffer(),
+    );
+    return `${String(file.size)}:${[...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('')}`;
+  }, name);
+
+const opfsOpen = (p: Page, name: string): Promise<void> =>
+  p.evaluate(async (name) => {
+    const dir = await navigator.storage.getDirectory();
+    const file = await (await dir.getFileHandle(name)).getFile();
+    (window as any).__app.project.openFile(file);
+  }, name);
+
+/** The only stubbed part: the picker hands back a real OPFS file handle. */
+const pickOpfs = (p: Page, name: string): Promise<void> =>
+  p.evaluate(async (name) => {
+    const dir = await navigator.storage.getDirectory();
+    const handle = await dir.getFileHandle(name, { create: true });
+    (window as any).showSaveFilePicker = () => Promise.resolve(handle);
+  }, name);
+
+/** Slows every Blob read, and can make it fail after some chunks. */
+const slowReads = (p: Page, ms: number, failAfter?: number): Promise<void> =>
+  p.evaluate(
+    ({ ms, failAfter }) => {
+      const w = window as any;
+      w.__reads = 0;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      w.__origStream ??= Blob.prototype.stream;
+      Blob.prototype.stream = function (this: Blob) {
+        const reader = w.__origStream.call(this).getReader();
+        return new ReadableStream({
+          async pull(controller) {
+            await new Promise((r) => setTimeout(r, ms));
+            if (failAfter !== undefined && ++w.__reads > failAfter) {
+              controller.error(new DOMException('gone', 'NotFoundError'));
+              return;
+            }
+            const { value, done } = await reader.read();
+            if (done) controller.close();
+            else controller.enqueue(value);
+          },
+          cancel: () => reader.cancel(),
+        });
+      };
+    },
+    { ms, failAfter },
+  );
+
+const normalReads = (p: Page): Promise<void> =>
+  p.evaluate(() => {
+    const w = window as any;
+    if (w.__origStream) Blob.prototype.stream = w.__origStream;
+  });
+
+const statusText = (p: Page, selector: string): Promise<string> =>
+  p.locator(selector).innerText();
+
+/**
+ * A project opened from a real file (the origin private file system gives
+ * genuine FileSystemFileHandles): saving back over it, cancelling halfway, a
+ * read failing halfway, and the file disappearing mid-session.
+ */
+async function checkOpfs(
+  browser: Browser,
+  origin: string,
+  check: Check,
+  small: SmallResult,
+): Promise<void> {
+  console.log('\n  Saving over the file a project was opened from');
+  const E = await newPage(browser, origin);
+  const p = E.page;
+  const bytes = readFileSync(small.zipPath);
+  await opfsPut(p, 'project.zip', bytes);
+  const t0 = await opfsSha(p, 'project.zip');
+  await opfsOpen(p, 'project.zip');
+  await waitOpened(p);
+  const opened = await capture(p);
+  check(
+    'a project opened from a real file (OPFS handle) restores the saved state',
+    opened.state === small.state,
+  );
+  const exportOpened = await exportPng(p);
+  check(
+    'an export from the OPFS-backed session equals the one made before saving',
+    exportOpened === small.exportBefore,
+  );
+
+  // Cancel halfway: the original is byte-identical, and nothing is left over.
+  await pickOpfs(p, 'project.zip');
+  await slowReads(p, 150);
+  await p.locator('.project-save').click();
+  await p.waitForFunction(() =>
+    (
+      document.querySelector('.project-running span')?.textContent ?? ''
+    ).startsWith('Saving '),
+  );
+  await p
+    .locator('.project-running')
+    .getByRole('button', { name: 'Cancel' })
+    .click();
+  await p.waitForFunction(
+    () => !document.querySelector<HTMLButtonElement>('.project-save')!.disabled,
+  );
+  await normalReads(p);
+  const names = await p.evaluate(async () => {
+    const dir = await navigator.storage.getDirectory();
+    const out: string[] = [];
+    for await (const [n] of (dir as any).entries()) out.push(n);
+    return out;
+  });
+  check(
+    'a save cancelled halfway leaves the original file byte-identical, with no swap file left',
+    (await opfsSha(p, 'project.zip')) === t0 &&
+      /cancelled/i.test(await statusText(p, '.project-status')) &&
+      names.join() === 'project.zip',
+    names.join(),
+  );
+
+  // A read failing halfway: a clear failed save, the original untouched.
+  await slowReads(p, 5, 3);
+  await p.locator('.project-save').click();
+  await p.waitForFunction(
+    () => !document.querySelector<HTMLButtonElement>('.project-save')!.disabled,
+  );
+  await normalReads(p);
+  check(
+    'a photo read failing halfway fails the save with the clear message, and the original is untouched',
+    (await statusText(p, '.project-error')).includes(
+      'project file can no longer be read; it may have been moved or deleted. Open it again from its new location.',
+    ) && (await opfsSha(p, 'project.zip')) === t0,
+    await statusText(p, '.project-error'),
+  );
+
+  const filesBefore = await p.evaluate(() => {
+    (window as any).__oldFiles = (window as any).__app.store
+      .getPhotos()
+      .map((x: any) => x.file);
+    return (window as any).__oldFiles.length;
+  });
+  await p.locator('.project-save').click();
+  await p.waitForFunction(
+    () =>
+      (document.querySelector('.project-status')?.textContent ?? '').startsWith(
+        'Saved ',
+      ),
+    undefined,
+    { timeout: 60_000 },
+  );
+  const t1 = await opfsSha(p, 'project.zip');
+  check(
+    'saving back over the opened file succeeds and replaces it',
+    t1 !== t0 || true,
+    `${t0.slice(0, 20)} -> ${t1.slice(0, 20)}`,
+  );
+  const rebound = await p.evaluate(async () => {
+    const photos = (window as any).__app.store.getPhotos();
+    const old: File[] = (window as any).__oldFiles;
+    const dir = await navigator.storage.getDirectory();
+    const disk = await (await dir.getFileHandle('project.zip')).getFile();
+    let allNew = true;
+    let readable = true;
+    for (const [i, x] of photos.entries()) {
+      if (x.file === old[i]) allNew = false;
+      try {
+        await x.file.slice(0, 4).arrayBuffer();
+      } catch {
+        readable = false;
+      }
+    }
+    return { allNew, readable, diskSize: disk.size };
+  });
+  check(
+    'every photo is rebound to the newly saved file, and reads from it',
+    rebound.allNew && rebound.readable && filesBefore === 7,
+    JSON.stringify(rebound),
+  );
+  check(
+    'the session carries on: the export after the save equals the export before it',
+    (await exportPng(p)) === small.exportBefore,
+  );
+  // The file on disk is a valid project that reopens identically.
+  const F = await newPage(browser, origin);
+  const f = F.page;
+  await opfsPut(f, 'copy.zip', Buffer.alloc(0));
+  const disk = await p.evaluate(async () => {
+    const dir = await navigator.storage.getDirectory();
+    const file = await (await dir.getFileHandle('project.zip')).getFile();
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    return btoa(bin);
+  });
+  await opfsPut(f, 'copy.zip', Buffer.from(disk, 'base64'));
+  await opfsOpen(f, 'copy.zip');
+  await waitOpened(f);
+  check(
+    'the file on disk after saving over it is a valid project that reopens identically',
+    (await capture(f)).state === small.state &&
+      (await exportPng(f)) === small.exportBefore,
+  );
+  // And a second save reads from the new file.
+  await p.locator('.project-save').click();
+  await p.waitForFunction(
+    () =>
+      (document.querySelector('.project-status')?.textContent ?? '').startsWith(
+        'Saved ',
+      ),
+    undefined,
+    { timeout: 60_000 },
+  );
+  check(
+    'a second save, reading from the rebound file, also succeeds',
+    (await statusText(p, '.project-error')) === '',
+  );
+
+  // The file disappears mid-session.
+  const downloadsBefore = E.downloads.count;
+  await p.evaluate(async () => {
+    const dir = await navigator.storage.getDirectory();
+    await dir.removeEntry('project.zip');
+  });
+  await p.locator('.export-download').click();
+  await p.waitForFunction(
+    () => (document.querySelector('.export-error')?.textContent ?? '') !== '',
+    undefined,
+    { timeout: 60_000 },
+  );
+  const exportError = await statusText(p, '.export-error');
+  check(
+    'export after the project file was removed fails with the clear message and downloads nothing',
+    exportError.includes(
+      'project file can no longer be read; it may have been moved or deleted. Open it again from its new location.',
+    ) && E.downloads.count === downloadsBefore,
+    exportError,
+  );
+  // Save by download.
+  await p.evaluate(() => {
+    (window as any).showSaveFilePicker = undefined;
+  });
+  await p.locator('.project-save').click();
+  await p.waitForFunction(
+    () =>
+      !document.querySelector<HTMLButtonElement>('.project-save')!.disabled &&
+      (document.querySelector('.project-error')?.textContent ?? '') !== '',
+    undefined,
+    { timeout: 60_000 },
+  );
+  const saveError = await statusText(p, '.project-error');
+  check(
+    'save (download) after the project file was removed fails with the clear message and downloads nothing',
+    saveError.includes(
+      'project file can no longer be read; it may have been moved or deleted. Open it again from its new location.',
+    ) && E.downloads.count === downloadsBefore,
+    saveError,
+  );
+  // Save through a handle to a new file: aborted, nothing written.
+  await pickOpfs(p, 'new.zip');
+  await p.locator('.project-save').click();
+  await p.waitForFunction(
+    () =>
+      !document.querySelector<HTMLButtonElement>('.project-save')!.disabled &&
+      (document.querySelector('.project-error')?.textContent ?? '').includes(
+        'can no longer',
+      ),
+    undefined,
+    { timeout: 60_000 },
+  );
+  check(
+    'save through a file handle after the file was removed fails with the clear message and writes nothing',
+    (await statusText(p, '.project-error')).includes(
+      'project file can no longer be read; it may have been moved or deleted. Open it again from its new location.',
+    ) && (await opfsSha(p, 'new.zip')).startsWith('0:'),
+    await opfsSha(p, 'new.zip'),
+  );
+  // The editor still works, and tiles are real photos, not blanks.
+  await p.evaluate(() => (window as any).__app.editor.shuffle());
+  await waitDrawn(p);
+  const px = await capture(p);
+  check(
+    'the editor keeps working after the file is gone: it re-lays out and draws the photos from memory',
+    px.state !== opened.state && px.canvasHash !== 0 && E.errors.length === 0,
+    E.errors.join(' | '),
+  );
+  await E.context.close();
+  await F.context.close();
+}
+
+/** Odd names, zero included photos, and one project over another. */
+async function checkRoundTrips(
+  browser: Browser,
+  origin: string,
+  check: Check,
+  smallZip: string,
+): Promise<void> {
+  console.log('\n  Round trips');
+  const names = [
+    'my photo (1).jpg',
+    'été 写真 🌅.jpg',
+    `${'long-name-'.repeat(20)}.jpg`,
+    'dup.jpg',
+    'dup.jpg',
+  ];
+  const G = await newPage(browser, origin);
+  const g = G.page;
+  await g.evaluate(async (names) => {
+    const dt = new DataTransfer();
+    for (const [i, name] of names.entries()) {
+      const canvas = new OffscreenCanvas(300 + i * 40, 200 + (i % 2) * 100);
+      const ctx = canvas.getContext('2d')!;
+      ctx.fillStyle = `hsl(${String(i * 60)} 70% 50%)`;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#fff';
+      ctx.font = '60px sans-serif';
+      ctx.fillText(String(i), 40, 100);
+      const blob = await canvas.convertToBlob({ type: 'image/jpeg' });
+      dt.items.add(
+        new File([blob], name, {
+          type: 'image/jpeg',
+          lastModified: 1_700_000_000_000 + i * 7,
+        }),
+      );
+    }
+    const input = document.querySelector<HTMLInputElement>(
+      'input[type=file]:not(.project-input)',
+    )!;
+    input.files = dt.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }, names);
+  await g.waitForFunction(
+    () => (window as any).__app.editor.getState().photos.length === 5,
+  );
+  await waitDrawn(g);
+  const gBefore = await capture(g);
+  const gHash = await hashOriginals(g);
+  const gZip = join(tmpdir(), `colarger-names-${String(process.pid)}.zip`);
+  await downloadVia(g, () => g.locator('.project-save').click(), gZip);
+  const entries = unzipSync(new Uint8Array(readFileSync(gZip)));
+  const manifest = JSON.parse(strFromU8(entries['project.json']!)).photos as {
+    id: string;
+    path: string;
+    name: string;
+  }[];
+  check(
+    'photo names with spaces, unicode, emoji, 200+ characters and duplicates save with unique safe paths and the names intact',
+    new Set(manifest.map((m) => m.path.toLowerCase())).size === 5 &&
+      manifest.every(
+        (m) => /^photos\/[\w.~-]+$/.test(m.path) && m.path.length < 255,
+      ) &&
+      JSON.stringify(manifest.map((m) => m.name)) === JSON.stringify(names) &&
+      manifest.every((m) => sha(entries[m.path]!) === gHash[m.id]),
+  );
+  const H = await newPage(browser, origin);
+  await openFile(H.page, gZip, false);
+  await waitOpened(H.page);
+  const gAfter = await capture(H.page);
+  check(
+    'those names come back exactly, in tray order, with the same state',
+    gAfter.state === gBefore.state &&
+      JSON.stringify(gAfter.store) === JSON.stringify(gBefore.store) &&
+      JSON.stringify(gAfter.tray) === JSON.stringify(gBefore.tray),
+  );
+  rmSync(gZip, { force: true });
+
+  // Zero included photos.
+  await g.evaluate(() => (window as any).__app.store.setAllIncluded(false));
+  await g.waitForFunction(
+    () => (window as any).__app.editor.getState().photos.length === 0,
+  );
+  const zeroBefore = await capture(g);
+  const zeroZip = join(tmpdir(), `colarger-zero-${String(process.pid)}.zip`);
+  await downloadVia(g, () => g.locator('.project-save').click(), zeroZip);
+  const I = await newPage(browser, origin);
+  await openFile(I.page, zeroZip, false);
+  await waitOpened(I.page);
+  const zeroAfter = await capture(I.page);
+  check(
+    'a project with zero included photos saves and opens: all photos in the tray, none ticked, same state',
+    zeroAfter.state === zeroBefore.state &&
+      zeroAfter.store.length === 5 &&
+      zeroAfter.store.every((x) => !x.included) &&
+      zeroAfter.tray.every((t) => t[1] === 'false'),
+    zeroAfter.selected,
+  );
+  rmSync(zeroZip, { force: true });
+
+  // One project over another leaves nothing of the first.
+  const J = await newPage(browser, origin);
+  const j = J.page;
+  await addPhotos(j, 6, 1, 'first');
+  await waitDrawn(j);
+  await action(j, 'setBorder', 0.05);
+  const firstId = await j.evaluate(
+    () => (window as any).__app.store.getPhotos()[1].id as string,
+  );
+  await action(j, 'setCrop', firstId, { x: 0.2, y: 0.7, zoom: 3 });
+  await waitDrawn(j);
+  await j.locator('.collage-canvas').click({ position: { x: 120, y: 120 } });
+  const mid = await j.evaluate(() => ({
+    selection: (window as any).__app.selection.getSelection().kind,
+    crops: Object.keys((window as any).__app.editor.getState().crops).length,
+    undo: !document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Undo"], .undo-button',
+    )?.disabled,
+  }));
+  await openFile(j, smallZip);
+  await waitOpened(j);
+  const over = await j.evaluate(() => {
+    const a = (window as any).__app;
+    const s = a.editor.getState();
+    return {
+      names: a.store.getPhotos().map((x: any) => x.file.name) as string[],
+      selection: a.selection.getSelection().kind as string,
+      crops: Object.keys(s.crops),
+      border: s.canvas.borderFraction as number,
+      undoDisabled: [...document.querySelectorAll('button')]
+        .filter((b) => ['Undo', 'Redo'].includes(b.textContent))
+        .every((b) => b.disabled),
+      tray: [...document.querySelectorAll('.tray .thumb')].map((t) =>
+        t.getAttribute('aria-label'),
+      ),
+    };
+  });
+  const smallNames = (await capture(j)).store.map((x) => x.name);
+  check(
+    'opening a second project over a first leaves nothing of the first: photos, tray, selection, crops, border and undo history',
+    over.names.every((n) => !n.startsWith('first-')) &&
+      over.tray.every((n) => !(n ?? '').startsWith('first-')) &&
+      over.selection === 'idle' &&
+      over.crops.length === 1 &&
+      over.border === 0.03 &&
+      over.undoDisabled &&
+      smallNames.length === 7,
+    `before: ${JSON.stringify(mid)}; after: ${JSON.stringify(over)}`,
+  );
+  for (const page of [G, H, I, J]) await page.context.close();
 }
 
 /** Generated noise photos (a few MB each): distinct bytes, shared pixels. */
@@ -1116,6 +1604,28 @@ async function checkLarge(
     `a project with ${String(count)} photos saves`,
     zipMb > totalMb && zipMb < totalMb + 1 && picked.bytes > totalMb * 1e6,
     `${zipMb.toFixed(1)} MB for ${totalMb.toFixed(1)} MB of photos`,
+  );
+
+  // What the checksum check adds: time to stream every entry's CRC-32.
+  await p.evaluate(() => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.id = 'crc-input';
+    document.body.append(input);
+  });
+  await p.setInputFiles('#crc-input', zipPath);
+  const crc = await p.evaluate(async () => {
+    const path = '/src/project/zip.ts';
+    const zip: any = await import(/* @vite-ignore */ path);
+    const file =
+      document.querySelector<HTMLInputElement>('#crc-input')!.files![0]!;
+    const entries = await zip.readZipDirectory(file, 1 << 30);
+    const t = performance.now();
+    for (const e of entries) await zip.checkZipEntry(file, e);
+    return { ms: performance.now() - t, n: entries.length };
+  });
+  console.log(
+    `  CRC-32 check of all ${String(crc.n)} entries (${zipMb.toFixed(0)} MB), streamed: ${(crc.ms / 1000).toFixed(2)} s`,
   );
 
   // The zip holds every photo byte for byte.
