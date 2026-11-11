@@ -5,7 +5,7 @@ import { setBorder, setVariation, swapTiles } from './state';
 import { EditorStore } from './store';
 import { UndoManager } from './undo-manager';
 
-function setup(count = 6, manual = false) {
+function setup(count = 6, manual = false, held = { value: false }) {
   const photos = new PhotoStore();
   photos.addPhotos(
     Array.from({ length: count }, (_, i) =>
@@ -23,8 +23,15 @@ function setup(count = 6, manual = false) {
   const sync = (): void => {
     for (const f of queued.splice(0)) f();
   };
-  const manager = new UndoManager({ editor, photos, prepare: sync });
-  return { photos, editor, manager, sync };
+  const toasts: string[] = [];
+  const manager = new UndoManager({
+    editor,
+    photos,
+    prepare: sync,
+    isGestureHeld: () => held.value,
+    onHistoryCleared: (message) => toasts.push(message),
+  });
+  return { photos, editor, manager, sync, toasts, held };
 }
 
 describe('UndoManager', () => {
@@ -154,5 +161,54 @@ describe('UndoManager', () => {
     let n = 0;
     while (manager.undo() === 'done') n++;
     expect(n).toBe(5);
+  });
+
+  it('toasts when an import clears a non-empty history, not an empty one', () => {
+    const { editor, photos, sync, toasts } = setup(4, true);
+    photos.addPhotos([makeNewPhoto('first.jpg')]);
+    sync();
+    expect(toasts).toEqual([]); // nothing to lose
+    editor.shuffle();
+    photos.addPhotos([makeNewPhoto('second.jpg')]);
+    sync();
+    expect(toasts).toEqual(['Adding photos cleared the undo history.']);
+    photos.addPhotos([makeNewPhoto('third.jpg')]);
+    sync();
+    expect(toasts).toHaveLength(1); // already empty again
+  });
+
+  it('toasts for a redo-only history too', () => {
+    const { editor, manager, photos, toasts } = setup(4);
+    editor.shuffle();
+    manager.undo();
+    photos.addPhotos([makeNewPhoto('x.jpg')]);
+    expect(toasts).toHaveLength(1);
+  });
+
+  it('toasts once when removing photos clears a non-empty history only', () => {
+    const { editor, photos, toasts } = setup(4);
+    photos.removePhotos([photos.getPhotos()[0]?.id ?? '']);
+    expect(toasts).toEqual([]);
+    editor.shuffle();
+    photos.removePhotos([photos.getPhotos()[0]?.id ?? '']);
+    expect(toasts).toEqual(['Removing photos cleared the undo history.']);
+  });
+
+  it('does nothing while a pointer gesture is held', () => {
+    const { editor, manager, held } = setup();
+    editor.shuffle();
+    const shuffled = editor.getState();
+    editor.dragVariation(0.9);
+    const mid = editor.getState();
+    held.value = true;
+    expect(manager.canUndo()).toBe(false);
+    expect(manager.undo()).toBe('busy');
+    expect(manager.redo()).toBe('busy');
+    expect(editor.getState()).toBe(mid);
+    expect(editor.isDragging()).toBe(true);
+    held.value = false;
+    editor.commitVariation(0.9);
+    expect(manager.undo()).toBe('done');
+    expect(editor.getState()).toBe(shuffled);
   });
 });

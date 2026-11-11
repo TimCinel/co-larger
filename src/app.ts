@@ -148,6 +148,10 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     photos: store,
     frames,
     selection,
+    canvas: view.canvas,
+    notify: (message) => {
+      notices.show(message);
+    },
     announce: (text) => {
       announcer.textContent = text;
     },

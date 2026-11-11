@@ -14,11 +14,15 @@ import { UndoManager } from './undo-manager';
 export interface UndoControlsOptions {
   readonly doc: Document;
   readonly editor: EditorStore;
-  readonly photos: Pick<PhotoStore, 'subscribe'>;
+  readonly photos: Pick<PhotoStore, 'subscribe' | 'getPhoto'>;
   readonly frames: Pick<FrameScheduler, 'flush'>;
   readonly selection: Pick<TileSelection, 'clear'>;
   /** Speaks a short message through the page's polite live region. */
   readonly announce: (text: string) => void;
+  /** Shows a brief notice (a toast). */
+  readonly notify: (message: string) => void;
+  /** The collage canvas: a press on it may start a crop pan. */
+  readonly canvas: HTMLElement;
 }
 
 export interface UndoControls {
@@ -58,9 +62,22 @@ export function createUndoControls(options: UndoControlsOptions): UndoControls {
   const mac = /mac|iphone|ipad/i.test(win.navigator.platform);
   const mod = mac ? 'Cmd' : 'Ctrl';
 
+  // Pointers held down on a range input (dial, border, zoom sliders) or the
+  // canvas (crop pan): a continuous gesture is in progress. The native
+  // colour input is left out (its popup swallows the pointer events).
+  const held = new Set<number>();
+  const gestureTarget = (target: EventTarget | null): boolean => {
+    const el = target as HTMLElement | null;
+    if (!el || typeof el.tagName !== 'string') return false;
+    if (el === options.canvas) return true;
+    return el.tagName === 'INPUT' && (el as HTMLInputElement).type === 'range';
+  };
+
   const manager = new UndoManager({
     editor,
     photos: options.photos,
+    isGestureHeld: () => held.size > 0,
+    onHistoryCleared: options.notify,
     prepare: () => {
       // Ends crop gestures (a wheel burst) and clears the selection, then
       // applies queued steps of other controls and any tray sync.
@@ -86,6 +103,39 @@ export function createUndoControls(options: UndoControlsOptions): UndoControls {
   if (!mac) redoButton.title = 'Redo (Ctrl+Shift+Z or Ctrl+Y)';
   group.append(undoButton, redoButton);
 
+  const release = (event: Event): void => {
+    if (held.delete((event as PointerEvent).pointerId)) manager.refresh();
+  };
+  doc.addEventListener(
+    'pointerdown',
+    (event) => {
+      if (event.button !== 0 || !gestureTarget(event.target)) return;
+      held.add(event.pointerId);
+      manager.refresh();
+    },
+    true,
+  );
+  for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    doc.addEventListener(type, release, true);
+  }
+  // A release outside the window may never arrive: no button down means no
+  // drag, so let go.
+  doc.addEventListener(
+    'pointermove',
+    (event) => {
+      if (event.buttons === 0 && held.size > 0) {
+        held.clear();
+        manager.refresh();
+      }
+    },
+    true,
+  );
+  win.addEventListener('blur', () => {
+    if (held.size === 0) return;
+    held.clear();
+    manager.refresh();
+  });
+
   const sync = (): void => {
     undoButton.disabled = !manager.canUndo();
     redoButton.disabled = !manager.canRedo();
@@ -100,6 +150,7 @@ export function createUndoControls(options: UndoControlsOptions): UndoControls {
   };
 
   function run(back: boolean): void {
+    if (held.size > 0) return;
     const active = doc.activeElement;
     const result = back ? manager.undo() : manager.redo();
     sync();
@@ -139,6 +190,7 @@ export function createUndoControls(options: UndoControlsOptions): UndoControls {
     else if (key === 'y' && !mac && !event.shiftKey) back = false;
     else return false;
     event.preventDefault();
+    // While a drag is held run() does nothing.
     run(back);
     return true;
   }

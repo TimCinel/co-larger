@@ -338,6 +338,18 @@ export function createTileCrop(options: TileCropOptions): TileCrop {
     'keydown',
     (event) => {
       if (event.key === 'Shift') return;
+      // A modifier or a Cmd/Ctrl shortcut (Undo, Redo) while a pan is held
+      // must not end it: the pan carries on and commits on release.
+      if (
+        drag &&
+        (event.metaKey ||
+          event.ctrlKey ||
+          event.key === 'Meta' ||
+          event.key === 'Control' ||
+          event.key === 'Alt')
+      ) {
+        return;
+      }
       if (
         event.target === canvas &&
         (isCropKey(event) || zoomKey(event) !== 0)

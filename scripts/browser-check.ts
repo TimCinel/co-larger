@@ -3924,6 +3924,19 @@ async function checkUndo(
     () => (window as any).__app.editor.getState().photos.length === 8,
   );
   await waitDrawn(p);
+  check(
+    'undo toast: the first import (empty history) shows no history notice',
+    (await p.locator('.notice', { hasText: 'undo history' }).count()) === 0,
+  );
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__commits = 0;
+    w.__app.editor.subscribe((_s: unknown, c: { transient: boolean }) => {
+      if (!c.transient) w.__commits++;
+    });
+  });
+  const commitCount = (): Promise<number> =>
+    p.evaluate(() => (window as any).__commits);
   const mac = await p.evaluate(() =>
     /mac|iphone|ipad/i.test(navigator.platform),
   );
@@ -4015,8 +4028,26 @@ async function checkUndo(
     await p.mouse.move(box.x + 2 + ((box.width - 4) * i) / 20, y);
     await p.waitForTimeout(16);
   }
+  // A pointer is held mid-drag: Undo is rejected, the drag carries on.
+  const midDrag = await snap();
+  const commitsMid = await commitCount();
+  await p.keyboard.press(`${mod}+z`);
+  await p.keyboard.press(`${mod}+Shift+z`);
+  check(
+    'undo (held): Cmd/Ctrl+Z mid dial drag does nothing; both buttons are disabled',
+    (await snap()) === midDrag &&
+      (await commitCount()) === commitsMid &&
+      (await undoBtn.isDisabled()) &&
+      (await redoBtn.isDisabled()) &&
+      (await live()) !== 'Undone.',
+  );
+  await p.mouse.move(box.x + 2 + (box.width - 4) * 0.9, y);
   await p.mouse.up();
   await settle();
+  check(
+    'undo (held): the drag commits exactly once on release',
+    (await commitCount()) === commitsMid + 1 && (await undoBtn.isEnabled()),
+  );
   const afterDial = await snap();
   check('undo: the dial drag changed the state', afterDial !== start);
   await undoBtn.click();
@@ -4134,6 +4165,43 @@ async function checkUndo(
   await p.keyboard.press(`${mod}+z`);
   await settle();
   check('undo: undoes a crop Reset', (await cropOf()) === cropZoomed);
+
+  // A crop pan with the pointer held: Undo is rejected; one commit on release.
+  await clickTile(0);
+  const prePan = await snap();
+  const pc = await centre(0);
+  const panCommits = await commitCount();
+  await p.mouse.move(pc.x, pc.y);
+  await p.mouse.down();
+  for (let i = 1; i <= 6; i++) {
+    await p.mouse.move(pc.x + i * 6, pc.y + i * 2);
+    await p.waitForTimeout(30);
+  }
+  await p.waitForTimeout(60);
+  const midPan = await snap();
+  await p.keyboard.press(`${mod}+z`);
+  await p.keyboard.press(`${mod}+Shift+z`);
+  check(
+    'undo (held): Cmd/Ctrl+Z mid crop pan does nothing; both buttons are disabled',
+    (await snap()) === midPan &&
+      midPan !== prePan &&
+      (await commitCount()) === panCommits &&
+      (await undoBtn.isDisabled()) &&
+      (await redoBtn.isDisabled()),
+    `moved ${String(midPan !== prePan)} commits ${String((await commitCount()) - panCommits)} undoDisabled ${String(await undoBtn.isDisabled())} redoDisabled ${String(await redoBtn.isDisabled())}`,
+  );
+  await p.mouse.up();
+  await settle();
+  check(
+    'undo (held): the pan commits exactly once on release, as one step',
+    (await commitCount()) === panCommits + 1 && (await undoBtn.isEnabled()),
+  );
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  check(
+    'undo (held): one undo reverts the whole pan',
+    (await snap()) === prePan && (await cropOf()) === cropZoomed,
+  );
 
   // An uncommitted wheel burst pending when Undo is pressed.
   await p.keyboard.press(`${mod}+z`); // back to the default crop
@@ -4423,6 +4491,17 @@ async function checkUndo(
   );
   await settle();
   check(
+    'undo toast: an import that clears a non-empty history says so',
+    (await p
+      .locator('.notice', {
+        hasText: 'Adding photos cleared the undo history.',
+      })
+      .count()) === 1,
+  );
+  while ((await p.locator('.notice button').count()) > 0) {
+    await p.locator('.notice button').first().click();
+  }
+  check(
     'undo: an import is a boundary and undo around it left tray and editor agreeing',
     (await agree()) &&
       JSON.parse(await snap()).photos.length ===
@@ -4438,6 +4517,23 @@ async function checkUndo(
   check(
     'undo: after an import, undo never reaches back across it',
     total === 11 && (await agree()) && (await undoBtn.isDisabled()),
+  );
+  // History is empty now: another import must not show the notice.
+  await p.setInputFiles(
+    'input[type=file]',
+    (await makeSyntheticPhotos(p, 1)).map((f) => ({
+      ...f,
+      name: 'more-0.jpg',
+    })),
+  );
+  await p.waitForFunction(
+    () => (window as any).__app.store.getTotalCount() === 12,
+  );
+  await settle();
+  check(
+    'undo toast: an import into an empty history shows no notice',
+    (await p.locator('.notice', { hasText: 'undo history' }).count()) === 0 &&
+      (await agree()),
   );
   await p.getByRole('button', { name: 'Shuffle' }).click();
   await settle();
