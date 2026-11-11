@@ -1,5 +1,6 @@
 # TEMPORARY (issue #37): what can the runner do for image builds?
-# Builds a tiny image several ways, pushes nothing. Removed before merge.
+# Round 2: the job sees DOCKER_HOST=tcp://docker:2376 and /certs/client.
+# Builds without pushing. Removed before merge.
 name: Runner diagnostics
 
 on:
@@ -8,114 +9,76 @@ on:
     paths: [.forgejo/workflows/diag-runner.yaml]
 
 jobs:
-  probe:
+  docker-daemon:
     runs-on: general-ci
     container:
-      image: docker.io/timcinel/co-larger-builder:lock-cddf86d9b162-r2
+      image: docker.io/library/docker:29.9.3-cli
     steps:
-      - name: Environment
+      - name: Daemon
         run: |
           set +e
-          echo "== uname"; uname -a
-          echo "== cpu"; nproc; grep -m1 'model name' /proc/cpuinfo
-          echo "== mem"; free -m
-          echo "== disk"; df -h / /tmp 2>/dev/null
-          echo "== id"; id
-          echo "== docker.sock"; ls -l /var/run/docker.sock /run/docker.sock 2>&1
-          echo "== DOCKER_HOST=${DOCKER_HOST:-unset}"
-          echo "== tools"; for t in docker buildah podman kaniko buildctl skopeo crane; do printf '%s: ' "$t"; command -v "$t" || echo none; done
-          echo "== status"; grep -E 'CapEff|CapBnd|Seccomp|NoNewPrivs' /proc/self/status
-          echo "== apparmor"; cat /proc/self/attr/current 2>&1
-          echo "== cgroup"; cat /proc/self/cgroup; stat -fc %T /sys/fs/cgroup
-          echo "== userns"; cat /proc/sys/user/max_user_namespaces 2>&1; cat /proc/sys/kernel/unprivileged_userns_clone 2>&1
-          echo "== unshare -U"; unshare -U true && echo OK || echo FAIL
-          echo "== unshare -Urm"; unshare -Urm true && echo OK || echo FAIL
-          echo "== unshare -m (root)"; unshare -m true && echo OK || echo FAIL
-          echo "== mount tmpfs"; mkdir -p /tmp/m && mount -t tmpfs none /tmp/m && echo OK || echo FAIL
-          echo "== /dev/fuse"; ls -l /dev/fuse 2>&1
-          echo "== binfmt"; ls /proc/sys/fs/binfmt_misc 2>&1
-          echo "== mounts"; cat /proc/self/mounts | head -40
-
-  privileged-option:
-    runs-on: general-ci
-    container:
-      image: docker.io/timcinel/co-larger-builder:lock-cddf86d9b162-r2
-      options: --privileged
-    steps:
-      - name: Does --privileged take effect?
+          env | grep -E '^DOCKER' | sort
+          ls -l /certs/client 2>&1
+          docker version
+          docker info
+          docker buildx version
+          docker buildx ls
+          docker ps --format '{{.Image}} {{.Names}}' | head -20
+          ls /proc/sys/fs/binfmt_misc 2>&1
+      - name: Multi-arch, COPY-only final stage, default driver
         run: |
           set +e
-          grep -E 'CapEff|Seccomp' /proc/self/status
-          ls -l /var/run/docker.sock 2>&1
-          unshare -m true && echo "unshare -m OK" || echo "unshare -m FAIL"
+          mkdir -p /tmp/ma && cd /tmp/ma
+          cat > Dockerfile <<'EOF'
+          FROM --platform=$BUILDPLATFORM docker.io/library/alpine:3.20 AS build
+          RUN echo built-on-$(uname -m) > /out
+          FROM docker.io/library/alpine:3.20
+          COPY --from=build /out /out
+          EOF
+          time docker buildx build --platform linux/amd64,linux/arm64 --provenance=false -t diag-ma:1 . \
+            && echo "MULTIARCH DEFAULT DRIVER: OK" || echo "MULTIARCH DEFAULT DRIVER: FAIL"
+          docker buildx imagetools inspect diag-ma:1 2>&1 | head
+          docker image inspect diag-ma:1 --format '{{.Architecture}}' 2>&1
+      - name: Multi-arch, docker-container driver
+        run: |
+          set +e
+          cd /tmp/ma
+          docker buildx create --name diag-bk --driver docker-container --bootstrap \
+            && echo "CREATE DOCKER-CONTAINER BUILDER: OK" || echo "CREATE DOCKER-CONTAINER BUILDER: FAIL"
+          time docker buildx build --builder diag-bk --platform linux/amd64,linux/arm64 --provenance=false . \
+            && echo "MULTIARCH CONTAINER DRIVER: OK" || echo "MULTIARCH CONTAINER DRIVER: FAIL"
+          docker buildx rm diag-bk
+      - name: Is arm64 emulation available? (RUN in an arm64 stage)
+        run: |
+          set +e
+          mkdir -p /tmp/emu && cd /tmp/emu
+          printf 'FROM docker.io/library/alpine:3.20\nRUN uname -m\n' > Dockerfile
+          time docker buildx build --platform linux/arm64 --progress plain --no-cache . 2>&1 | tail -8
+          echo "exit ${PIPESTATUS[0]}"
+      - name: Clean up
+        if: always()
+        run: docker image rm diag-ma:1 2>/dev/null; true
 
-  buildah:
+  real-builds:
     runs-on: general-ci
     container:
-      image: quay.io/buildah/stable:v1.45.1
+      image: docker.io/library/docker:29.9.3-cli
     steps:
-      - name: buildah bud, chroot isolation, vfs storage
+      - name: Node for actions/checkout
+        run: time apk add --no-cache nodejs
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: App image, amd64 + arm64, no push
         run: |
-          set -x
-          grep -E 'CapEff|Seccomp' /proc/self/status
-          id
-          mkdir -p /tmp/ctx && cd /tmp/ctx
-          printf 'FROM docker.io/library/alpine:3.20\nRUN echo hello > /hello && cat /hello\n' > Dockerfile
-          export STORAGE_DRIVER=vfs BUILDAH_ISOLATION=chroot
-          time buildah bud --storage-driver vfs --isolation chroot -t diag:1 . \
-            && echo "BUILDAH RESULT: OK" || echo "BUILDAH RESULT: FAIL"
-          buildah --storage-driver vfs images
-
-  kaniko:
-    runs-on: general-ci
-    container:
-      image: gcr.io/kaniko-project/executor:v1.24.0-debug
-    defaults:
-      run:
-        shell: sh
-    steps:
-      - name: kaniko --no-push
+          set +e
+          git config --global --add safe.directory "$PWD"
+          time docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false \
+            --build-arg GIT_COMMIT="$(git rev-parse HEAD)" -f Dockerfile . \
+            && echo "APP MULTIARCH: OK" || echo "APP MULTIARCH: FAIL"
+      - name: Builder image, amd64, no push
         run: |
-          set -x
-          grep -E 'CapEff|Seccomp' /proc/self/status
-          mkdir -p /tmp/ctx && cd /tmp/ctx
-          printf 'FROM docker.io/library/alpine:3.20\nRUN echo hello > /hello && cat /hello\n' > Dockerfile
-          /kaniko/executor --context dir:///tmp/ctx --dockerfile /tmp/ctx/Dockerfile \
-            --no-push --tar-path /tmp/out.tar --destination diag:1 \
-            && echo "KANIKO RESULT: OK" || echo "KANIKO RESULT: FAIL"
-          ls -l /tmp/out.tar
-
-  buildkit-rootless:
-    runs-on: general-ci
-    container:
-      image: docker.io/moby/buildkit:v0.34.2-rootless
-    env:
-      BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
-    steps:
-      - name: buildctl-daemonless (rootless)
-        run: |
-          set -x
-          id
-          grep -E 'CapEff|Seccomp' /proc/self/status
-          mkdir -p /tmp/ctx && cd /tmp/ctx
-          printf 'FROM docker.io/library/alpine:3.20\nRUN echo hello > /hello && cat /hello\n' > Dockerfile
-          buildctl-daemonless.sh build --frontend dockerfile.v0 --local context=. --local dockerfile=. \
-            --output type=oci,dest=/tmp/out.tar \
-            && echo "BUILDKIT ROOTLESS RESULT: OK" || echo "BUILDKIT ROOTLESS RESULT: FAIL"
-
-  buildkit-root:
-    runs-on: general-ci
-    container:
-      image: docker.io/moby/buildkit:v0.34.2
-    env:
-      BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
-    steps:
-      - name: buildctl-daemonless (root, no process sandbox)
-        run: |
-          set -x
-          grep -E 'CapEff|Seccomp' /proc/self/status
-          mkdir -p /tmp/ctx && cd /tmp/ctx
-          printf 'FROM docker.io/library/alpine:3.20\nRUN echo hello > /hello && cat /hello\n' > Dockerfile
-          buildctl-daemonless.sh build --frontend dockerfile.v0 --local context=. --local dockerfile=. \
-            --output type=oci,dest=/tmp/out.tar \
-            && echo "BUILDKIT ROOT RESULT: OK" || echo "BUILDKIT ROOT RESULT: FAIL"
+          set +e
+          time docker buildx build --platform linux/amd64 --provenance=false --sbom=false -f ci/Dockerfile . \
+            && echo "BUILDER: OK" || echo "BUILDER: FAIL"
