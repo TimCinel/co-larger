@@ -7,9 +7,12 @@
  *   docker run -d --rm -p 8080:8080 timcinel/co-larger
  *   node scripts/docker-check.ts http://localhost:8080/
  *   node scripts/docker-check.ts --subpath http://localhost:8080/
+ *   node scripts/docker-check.ts --expect-commit $(git rev-parse HEAD) http://localhost:8080/
  *
  * `--subpath` starts a small reverse proxy that serves the container under
  * /collage/ (stripping the prefix, as a real proxy would) and checks there.
+ * `--expect-commit <hash>` requires the page to report that commit (an image
+ * from docker/build.sh); without it a build with no commit also passes.
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -20,6 +23,12 @@ import { imageSize } from './export-checks.ts';
 
 const args = process.argv.slice(2);
 const subpath = args.includes('--subpath');
+const expectIndex = args.indexOf('--expect-commit');
+const expectCommit =
+  expectIndex >= 0 ? (args[expectIndex + 1] ?? '') : undefined;
+if (expectCommit !== undefined && !/^[0-9a-f]{7,40}$/i.test(expectCommit)) {
+  throw new Error('--expect-commit needs a commit hash (7 to 40 hex digits)');
+}
 const target = new URL(args.find((a) => a.startsWith('http')) ?? '');
 
 let failures = 0;
@@ -115,14 +124,27 @@ check(
   reported.version === expectedVersion,
   `page ${reported.version}, package.json ${expectedVersion}`,
 );
+// The commit is optional: an image built without a GIT_COMMIT build argument
+// shows the version alone. Any commit that is present must be well formed,
+// and --expect-commit <hash> makes it mandatory and checks it.
+const commitOk =
+  expectCommit === undefined
+    ? reported.commit === '' || /^[0-9a-f]{7}$/.test(reported.commit)
+    : reported.commit !== '' &&
+      expectCommit.toLowerCase().startsWith(reported.commit);
 check(
-  'page reports a short commit hash',
-  /^[0-9a-f]{7}$/.test(reported.commit),
-  reported.commit === '' ? 'none' : reported.commit,
+  expectCommit === undefined
+    ? 'page reports no commit or a short commit hash'
+    : 'page reports the expected commit',
+  commitOk,
+  reported.commit === ''
+    ? 'none'
+    : `${reported.commit}${expectCommit === undefined ? '' : `, expected ${expectCommit}`}`,
 );
 check(
-  'the UI shows the version and commit',
-  reported.shown === `co-larger ${expectedVersion} (${reported.commit})`,
+  'the UI shows the version, and the commit when there is one',
+  reported.shown ===
+    `${expectedVersion}${reported.commit === '' ? '' : ` (${reported.commit})`}`,
   reported.shown ?? 'no .version link',
 );
 

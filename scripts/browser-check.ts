@@ -14,6 +14,8 @@
  *   node scripts/browser-check.ts --crop-screenshot  # and docs/screenshots/issue-9-*.png
  *   node scripts/browser-check.ts --undo-screenshot  # and docs/screenshots/issue-10-undo.png
  *   node scripts/browser-check.ts --tray-screenshot  # and docs/screenshots/photo-tray.png
+ *   node scripts/browser-check.ts --port 5301     # another dev server port (or BROWSER_CHECK_PORT)
+ *   node scripts/browser-check.ts --only sharp,cap,drag  # the editor image checks (#27)
  *   node scripts/browser-check.ts --dir <folder>  # also import a folder of real
  *                                                  # photos and report timing
  *                                                  # (prints numbers only)
@@ -106,6 +108,10 @@ async function waitDrawn(p: Page, timeout = 30000): Promise<void> {
         // No thumbnail standing in for a preview still decoding: the pixels
         // are final. (A draw follows every decode.)
         last.pending === 0 &&
+        // And no tile waits for a sharper image (a decode of the original
+        // for a large tile, held back while the user drags): every visible
+        // tile is drawn from its final source. (Absent before #27.)
+        (last.upgrading ?? 0) === 0 &&
         // The import is over: its one layout has been made.
         document.querySelector<HTMLElement>('.progress')!.hidden &&
         state.photos.length === included.length &&
@@ -114,6 +120,33 @@ async function waitDrawn(p: Page, timeout = 30000): Promise<void> {
     },
     undefined,
     { timeout, polling: 50 },
+  );
+}
+
+/**
+ * A hash of the canvas that does not depend on timing, for comparing two
+ * drawings of the same arrangement. It waits until every tile is drawn from
+ * its final source (waitDrawn), then redraws until two consecutive hashes
+ * agree: Chrome scales an image drawn for the first time or two differently
+ * (without mipmaps) from the same image drawn again, so the first frames
+ * after an image arrives, or after it was last drawn long ago, can differ
+ * in a few pixels from the settled ones.
+ */
+async function stableHash<T>(p: Page, hashOf: () => Promise<T>): Promise<T> {
+  const redraws = 12;
+  await waitDrawn(p);
+  const seen: T[] = [await hashOf()];
+  for (let i = 0; i < redraws; i++) {
+    await p.evaluate(() => (window as any).__app.view.renderNow());
+    await waitDrawn(p);
+    const next = await hashOf();
+    if (next === seen[seen.length - 1] && i >= 2) return next;
+    seen.push(next);
+  }
+  // Never return an unconverged hash: two such comparisons could agree by
+  // chance without the pixels ever having been stable.
+  throw new Error(
+    `canvas pixels did not converge after ${String(redraws)} redraws of a settled state; hashes seen: ${[...new Set(seen)].map(String).join(', ')}`,
   );
 }
 
@@ -2580,17 +2613,39 @@ async function checkSelection(
     { width: 900, height: 620 },
   ]) {
     await p.setViewportSize(size);
+    // The canvas is re-fitted by a ResizeObserver after the resize: wait
+    // until its box has stopped changing, or tile centres are read from the
+    // old layout and the clicks land elsewhere.
+    await p.waitForFunction(
+      () => {
+        const w = window as any;
+        const r = document
+          .querySelector<HTMLCanvasElement>('.collage-canvas')!
+          .getBoundingClientRect();
+        const key = `${String(r.x)},${String(r.y)},${String(r.width)},${String(r.height)}`;
+        if (w.__fitKey !== key) {
+          w.__fitKey = key;
+          w.__fitFrames = 0;
+        } else {
+          w.__fitFrames++;
+        }
+        return w.__fitFrames >= 8;
+      },
+      undefined,
+      { polling: 'raf' },
+    );
     await waitDrawn(p);
     let inside = true;
     let tried = 0;
+    const problems: string[] = [];
     for (let slot = 0; slot < 6; slot++) {
-      // A narrow window can push part of the collage off screen: skip those.
+      // A narrow window can push part of the collage off screen: check the
+      // tiles that are on screen, however many the arrangement leaves.
       const c = await centre(slot);
       if (c.x < 0 || c.y < 0 || c.x > size.width || c.y > size.height) continue;
       tried++;
       await clickTile(slot);
       const box = await menu.boundingBox();
-      if (box) console.log('DBG', size.width, slot, JSON.stringify(box));
       if (
         !box ||
         box.x < 0 ||
@@ -2599,13 +2654,16 @@ async function checkSelection(
         box.y + box.height > size.height
       ) {
         inside = false;
+        problems.push(
+          `slot ${String(slot)} at ${JSON.stringify(c)}: menu ${JSON.stringify(box)}`,
+        );
       }
     }
     await outsideClick();
     check(
       `the menu stays inside the viewport for every tile at ${String(size.width)} x ${String(size.height)}`,
-      inside && tried >= 4,
-      `${String(tried)} tiles tried`,
+      inside && tried >= 1,
+      `${String(tried)} tiles tried${problems.length ? `; ${problems.join('; ')}` : ''}`,
     );
   }
   await p.setViewportSize({ width: 1280, height: 800 });
@@ -3235,13 +3293,17 @@ async function checkCrop(
       { id: markerId, test },
     );
   const canvasHash = (): Promise<string> =>
-    p.evaluate(() => {
-      const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
-      const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
-      let h = 0;
-      for (let i = 0; i < d.length; i += 7) h = (h * 31 + d[i]!) | 0;
-      return String(h);
-    });
+    stableHash(p, () =>
+      p.evaluate(() => {
+        const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+        const d = c
+          .getContext('2d')!
+          .getImageData(0, 0, c.width, c.height).data;
+        let h = 0;
+        for (let i = 0; i < d.length; i += 7) h = (h * 31 + d[i]!) | 0;
+        return String(h);
+      }),
+    );
   const select = async (): Promise<void> => {
     if ((await kind()) === 'selected') return;
     const t = await markerTile();
@@ -4289,13 +4351,17 @@ async function checkUndo(
     p.evaluate(() => JSON.stringify((window as any).__app.editor.getState()));
   const arr = (): Promise<string> => arrangementOf(p);
   const pixelHash = (): Promise<number> =>
-    p.evaluate(() => {
-      const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
-      const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
-      let h = 0;
-      for (const v of d) h = (h * 31 + v) | 0;
-      return h;
-    });
+    stableHash(p, () =>
+      p.evaluate(() => {
+        const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+        const d = c
+          .getContext('2d')!
+          .getImageData(0, 0, c.width, c.height).data;
+        let h = 0;
+        for (const v of d) h = (h * 31 + v) | 0;
+        return h;
+      }),
+    );
   /** The tray and the editor name the same included photos. */
   const agree = (): Promise<boolean> =>
     p.evaluate(() => {
@@ -4337,10 +4403,27 @@ async function checkUndo(
     const { x, y } = await centre(slot);
     await p.mouse.click(x, y);
   };
+  const selectionKind = (): string =>
+    (window as any).__app.selection.getSelection().kind;
   const swapUi = async (a: number, b: number): Promise<void> => {
+    // Start from no selection (a click on a selected tile would deselect it
+    // instead of selecting it), and wait for each step of the selection
+    // before the next click rather than clicking on a timer.
+    if ((await p.evaluate(selectionKind)) !== 'idle') {
+      await p.mouse.click(5, 790);
+      await p.waitForFunction(
+        () => (window as any).__app.selection.getSelection().kind === 'idle',
+      );
+    }
     await clickTile(a);
     await p.locator('.tile-menu').getByRole('button', { name: 'Swap' }).click();
+    await p.waitForFunction(
+      () => (window as any).__app.selection.getSelection().kind === 'swapping',
+    );
     await clickTile(b);
+    await p.waitForFunction(
+      () => (window as any).__app.selection.getSelection().kind !== 'swapping',
+    );
     await settle();
   };
   const sel = (): Promise<string> =>
@@ -4455,7 +4538,11 @@ async function checkUndo(
   const beforeSwap = await snap();
   await swapUi(0, 2);
   const afterSwap = await snap();
-  check('undo: a swap changed the state', afterSwap !== beforeSwap);
+  check(
+    'undo: a swap changed the state',
+    afterSwap !== beforeSwap,
+    `selection ${await sel()}`,
+  );
   await undoBtn.click();
   await settle();
   check('undo: undoes a swap', (await snap()) === beforeSwap);
@@ -4907,7 +4994,381 @@ async function checkUndo(
   await ctx.close();
 }
 
-/** The version in the page (issue #44): meta tags, the link, no layout shift. */
+/** One photo's worth of encoded bytes for setInputFiles. */
+interface EncodedPhoto {
+  name: string;
+  mimeType: string;
+  buffer: Buffer;
+}
+
+/**
+ * Photos of `width` × `height` pixels covered in fine vertical stripes (2 px
+ * dark, 2 px light), which a 1024 px preview of them cannot show: scaled by
+ * a quarter they blur to flat grey, so a tile drawn from the preview shows
+ * no stripes, and a tile drawn from the original does.
+ */
+async function makeDetailPhotos(
+  p: Page,
+  count: number,
+  width: number,
+  height: number,
+): Promise<EncodedPhoto[]> {
+  const encoded = await p.evaluate(
+    async ({ count, width, height }) => {
+      const out: { name: string; data: string }[] = [];
+      for (let i = 0; i < count; i++) {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d')!;
+        ctx.fillStyle = `hsl(${String((i * 43) % 360)} 50% 90%)`;
+        ctx.fillRect(0, 0, width, height);
+        ctx.fillStyle = `hsl(${String((i * 43) % 360)} 60% 12%)`;
+        for (let x = 0; x < width; x += 4) ctx.fillRect(x, 0, 2, height);
+        const blob = await new Promise<Blob>((res) => {
+          canvas.toBlob(
+            (b) => {
+              res(b!);
+            },
+            'image/jpeg',
+            0.95,
+          );
+        });
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let bin = '';
+        for (let k = 0; k < bytes.length; k += 8192) {
+          bin += String.fromCharCode(...bytes.subarray(k, k + 8192));
+        }
+        out.push({ name: `detail-${String(i)}.jpg`, data: btoa(bin) });
+      }
+      return out;
+    },
+    { count, width, height },
+  );
+  return encoded.map((e) => ({
+    name: e.name,
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from(e.data, 'base64'),
+  }));
+}
+
+interface CacheStatsSnapshot {
+  bytes: number;
+  budget: number;
+  peakBytes: number;
+  detailDecodes: number;
+}
+
+/** The image cache's accounting, or null before it was exposed (#27). */
+function cacheStats(p: Page): Promise<CacheStatsSnapshot | null> {
+  return p.evaluate(() => {
+    const view = (window as any).__app.view;
+    return typeof view.imageCacheStats === 'function'
+      ? view.imageCacheStats()
+      : null;
+  });
+}
+
+/**
+ * Large tiles are sharp (#27): with 8 detailed photos at the dial's maximum
+ * on a 2560 × 1440 window at pixel ratio 2, the largest tile is bigger than
+ * its 1024 px preview, and once everything has settled its canvas pixels
+ * still show the photo's fine stripes.
+ */
+async function checkSharpTiles(
+  browser: import('playwright-core').Browser,
+  screenshots?: string,
+): Promise<void> {
+  const ctx = await browser.newContext({
+    viewport: { width: 2560, height: 1440 },
+    deviceScaleFactor: 2,
+  });
+  const p = await ctx.newPage();
+  const errors: string[] = [];
+  p.on('pageerror', (e) => errors.push(e.message));
+  p.on('console', (m) => {
+    if (m.type() === 'error') errors.push(m.text());
+  });
+  await p.goto(origin);
+  await p.waitForSelector('.tray');
+  await p.setInputFiles(
+    'input[type=file]',
+    await makeDetailPhotos(p, 8, 4000, 3000),
+  );
+  await p.waitForFunction(
+    () => (window as any).__app.editor.getState().photos.length === 8,
+    undefined,
+    { timeout: 60000 },
+  );
+  await setDial(p, 1);
+  await waitDrawn(p, 60000);
+  const m = await p.evaluate(() => {
+    const app = (window as any).__app;
+    const last = app.view.lastRender();
+    const t = [...last.tiles].sort(
+      (a: any, b: any) => b.width * b.height - a.width * a.height,
+    )[0];
+    const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    // Mean absolute difference of neighbouring pixels across the middle of
+    // the tile: about 0 for a smooth image, large for 2 px stripes.
+    const w = Math.min(400, Math.floor(t.width / 2));
+    const h = Math.min(200, Math.floor(t.height / 2));
+    const x0 = Math.floor(t.x + (t.width - w) / 2);
+    const y0 = Math.floor(t.y + (t.height - h) / 2);
+    const d = c.getContext('2d')!.getImageData(x0, y0, w, h).data;
+    let sum = 0;
+    let n = 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x + 1 < w; x++) {
+        const i = (y * w + x) * 4 + 1;
+        sum += Math.abs(d[i]! - d[i + 4]!);
+        n++;
+      }
+    }
+    return { tileW: t.width, tileH: t.height, score: sum / n };
+  });
+  console.log(
+    `INFO  largest tile ${String(m.tileW)} x ${String(m.tileH)} device px (preview 1024 px): neighbour contrast ${m.score.toFixed(1)} of 255 after settling`,
+  );
+  check(
+    'sharp: the largest tile is drawn larger than its 1024 px preview',
+    Math.max(m.tileW, m.tileH) > 1100,
+    `${String(m.tileW)} x ${String(m.tileH)} px`,
+  );
+  check(
+    "sharp: the largest tile still shows the photo's 2 px stripes after settling (not drawn from the preview)",
+    m.score > 40,
+    `contrast ${m.score.toFixed(1)}`,
+  );
+  const stats = await cacheStats(p);
+  check(
+    'sharp: the cache total stays within its budget',
+    stats !== null && stats.bytes <= stats.budget,
+    stats
+      ? `${(stats.bytes / 1048576).toFixed(0)} of ${(stats.budget / 1048576).toFixed(0)} MB`
+      : 'no stats',
+  );
+  if (screenshots) {
+    // A small crop of the largest tile, for the PR.
+    const clip = await p.evaluate(() => {
+      const last = (window as any).__app.view.lastRender();
+      const t = [...last.tiles].sort(
+        (a: any, b: any) => b.width * b.height - a.width * a.height,
+      )[0];
+      const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+      const r = c.getBoundingClientRect();
+      const k = r.width / c.width;
+      return {
+        x: r.left + (t.x + t.width / 2) * k - 60,
+        y: r.top + (t.y + t.height / 2) * k - 40,
+        width: 120,
+        height: 80,
+      };
+    });
+    mkdirSync(screenshots, { recursive: true });
+    await p.screenshot({
+      path: join(
+        screenshots,
+        process.env.SHARP_SHOT ?? 'issue-27-sharp-tile.png',
+      ),
+      clip,
+    });
+  }
+  check('sharp: no console errors', errors.length === 0, errors.join(' | '));
+  await ctx.close();
+}
+
+/**
+ * The decoded-image cache never exceeds its budget (#27), sampled every 10 ms
+ * while `count` photos are imported and the collage is shuffled and resized,
+ * at pixel ratio 2 on a 2560 × 1440 window.
+ */
+async function checkCacheCap(
+  browser: import('playwright-core').Browser,
+  count: number,
+): Promise<void> {
+  const ctx = await browser.newContext({
+    viewport: { width: 2560, height: 1440 },
+    deviceScaleFactor: 2,
+  });
+  const p = await ctx.newPage();
+  const errors: string[] = [];
+  p.on('pageerror', (e) => errors.push(e.message));
+  await p.goto(origin);
+  await p.waitForSelector('.tray');
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__cacheMax = 0;
+    w.__cacheSamples = 0;
+    w.__cacheTimer = setInterval(() => {
+      const view = w.__app.view;
+      if (typeof view.imageCacheStats !== 'function') return;
+      const s = view.imageCacheStats();
+      w.__cacheSamples++;
+      w.__cacheMax = Math.max(w.__cacheMax, s.bytes);
+    }, 10);
+  });
+  await p.setInputFiles(
+    'input[type=file]',
+    await makeSyntheticPhotos(p, count, count > 150 ? 1 : 1.5),
+  );
+  await p.waitForFunction(
+    (n) => (window as any).__app.editor.getState().photos.length === n,
+    count,
+    { timeout: 180000 },
+  );
+  await waitDrawn(p, 180000);
+  for (const v of [1, 0, 0.5]) {
+    await setDial(p, v);
+    await p.waitForTimeout(150);
+  }
+  for (let i = 0; i < 6; i++) {
+    await p.getByRole('button', { name: 'Shuffle' }).click();
+    await p.waitForTimeout(120);
+  }
+  await setDial(p, 1);
+  await waitDrawn(p, 180000);
+  const sampled = await p.evaluate(() => {
+    const w = window as any;
+    clearInterval(w.__cacheTimer);
+    return { max: w.__cacheMax as number, samples: w.__cacheSamples as number };
+  });
+  const stats = await cacheStats(p);
+  const mb = (n: number): string => (n / 1048576).toFixed(1);
+  if (stats) {
+    console.log(
+      `INFO  ${String(count)} photos at pixel ratio 2: ${String(sampled.samples)} samples, largest total ${mb(sampled.max)} MB, accounted peak ${mb(stats.peakBytes)} MB, final ${mb(stats.bytes)} MB, budget ${mb(stats.budget)} MB`,
+    );
+  }
+  check(
+    `cache cap: ${String(count)} photos at pixel ratio 2, the total never exceeds the budget while importing and shuffling`,
+    stats !== null &&
+      sampled.samples > 20 &&
+      sampled.max <= stats.budget &&
+      stats.peakBytes <= stats.budget,
+    stats ? `${mb(sampled.max)} of ${mb(stats.budget)} MB` : 'no stats',
+  );
+  check(
+    `cache cap: ${String(count)} photos, no page errors`,
+    errors.length === 0,
+    errors.join(' | '),
+  );
+  await ctx.close();
+}
+
+/**
+ * Dragging the dial with 100 photos stays smooth, and starts no decode of an
+ * original while the pointer is down (#27). Frame gaps are measured over the
+ * drag; the numbers are printed for comparison with the previous release.
+ */
+async function checkDialDrag(
+  browser: import('playwright-core').Browser,
+): Promise<void> {
+  const ctx = await browser.newContext({
+    viewport: { width: 1920, height: 1080 },
+    deviceScaleFactor: 2,
+  });
+  const p = await ctx.newPage();
+  await p.goto(origin);
+  await p.waitForSelector('.tray');
+  await p.setInputFiles(
+    'input[type=file]',
+    await makeSyntheticPhotos(p, 100, 1.5),
+  );
+  await p.waitForFunction(
+    () => (window as any).__app.editor.getState().photos.length === 100,
+    undefined,
+    { timeout: 120000 },
+  );
+  await waitDrawn(p, 120000);
+  const medians: number[] = [];
+  const p95s: number[] = [];
+  let detailDuringDrag = 0;
+  let settledOk = true;
+  for (let run = 0; run < 3; run++) {
+    await setDial(p, 0);
+    await waitDrawn(p, 120000);
+    const box = (await p.locator('#size-variation').boundingBox())!;
+    const y = box.y + box.height / 2;
+    await p.evaluate(() => {
+      const w = window as any;
+      w.__frames = [];
+      w.__stop = false;
+      let last = performance.now();
+      const loop = (now: number): void => {
+        w.__frames.push(now - last);
+        last = now;
+        if (!w.__stop) requestAnimationFrame(loop);
+      };
+      requestAnimationFrame(loop);
+    });
+    const before = await cacheStats(p);
+    await p.mouse.move(box.x + 1, y);
+    await p.mouse.down();
+    const moves = 120;
+    for (let i = 0; i <= moves; i++) {
+      const f = i <= moves / 2 ? (2 * i) / moves : 2 - (2 * i) / moves;
+      await p.mouse.move(box.x + 1 + (box.width - 2) * f, y);
+      await p.waitForTimeout(16);
+    }
+    // Rest at the maximum with the pointer still down, then release.
+    await p.mouse.move(box.x + box.width - 1, y);
+    await p.waitForTimeout(450);
+    const during = await cacheStats(p);
+    detailDuringDrag +=
+      before && during ? during.detailDecodes - before.detailDecodes : 0;
+    await p.mouse.up();
+    const frames = await p.evaluate(() => {
+      (window as any).__stop = true;
+      return [...((window as any).__frames as number[])].slice(2);
+    });
+    frames.sort((a, b) => a - b);
+    medians.push(frames[Math.floor(frames.length / 2)]!);
+    p95s.push(frames[Math.floor(frames.length * 0.95)]!);
+    await waitDrawn(p, 60000);
+    const last = await p.evaluate(() =>
+      (window as any).__app.view.lastRender(),
+    );
+    settledOk &&= (last.upgrading ?? 0) === 0;
+  }
+  const mid = (xs: number[]): number => [...xs].sort((a, b) => a - b)[1]!;
+  console.log(
+    `INFO  100 photos, dragging the dial (3 runs, 1920 x 1080 at pixel ratio 2): frame gap median ${mid(medians).toFixed(1)} ms, p95 ${mid(p95s).toFixed(1)} ms (runs: median ${medians.map((m) => m.toFixed(1)).join('/')}, p95 ${p95s.map((m) => m.toFixed(1)).join('/')})`,
+  );
+  check(
+    'dial drag: frames stay smooth with 100 photos (median gap under 25 ms)',
+    mid(medians) < 25,
+    `median ${mid(medians).toFixed(1)} ms`,
+  );
+  check(
+    'dial drag: no decode of an original starts while the pointer is down',
+    detailDuringDrag === 0,
+    `${String(detailDuringDrag)} started`,
+  );
+  check('dial drag: every tile is final once the drag has settled', settledOk);
+  const after = await cacheStats(p);
+  check(
+    'dial drag: originals are decoded for the large tiles once it has settled',
+    after !== null && after.detailDecodes > 0,
+    `${String(after?.detailDecodes ?? 0)} decodes of originals`,
+  );
+  await ctx.close();
+}
+
+// Another check may be using the default port: `--port 5301` or
+// BROWSER_CHECK_PORT picks another, so two runs can coexist.
+const portIndex = process.argv.indexOf('--port');
+const port = Number(
+  (portIndex >= 0 ? process.argv[portIndex + 1] : undefined) ??
+    process.env.BROWSER_CHECK_PORT ??
+    5199,
+);
+/**
+ * The version in the page (issue #44): the meta tags, the link, and that the
+ * link changes no box: the top bar, canvas, tray and settings panel measure
+ * the same with it shown and hidden, with a realistic long version, and it
+ * overlaps nothing in the bar.
+ */
 async function checkVersion(browser: Browser): Promise<void> {
   const expected = (
     JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
@@ -4916,37 +5377,68 @@ async function checkVersion(browser: Browser): Promise<void> {
   ).version;
   for (const [width, height] of [
     [900, 620],
+    [1101, 700],
     [1440, 900],
   ] as const) {
     const ctx = await browser.newContext({ viewport: { width, height } });
     const p = await ctx.newPage();
     await p.goto(origin);
     await p.waitForSelector('.tray');
+    await p.waitForSelector('.collage-canvas');
     const info = await p.evaluate(() => {
       const meta = (name: string): string =>
         document.querySelector<HTMLMetaElement>(`meta[name=${name}]`)
           ?.content ?? '';
       const link = document.querySelector<HTMLAnchorElement>('a.version')!;
-      const box = (sel: string): string => {
-        const r = document.querySelector(sel)!.getBoundingClientRect();
+      const rect = (el: Element): string => {
+        const r = el.getBoundingClientRect();
         return [r.x, r.y, r.width, r.height].map(Math.round).join(',');
       };
       const boxes = (): string =>
-        ['.collage-canvas', '.tray', '.sidebar'].map(box).join(' ');
-      const before = boxes();
-      const text = link.textContent;
-      link.textContent += ' with a much longer suffix';
-      return {
-        version: meta('version'),
-        commit: meta('commit'),
-        text,
+        ['.topbar', '.collage-canvas', '.tray', '.settings']
+          .map((sel) => rect(document.querySelector(sel)!))
+          .join(' ');
+      const shown = link.textContent;
+      const hrefs = {
         href: link.href,
         target: link.target,
         rel: link.rel,
-        stable: before === boxes(),
-        within:
-          link.getBoundingClientRect().right <=
-          document.querySelector('.sidebar')!.getBoundingClientRect().right,
+        title: link.title,
+        label: link.getAttribute('aria-label') ?? '',
+      };
+      // A longer version than the real one, as in the first release.
+      const parts = link.querySelectorAll('span');
+      if (parts[0]) parts[0].textContent = '2026.11.0';
+      const withLink = boxes();
+      const l = link.getBoundingClientRect();
+      const overlaps = [...document.querySelector('.topbar')!.children]
+        .filter((el) => !el.contains(link) && !(el as HTMLElement).hidden)
+        .filter((el) => {
+          const r = el.getBoundingClientRect();
+          return (
+            r.width > 2 &&
+            r.height > 2 &&
+            l.left < r.right &&
+            l.right > r.left &&
+            l.top < r.bottom &&
+            l.bottom > r.top
+          );
+        })
+        .map((el) => el.className || el.tagName);
+      const bar = document.querySelector('.topbar')!.getBoundingClientRect();
+      const inBar = l.top >= bar.top && l.bottom <= bar.bottom;
+      link.style.display = 'none';
+      const without = boxes();
+      return {
+        version: meta('version'),
+        commit: meta('commit'),
+        shown,
+        ...hrefs,
+        same: withLink === without,
+        withLink,
+        without,
+        overlaps,
+        inBar,
       };
     });
     const at = `${String(width)} x ${String(height)}`;
@@ -4957,21 +5449,30 @@ async function checkVersion(browser: Browser): Promise<void> {
     );
     check(
       `the UI shows the version, commit and a dev marker (${at})`,
-      info.text.startsWith(
-        `co-larger ${expected}${info.commit === '' ? '' : ` (${info.commit})`} dev`,
-      ),
-      info.text,
+      // Narrow windows hide the commit and the marker by CSS only.
+      info.shown ===
+        `${expected}${info.commit === '' ? '' : ` (${info.commit})`} dev`,
+      info.shown,
     );
     check(
-      `the version links to the public repository in a new tab (${at})`,
+      `the version links to the public repository in a new tab, with a full name (${at})`,
       info.href === 'https://github.com/TimCinel/co-larger' &&
         info.target === '_blank' &&
-        info.rel === 'noopener noreferrer',
-      `${info.href} ${info.target} ${info.rel}`,
+        info.rel === 'noopener noreferrer' &&
+        info.title.startsWith(expected) &&
+        info.label.startsWith(`co-larger version ${expected}`) &&
+        info.label.endsWith('source on GitHub'),
+      `${info.title} / ${info.label}`,
     );
     check(
-      `a longer version text does not move the canvas, tray or panel (${at})`,
-      info.stable && info.within,
+      `the version moves no box: top bar, canvas, tray and settings panel (${at})`,
+      info.same,
+      `${info.withLink} vs ${info.without}`,
+    );
+    check(
+      `the version overlaps nothing in the top bar and stays inside it (${at})`,
+      info.overlaps.length === 0 && info.inBar,
+      info.overlaps.join(', '),
     );
     await ctx.close();
   }
@@ -4979,11 +5480,11 @@ async function checkVersion(browser: Browser): Promise<void> {
 
 const server = await createServer({
   root,
-  server: { port: 5199 },
+  server: { port, strictPort: true },
   logLevel: 'error',
 });
 await server.listen();
-const origin = 'http://localhost:5199';
+const origin = `http://localhost:${String(port)}`;
 
 // `--a2-only --engine firefox|chrome`: just the A2 export, in another engine.
 if (process.argv.includes('--a2-only')) {
@@ -5078,6 +5579,19 @@ if (onlyIndex >= 0) {
   if (names.includes('undo')) await checkUndo(browser);
   if (names.includes('import')) await checkImportOnce(browser);
   if (names.includes('deferred')) await checkDeferredSelection(browser);
+  if (names.includes('sharp')) {
+    await checkSharpTiles(
+      browser,
+      process.argv.includes('--sharp-screenshot')
+        ? join(root, 'docs', 'screenshots')
+        : undefined,
+    );
+  }
+  if (names.includes('cap')) {
+    await checkCacheCap(browser, 100);
+    await checkCacheCap(browser, 300);
+  }
+  if (names.includes('drag')) await checkDialDrag(browser);
   await browser.close();
   await server.close();
   process.exit(failures === 0 ? 0 : 1);
@@ -5455,6 +5969,15 @@ await checkVersion(browser);
 await checkImportOnce(browser);
 await checkDeferredSelection(browser);
 await checkCropPerformance(browser);
+await checkSharpTiles(
+  browser,
+  process.argv.includes('--sharp-screenshot')
+    ? join(root, 'docs', 'screenshots')
+    : undefined,
+);
+await checkCacheCap(browser, 100);
+await checkCacheCap(browser, 300);
+await checkDialDrag(browser);
 await checkExport(browser, origin, check, {
   screenshots: process.argv.includes('--export-screenshot')
     ? join(root, 'docs', 'screenshots')
@@ -5737,6 +6260,14 @@ if (realDir) {
     console.log(
       `  dial ${String(v)}: ${String(s.tiles)} tiles, area CV ${s.areaCv.toFixed(2)}, largest ${(s.largestShare * 100).toFixed(1)}%, portrait photos in portrait tiles ${(s.portraitInPortrait * 100).toFixed(0)}% (${String(s.portraits)} portraits), landscape in landscape ${(s.landscapeInLandscape * 100).toFixed(0)}%`,
     );
+  }
+  {
+    const cs = await cacheStats(real);
+    if (cs) {
+      console.log(
+        `  image cache: ${(cs.bytes / 1048576).toFixed(1)} MB held, accounted peak ${(cs.peakBytes / 1048576).toFixed(1)} MB of ${(cs.budget / 1048576).toFixed(0)} MB budget, ${String(cs.detailDecodes)} decodes of originals`,
+      );
+    }
   }
   const dragRuns: string[] = [];
   for (let run = 0; run < 3; run++) {

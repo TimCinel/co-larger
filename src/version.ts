@@ -16,13 +16,24 @@ export const BUILD: BuildInfo = {
   dev: import.meta.env.DEV,
 };
 
-/** For example `co-larger 2026.11.0 (6c2d379)`, plus ` dev` in development. */
-export function formatVersion(name: string, info: BuildInfo): string {
+/** For example `2026.11.0 (6c2d379)`, plus ` dev` in development. */
+export function formatVersion(info: BuildInfo): string {
   const hash = info.commit === '' ? '' : ` (${info.commit})`;
-  return `${name} ${info.version}${hash}${info.dev ? ' dev' : ''}`;
+  return `${info.version}${hash}${info.dev ? ' dev' : ''}`;
 }
 
-/** The link in the page chrome: opens the public repository in a new tab. */
+/** For example `co-larger version 2026.11.0, commit 6c2d379, source on GitHub`. */
+export function versionLabel(name: string, info: BuildInfo): string {
+  const commit = info.commit === '' ? '' : `, commit ${info.commit}`;
+  const dev = info.dev ? ', development build' : '';
+  return `${name} version ${info.version}${commit}${dev}, source on GitHub`;
+}
+
+/**
+ * The link in the top bar, beside the title: opens the public repository in
+ * a new tab. The commit sits in its own span so narrow windows can hide it
+ * (CSS); the full text stays in the title and the accessible name.
+ */
 export function createVersionLink(
   doc: Document,
   name: string,
@@ -33,6 +44,22 @@ export function createVersionLink(
   link.href = REPO_URL;
   link.target = '_blank';
   link.rel = 'noopener noreferrer';
-  link.textContent = formatVersion(name, info);
+  link.title = formatVersion(info);
+  link.setAttribute('aria-label', versionLabel(name, info));
+  const version = doc.createElement('span');
+  version.textContent = info.version;
+  link.append(version);
+  if (info.commit !== '') {
+    const commit = doc.createElement('span');
+    commit.className = 'version-commit';
+    commit.textContent = ` (${info.commit})`;
+    link.append(commit);
+  }
+  if (info.dev) {
+    const dev = doc.createElement('span');
+    dev.className = 'version-dev';
+    dev.textContent = ' dev';
+    link.append(dev);
+  }
   return link;
 }

@@ -117,8 +117,14 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
 
   const sizeReadout = createSizeReadout(doc, editor);
 
+  // The version sits beside the title, in the top bar, so it takes no space
+  // from the collage, the tray or the settings panel.
+  const brand = doc.createElement('div');
+  brand.className = 'brand';
+  brand.append(title, createVersionLink(doc, APP_NAME));
+
   header.append(
-    title,
+    brand,
     sizeReadout,
     addButton,
     progress,
@@ -228,12 +234,7 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
       createExportControls({ doc, editor, photos: store, deps: browserDeps })
         .element,
     );
-  // The version sits under the panel, outside its scroll area, so it is
-  // always visible and never moves the collage or the tray.
-  const sidebar = doc.createElement('div');
-  sidebar.className = 'sidebar';
-  sidebar.append(settings, createVersionLink(doc, APP_NAME));
-  workspace.append(sidebar, stage);
+  workspace.append(settings, stage);
   shell.append(header, workspace);
   root.replaceChildren(shell);
 

@@ -68,8 +68,14 @@ plain, JSON-serialisable `EditorState` (canvas settings, dial, seed, plan,
 assignment, per-photo crops), changed only by pure actions in `state.ts` and
 held by an `EditorStore` with subscribe/notify. `renderCollage` (`render.ts`)
 draws a state onto any 2D context at any size; the editor calls it with
-decoded previews and thumbnails from a bounded `ImageCache`, and the export
-will call it with the originals. The cover-and-crop maths is `coverSource` in
+decoded images from a bounded `ImageCache`, and the export calls it with the
+originals. The cache holds each photo as a thumbnail, a preview or, for a tile
+larger than its preview on screen (a big tile on a high-density display, or a
+zoomed crop), a decode of the original at the size the tile needs
+(`image-source.ts`), within a hard 256 MB budget that counts decodes in flight
+and degrades the smallest tiles first (`image-plan.ts`). Originals are not
+decoded while the dial or a crop is being dragged. `npm run check:browser
+--port <n>` uses another dev server port. The cover-and-crop maths is `coverSource` in
 `crop.ts`. `npm run check:browser` also checks the collage, the dial and
 Shuffle; with `--dir` it reports frame times while dragging the dial.
 
@@ -177,12 +183,16 @@ commit, and pushes one manifest list tagged with the short commit and `latest`
 (and with the version from `package.json` once it is not `0.0.0`). `PUSH=0
 docker/build.sh` builds for the local architecture only, without pushing.
 
-The page shows the `package.json` version and the short commit it was built
-from (also as `<meta name="version">` and `<meta name="commit">`). Builds in a
+The top bar shows the `package.json` version and the short commit it was built
+from, beside the title (narrow windows show the version alone; the commit is in
+the tooltip). Both are also in `<meta name="version">` and
+`<meta name="commit">`. Builds in a
 Git checkout read the commit from Git; the image build has no `.git`, so
 `docker/build.sh` passes it as `--build-arg GIT_COMMIT=<hash>` (set the
 `GIT_COMMIT` environment variable for any other build). Without a commit the
-page shows the version alone.
+page shows the version alone, and `scripts/docker-check.ts` accepts that.
+Pass `--expect-commit <hash>` to the checker to require the commit and check it
+(for an image from `docker/build.sh`: `--expect-commit $(git rev-parse HEAD)`).
 
 To check an image the way it was verified, run it and point a real Chrome at it
 (needs Chrome; add `--subpath` to check it behind a proxy under `/collage/`):
