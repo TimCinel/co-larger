@@ -906,3 +906,8 @@ button.primary:hover:not(:disabled) {
 .collage-canvas.panning {
   cursor: grabbing;
 }
+
+.undo-controls {
+  display: flex;
+  gap: 0.4rem;
+}

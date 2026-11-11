@@ -1,7 +1,7 @@
 /**
  * Local real-browser check for photo import (issue #4), the editor canvas
  * (issue #5), the canvas settings and page layout (issue #6) and physical
- * canvas sizes (issue #7), tile selection, Swap and Remove (issue #8), and tile crop (issue #9).
+ * canvas sizes (issue #7), tile selection, Swap and Remove (issue #8), and tile crop (issue #9), and undo and redo (issue #10).
  * Not run in
  * CI: it needs
  * a locally installed Chrome. Decoding, EXIF handling and drag and drop cannot
@@ -12,6 +12,7 @@
  *   node scripts/browser-check.ts --physical-screenshot  # and docs/screenshots/issue-7-*.png
  *   node scripts/browser-check.ts --selection-screenshot  # and docs/screenshots/issue-8-*.png
  *   node scripts/browser-check.ts --crop-screenshot  # and docs/screenshots/issue-9-*.png
+ *   node scripts/browser-check.ts --undo-screenshot  # and docs/screenshots/issue-10-undo.png
  *   node scripts/browser-check.ts --tray-screenshot  # and docs/screenshots/photo-tray.png
  *   node scripts/browser-check.ts --dir <folder>  # also import a folder of real
  *                                                  # photos and report timing
@@ -3903,6 +3904,665 @@ function canvasPixels(p: Page): Promise<number[]> {
   });
 }
 
+/** Undo and redo (issue #10), in real Chrome. */
+async function checkUndo(
+  browser: import('playwright-core').Browser,
+): Promise<void> {
+  const ctx = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+  });
+  const p = await ctx.newPage();
+  const errors: string[] = [];
+  p.on('pageerror', (e) => errors.push(e.message));
+  p.on('console', (m) => {
+    if (m.type() === 'error') errors.push(m.text());
+  });
+  await p.goto(origin);
+  await p.waitForSelector('.tray');
+  await p.setInputFiles('input[type=file]', await makeSyntheticPhotos(p, 8));
+  await p.waitForFunction(
+    () => (window as any).__app.editor.getState().photos.length === 8,
+  );
+  await waitDrawn(p);
+  check(
+    'undo toast: the first import (empty history) shows no history notice',
+    (await p.locator('.notice', { hasText: 'undo history' }).count()) === 0,
+  );
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__commits = 0;
+    w.__app.editor.subscribe((_s: unknown, c: { transient: boolean }) => {
+      if (!c.transient) w.__commits++;
+    });
+  });
+  const commitCount = (): Promise<number> =>
+    p.evaluate(() => (window as any).__commits);
+  const mac = await p.evaluate(() =>
+    /mac|iphone|ipad/i.test(navigator.platform),
+  );
+  const mod = mac ? 'Meta' : 'Control';
+  const snap = (): Promise<string> =>
+    p.evaluate(() => JSON.stringify((window as any).__app.editor.getState()));
+  const arr = (): Promise<string> => arrangementOf(p);
+  const pixelHash = (): Promise<number> =>
+    p.evaluate(() => {
+      const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+      const d = c.getContext('2d')!.getImageData(0, 0, c.width, c.height).data;
+      let h = 0;
+      for (const v of d) h = (h * 31 + v) | 0;
+      return h;
+    });
+  /** The tray and the editor name the same included photos. */
+  const agree = (): Promise<boolean> =>
+    p.evaluate(() => {
+      const a = (window as any).__app;
+      const ids: string[] = a.store.getIncludedIds();
+      const st = a.editor.getState();
+      const ticked = document.querySelectorAll(
+        '.thumb[aria-pressed="true"]',
+      ).length;
+      const total = a.store.getTotalCount();
+      const text = document.querySelector('.tray-count')?.textContent ?? '';
+      return (
+        ids.length === st.photos.length &&
+        ids.every((id) => st.photos.some((ph: any) => ph.id === id)) &&
+        ticked === ids.length &&
+        text === `${String(ids.length)} / ${String(total)} selected` &&
+        !a.editor.isDragging()
+      );
+    });
+  const undoBtn = p.getByRole('button', { name: 'Undo', exact: true });
+  const redoBtn = p.getByRole('button', { name: 'Redo', exact: true });
+  const settle = async (): Promise<void> => {
+    await p.waitForTimeout(120);
+    // An empty collage draws nothing to wait for.
+    if (JSON.parse(await snap()).photos.length > 0) await waitDrawn(p);
+  };
+  const centre = (slot: number): Promise<{ x: number; y: number }> =>
+    p.evaluate((slot) => {
+      const { tiles } = (window as any).__app.view.lastRender();
+      const t = tiles.find((t: any) => t.slot === slot);
+      const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+      const r = c.getBoundingClientRect();
+      return {
+        x: r.left + ((t.x + t.width / 2) * r.width) / c.width,
+        y: r.top + ((t.y + t.height / 2) * r.height) / c.height,
+      };
+    }, slot);
+  const clickTile = async (slot: number): Promise<void> => {
+    const { x, y } = await centre(slot);
+    await p.mouse.click(x, y);
+  };
+  const swapUi = async (a: number, b: number): Promise<void> => {
+    await clickTile(a);
+    await p.locator('.tile-menu').getByRole('button', { name: 'Swap' }).click();
+    await clickTile(b);
+    await settle();
+  };
+  const sel = (): Promise<string> =>
+    p.evaluate(() => (window as any).__app.selection.getSelection().kind);
+  const live = (): Promise<string> =>
+    p.evaluate(
+      () => document.querySelector('.sr-only[role=status]')?.textContent ?? '',
+    );
+
+  check(
+    'undo: Undo and Redo buttons start disabled, with shortcut tooltips',
+    (await undoBtn.isDisabled()) &&
+      (await redoBtn.isDisabled()) &&
+      ((await undoBtn.getAttribute('title')) ?? '').includes(
+        mac ? 'Cmd+Z' : 'Ctrl+Z',
+      ) &&
+      ((await redoBtn.getAttribute('title')) ?? '').includes(
+        mac ? 'Shift+Cmd+Z' : 'Ctrl+Y',
+      ),
+  );
+
+  // Dragging the dial is one step.
+  const start = await snap();
+  const box = (await p.locator('#size-variation').boundingBox())!;
+  const y = box.y + box.height / 2;
+  await p.mouse.move(box.x + 2, y);
+  await p.mouse.down();
+  for (let i = 1; i <= 20; i++) {
+    await p.mouse.move(box.x + 2 + ((box.width - 4) * i) / 20, y);
+    await p.waitForTimeout(16);
+  }
+  // A pointer is held mid-drag: Undo is rejected, the drag carries on.
+  const midDrag = await snap();
+  const commitsMid = await commitCount();
+  await p.keyboard.press(`${mod}+z`);
+  await p.keyboard.press(`${mod}+Shift+z`);
+  check(
+    'undo (held): Cmd/Ctrl+Z mid dial drag does nothing; both buttons are disabled',
+    (await snap()) === midDrag &&
+      (await commitCount()) === commitsMid &&
+      (await undoBtn.isDisabled()) &&
+      (await redoBtn.isDisabled()) &&
+      (await live()) !== 'Undone.',
+  );
+  await p.mouse.move(box.x + 2 + (box.width - 4) * 0.9, y);
+  await p.mouse.up();
+  await settle();
+  check(
+    'undo (held): the drag commits exactly once on release',
+    (await commitCount()) === commitsMid + 1 && (await undoBtn.isEnabled()),
+  );
+  const afterDial = await snap();
+  check('undo: the dial drag changed the state', afterDial !== start);
+  await undoBtn.click();
+  await settle();
+  check(
+    'undo: dragging the dial is a single undo step',
+    (await snap()) === start && (await undoBtn.isDisabled()),
+  );
+  check(
+    'undo: the dial control follows the restored state',
+    (await p.locator('#size-variation').inputValue()) ===
+      String(JSON.parse(start).variation),
+  );
+  check('undo: announces the step', (await live()) === 'Undone.');
+  check(
+    'undo: focus moved to a visible button when Undo became disabled',
+    await p.evaluate(() => document.activeElement?.textContent === 'Redo'),
+  );
+  await redoBtn.click();
+  await settle();
+  check('redo: restores the dial drag', (await snap()) === afterDial);
+  check(
+    'redo: focus moved to Undo when Redo became disabled',
+    await p.evaluate(() => document.activeElement?.textContent === 'Undo'),
+  );
+
+  // Swap several tiles, then Shuffle: one undo restores the arrangement.
+  await swapUi(0, 1);
+  await swapUi(2, 3);
+  await swapUi(4, 5);
+  const swapped = await arr();
+  const swappedSnap = await snap();
+  const swappedPixels = await pixelHash();
+  await p.getByRole('button', { name: 'Shuffle' }).click();
+  await settle();
+  check('undo: Shuffle changed the arrangement', (await arr()) !== swapped);
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  check(
+    'undo: one undo after Shuffle restores the swapped arrangement exactly',
+    (await arr()) === swapped && (await snap()) === swappedSnap,
+  );
+  check(
+    'undo: the canvas pixels match the swapped arrangement',
+    (await pixelHash()) === swappedPixels,
+  );
+  await p.keyboard.press(`${mod}+Shift+z`);
+  await settle();
+  check('redo: Shift+Cmd/Ctrl+Z redoes the Shuffle', (await arr()) !== swapped);
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  if (!mac) {
+    await p.keyboard.press('Control+y');
+    await settle();
+    check('redo: Ctrl+Y redoes on non-Mac', (await arr()) !== swapped);
+    await p.keyboard.press(`${mod}+z`);
+    await settle();
+  }
+
+  // Undo and redo for a swap.
+  const beforeSwap = await snap();
+  await swapUi(0, 2);
+  const afterSwap = await snap();
+  check('undo: a swap changed the state', afterSwap !== beforeSwap);
+  await undoBtn.click();
+  await settle();
+  check('undo: undoes a swap', (await snap()) === beforeSwap);
+  await redoBtn.click();
+  await settle();
+  check('redo: redoes a swap', (await snap()) === afterSwap);
+
+  // Selection and a pending swap are cleared by undo.
+  await clickTile(1);
+  await p.locator('.tile-menu').getByRole('button', { name: 'Swap' }).click();
+  check('undo: a swap is pending', (await sel()) === 'swapping');
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  check(
+    'undo: clears the tile selection and the pending swap',
+    (await sel()) === 'idle' &&
+      (await p.locator('.tile-menu:visible').count()) === 0,
+  );
+  await p.keyboard.press(`${mod}+Shift+z`);
+  await settle();
+
+  // Crop: a wheel burst, then undo and redo.
+  const cropOf = (): Promise<string> =>
+    p.evaluate(() =>
+      JSON.stringify((window as any).__app.editor.getState().crops),
+    );
+  const cropBefore = await cropOf();
+  await clickTile(0);
+  const c0 = await centre(0);
+  await p.mouse.move(c0.x, c0.y);
+  for (let i = 0; i < 4; i++) {
+    await p.mouse.wheel(0, -120);
+    await p.waitForTimeout(20);
+  }
+  await p.waitForTimeout(400);
+  const cropZoomed = await cropOf();
+  check('undo: wheel zoom changed the crop', cropZoomed !== cropBefore);
+  await undoBtn.click();
+  await settle();
+  check('undo: undoes a crop zoom', (await cropOf()) === cropBefore);
+  await redoBtn.click();
+  await settle();
+  check('redo: redoes a crop zoom', (await cropOf()) === cropZoomed);
+  // Reset is a step too.
+  await clickTile(0);
+  await p.locator('.tile-menu').getByRole('button', { name: 'Reset' }).click();
+  check(
+    'undo: Reset restored the default crop',
+    (await cropOf()) === cropBefore,
+  );
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  check('undo: undoes a crop Reset', (await cropOf()) === cropZoomed);
+
+  // A crop pan with the pointer held: Undo is rejected; one commit on release.
+  await clickTile(0);
+  const prePan = await snap();
+  const pc = await centre(0);
+  const panCommits = await commitCount();
+  await p.mouse.move(pc.x, pc.y);
+  await p.mouse.down();
+  for (let i = 1; i <= 6; i++) {
+    await p.mouse.move(pc.x + i * 6, pc.y + i * 2);
+    await p.waitForTimeout(30);
+  }
+  await p.waitForTimeout(60);
+  const midPan = await snap();
+  await p.keyboard.press(`${mod}+z`);
+  await p.keyboard.press(`${mod}+Shift+z`);
+  check(
+    'undo (held): Cmd/Ctrl+Z mid crop pan does nothing; both buttons are disabled',
+    (await snap()) === midPan &&
+      midPan !== prePan &&
+      (await commitCount()) === panCommits &&
+      (await undoBtn.isDisabled()) &&
+      (await redoBtn.isDisabled()),
+    `moved ${String(midPan !== prePan)} commits ${String((await commitCount()) - panCommits)} undoDisabled ${String(await undoBtn.isDisabled())} redoDisabled ${String(await redoBtn.isDisabled())}`,
+  );
+  await p.mouse.up();
+  await settle();
+  check(
+    'undo (held): the pan commits exactly once on release, as one step',
+    (await commitCount()) === panCommits + 1 && (await undoBtn.isEnabled()),
+  );
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  check(
+    'undo (held): one undo reverts the whole pan',
+    (await snap()) === prePan && (await cropOf()) === cropZoomed,
+  );
+
+  // An uncommitted wheel burst pending when Undo is pressed.
+  await p.keyboard.press(`${mod}+z`); // back to the default crop
+  await settle();
+  await clickTile(0);
+  const base = await snap();
+  const c1 = await centre(0);
+  await p.mouse.move(c1.x, c1.y);
+  await p.mouse.wheel(0, -200);
+  await p.waitForTimeout(40); // well inside the 250 ms burst window
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  check(
+    'undo: a pending wheel burst is committed, then undone (not lost, not stuck)',
+    (await snap()) === base &&
+      !(await p.evaluate(() => (window as any).__app.editor.isDragging())),
+  );
+  check('undo: that burst can be redone', await redoBtn.isEnabled());
+  await p.keyboard.press(`${mod}+Shift+z`);
+  await settle();
+  check(
+    'redo: restores the burst the undo had committed',
+    (await cropOf()) !== cropBefore,
+  );
+  await p.waitForTimeout(400); // the stale burst timer must not commit again
+  check(
+    'undo: no stray commit after the burst timer',
+    (await undoBtn.isEnabled()) && (await redoBtn.isDisabled()),
+  );
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+
+  // A drag left unfinished (the colour picker closed on its colour).
+  const bgBefore = await snap();
+  await p.evaluate(async (module) => {
+    const { setBackground } = await import(/* @vite-ignore */ module);
+    (window as any).__app.editor.drag((s: unknown) =>
+      setBackground(s, '#123456'),
+    );
+  }, STATE_MODULE);
+  check(
+    'undo: store is mid-gesture and Undo is available',
+    await undoBtn.isEnabled(),
+  );
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  check(
+    'undo: an unfinished gesture is committed as its own step then undone',
+    (await snap()) === bgBefore && (await redoBtn.isEnabled()),
+  );
+  await p.keyboard.press(`${mod}+Shift+z`);
+  await settle();
+  check(
+    'redo: the unfinished gesture comes back',
+    JSON.parse(await snap()).canvas.background === '#123456',
+  );
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+
+  // Removal.
+  const beforeRemove = await snap();
+  await clickTile(3);
+  await p.locator('.tile-menu').getByRole('button', { name: 'Remove' }).click();
+  await settle();
+  const afterRemove = await snap();
+  check(
+    'undo: Remove took a photo out',
+    JSON.parse(afterRemove).photos.length === 7 && (await agree()),
+  );
+  await undoBtn.click();
+  await settle();
+  check(
+    'undo: undoes a removal (tray ticks it again)',
+    (await snap()) === beforeRemove && (await agree()),
+  );
+  await redoBtn.click();
+  await settle();
+  check(
+    'redo: redoes a removal',
+    (await snap()) === afterRemove && (await agree()),
+  );
+  await undoBtn.click();
+  await settle();
+
+  // Typing in the width field keeps the browser's own undo.
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__prevented = [];
+    window.addEventListener('keydown', (e) =>
+      w.__prevented.push(e.defaultPrevented),
+    );
+  });
+  const field = p.locator('#size-width');
+  const fieldBefore = await field.inputValue();
+  const stateBeforeTyping = await snap();
+  await field.click();
+  await p.keyboard.type('99');
+  await p.keyboard.press(`${mod}+z`);
+  const prevented = await p.evaluate(() => (window as any).__prevented.at(-1));
+  check(
+    'shortcut: Cmd/Ctrl+Z is left to the browser in the width field',
+    prevented === false &&
+      (await snap()) === stateBeforeTyping &&
+      (await undoBtn.isEnabled()),
+    `field ${fieldBefore} -> ${await field.inputValue()}`,
+  );
+  await p.keyboard.press('Escape');
+  await p.locator('.canvas-area').click({ position: { x: 3, y: 3 } });
+
+  // Remove all, then undo.
+  const beforeAll = await snap();
+  const beforeAllArr = await arr();
+  await p.getByRole('button', { name: 'Remove all' }).click();
+  await settle();
+  check(
+    'undo: Remove all emptied the collage',
+    JSON.parse(await snap()).photos.length === 0,
+  );
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  check(
+    'undo: Remove all undone: every photo ticked in the tray, same arrangement',
+    (await snap()) === beforeAll &&
+      (await arr()) === beforeAllArr &&
+      (await agree()) &&
+      (await p.locator('.thumb[aria-pressed="true"]').count()) === 8,
+  );
+  // A long random sequence, then undo everything and redo everything.
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__hist = [JSON.stringify(w.__app.editor.getState())];
+    w.__app.editor.subscribe((s: unknown, c: any) => {
+      if (!c.transient && !c.restored) w.__hist.push(JSON.stringify(s));
+    });
+  });
+  await p.evaluate(async (module) => {
+    (window as any).__act = await import(/* @vite-ignore */ module);
+  }, STATE_MODULE);
+  let seedRng = 12345;
+  const rnd = (): number => {
+    seedRng = (seedRng * 1664525 + 1013904223) % 4294967296;
+    return seedRng / 4294967296;
+  };
+  const thumbs = p.locator('.thumb');
+  const tryClick = async (name: string): Promise<void> => {
+    const b = p.getByRole('button', { name, exact: true });
+    if (await b.isEnabled()) await b.click();
+  };
+  for (let i = 0; i < 40; i++) {
+    const r = Math.floor(rnd() * 11);
+    const slot = Math.floor(rnd() * 4);
+    if (r === 0) await tryClick('Shuffle');
+    else if (r === 1) await setDial(p, Math.round(rnd() * 100) / 100);
+    else if (r === 2)
+      await p.evaluate((n) => {
+        const a = (window as any).__app;
+        const s = a.editor.getState();
+        const x = n % s.assignment.length;
+        const z = (n + 1) % s.assignment.length;
+        a.editor.dispatch((st: any) =>
+          (window as any).__act.swapTiles(st, x, z),
+        );
+      }, slot);
+    else if (r === 3)
+      await p.evaluate((f) => {
+        const a = (window as any).__app;
+        const id = a.editor.getState().assignment[0];
+        if (id !== undefined)
+          a.editor.dispatch((st: any) =>
+            (window as any).__act.setCrop(st, id, {
+              x: f,
+              y: 1 - f,
+              zoom: 1 + f * 2,
+            }),
+          );
+      }, rnd() * 0.8);
+    else if (r === 4)
+      await p.evaluate(
+        (f) =>
+          (window as any).__app.editor.dispatch((st: any) =>
+            (window as any).__act.setBorder(st, f),
+          ),
+        Math.round(rnd() * 20) / 1000,
+      );
+    else if (r === 5)
+      await p.evaluate(
+        (c) =>
+          (window as any).__app.editor.dispatch((st: any) =>
+            (window as any).__act.setBackground(st, c),
+          ),
+        `#${Math.floor(rnd() * 0xffffff)
+          .toString(16)
+          .padStart(6, '0')}`,
+      );
+    else if (r === 6)
+      await p
+        .locator('.preset')
+        .nth(Math.floor(rnd() * 11))
+        .click();
+    else if (r === 7) await thumbs.nth(Math.floor(rnd() * 8)).click();
+    else if (r === 8) await tryClick('Remove all');
+    else if (r === 9) await tryClick('Add all to collage');
+    else if (
+      (await p.evaluate(
+        () => (window as any).__app.editor.getState().assignment.length,
+      )) > 0
+    ) {
+      await clickTile(0);
+      await p
+        .locator('.tile-menu')
+        .getByRole('button', { name: 'Remove' })
+        .click();
+    }
+    await settle();
+    if (!(await agree())) {
+      check(
+        'undo: tray and editor agree during the random run',
+        false,
+        `step ${String(i)}`,
+      );
+      break;
+    }
+    // Keep a collage to work on.
+    if (JSON.parse(await snap()).photos.length < 3) {
+      await tryClick('Add all to collage');
+      await settle();
+    }
+  }
+  const hist: string[] = await p.evaluate(() => (window as any).__hist);
+  let ok = true;
+  let bad = '';
+  for (let k = hist.length - 1; k >= 1; k--) {
+    await p.keyboard.press(`${mod}+z`);
+    await settle();
+    if ((await snap()) !== hist[k - 1] || !(await agree())) {
+      ok = false;
+      bad = `undo to ${String(k - 1)}`;
+      break;
+    }
+  }
+  check(
+    `undo: ${String(hist.length - 1)} mixed actions undone one by one return to the exact start snapshot, tray and editor agreeing`,
+    ok && hist.length > 25 && (await snap()) === hist[0],
+    bad || `${String(hist.length - 1)} commits`,
+  );
+  ok = true;
+  for (let k = 1; k < hist.length; k++) {
+    await p.keyboard.press(`${mod}+Shift+z`);
+    await settle();
+    if ((await snap()) !== hist[k] || !(await agree())) {
+      ok = false;
+      bad = `redo to ${String(k)}`;
+      break;
+    }
+  }
+  check(
+    'redo: redoing everything returns to the exact end snapshot, tray and editor agreeing',
+    ok && (await snap()) === hist.at(-1) && (await redoBtn.isDisabled()),
+    bad,
+  );
+
+  // A new change clears redo.
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  check('redo: available after an undo', await redoBtn.isEnabled());
+  await p.getByRole('button', { name: 'Shuffle' }).click();
+  await settle();
+  check('redo: cleared by a new change', await redoBtn.isDisabled());
+
+  // Import is a boundary; undo pressed during an import never throws.
+  await p.getByRole('button', { name: 'Shuffle' }).click();
+  await settle();
+  check('undo: history exists before an import', await undoBtn.isEnabled());
+  await p.setInputFiles(
+    'input[type=file]',
+    (await makeSyntheticPhotos(p, 3)).map((f, i) => ({
+      ...f,
+      name: `extra-${String(i)}.jpg`,
+    })),
+  );
+  for (let i = 0; i < 4; i++) {
+    await p.keyboard.press(`${mod}+z`);
+    await p.waitForTimeout(10);
+  }
+  await p.waitForFunction(
+    () => (window as any).__app.store.getTotalCount() === 11,
+  );
+  await settle();
+  check(
+    'undo toast: an import that clears a non-empty history says so',
+    (await p
+      .locator('.notice', {
+        hasText: 'Adding photos cleared the undo history.',
+      })
+      .count()) === 1,
+  );
+  while ((await p.locator('.notice button').count()) > 0) {
+    await p.locator('.notice button').first().click();
+  }
+  check(
+    'undo: an import is a boundary and undo around it left tray and editor agreeing',
+    (await agree()) &&
+      JSON.parse(await snap()).photos.length ===
+        (await p.evaluate(
+          () => (window as any).__app.store.getIncludedIds().length,
+        )),
+  );
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  const total = await p.evaluate(() =>
+    (window as any).__app.store.getTotalCount(),
+  );
+  check(
+    'undo: after an import, undo never reaches back across it',
+    total === 11 && (await agree()) && (await undoBtn.isDisabled()),
+  );
+  // History is empty now: another import must not show the notice.
+  await p.setInputFiles(
+    'input[type=file]',
+    (await makeSyntheticPhotos(p, 1)).map((f) => ({
+      ...f,
+      name: 'more-0.jpg',
+    })),
+  );
+  await p.waitForFunction(
+    () => (window as any).__app.store.getTotalCount() === 12,
+  );
+  await settle();
+  check(
+    'undo toast: an import into an empty history shows no notice',
+    (await p.locator('.notice', { hasText: 'undo history' }).count()) === 0 &&
+      (await agree()),
+  );
+  await p.getByRole('button', { name: 'Shuffle' }).click();
+  await settle();
+  const afterImportShuffle = await snap();
+  await p.keyboard.press(`${mod}+z`);
+  await settle();
+  check(
+    'undo: steps after an import work, keeping the imported photos',
+    (await snap()) !== afterImportShuffle && (await agree()),
+  );
+  await p.keyboard.press(`${mod}+Shift+z`);
+  await settle();
+  check(
+    'undo: no console or page errors',
+    errors.length === 0,
+    errors.join(' | '),
+  );
+
+  if (process.argv.includes('--undo-screenshot')) {
+    mkdirSync(join(root, 'docs', 'screenshots'), { recursive: true });
+    await p.mouse.move(640, 700);
+    await p.screenshot({
+      path: join(root, 'docs', 'screenshots', 'issue-10-undo.png'),
+      clip: { x: 0, y: 0, width: 1280, height: 600 },
+    });
+  }
+  await ctx.close();
+}
+
 const server = await createServer({
   root,
   server: { port: 5199 },
@@ -4334,6 +4994,7 @@ await checkPhysicalSizes(page);
 await checkPixelRatio(browser);
 await checkSelection(browser);
 await checkCrop(browser);
+await checkUndo(browser);
 await checkCropPerformance(browser);
 await checkExport(browser, origin, check, {
   screenshots: process.argv.includes('--export-screenshot')
