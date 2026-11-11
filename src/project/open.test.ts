@@ -118,6 +118,19 @@ describe('openProject', () => {
       );
     });
 
+    it('a project.json one folder down, explaining where it must be', async () => {
+      const archive = makeZip({
+        'My project/project.json': '{}',
+        'My project/photos/a.jpg': 'x',
+      });
+      const message = await failure(archive);
+      expect(message).toMatch(
+        /inside a folder \("My project\/project\.json"\)/,
+      );
+      expect(message).toMatch(/top level/);
+      expect(message).toMatch(/select its contents/);
+    });
+
     it('a zip without project.json', async () => {
       expect(await failure(makeZip({ 'photos/a.jpg': '1x1' }))).toMatch(
         /no project\.json/,
@@ -360,26 +373,32 @@ describe('openProject', () => {
         const archive = await rawProject(() => ({
           data: new Uint8Array([0xff, 0xff, 0xff, 0xff, 0x13, 0x37]),
         }));
-        expect(await failure(archive)).toMatch(/damaged/);
+        expect(await failure(archive)).toMatch(
+          /data of .* is damaged or incomplete/,
+        );
       });
 
       it('a wrong CRC-32', async () => {
         const archive = await rawProject(() => ({ crc: 0x12345678 }));
-        expect(await failure(archive)).toMatch(/damaged.*checksum/);
+        expect(await failure(archive)).toMatch(/does not match its checksum/);
       });
 
       it('a declared length that is too short', async () => {
         const archive = await rawProject((data) => ({
           size: data.length - 1,
         }));
-        expect(await failure(archive)).toMatch(/damaged/);
+        expect(await failure(archive)).toMatch(
+          /data of .* is damaged or incomplete/,
+        );
       });
 
       it('a declared length that is too long', async () => {
         const archive = await rawProject((data) => ({
           size: data.length + 1,
         }));
-        expect(await failure(archive)).toMatch(/damaged/);
+        expect(await failure(archive)).toMatch(
+          /data of .* is damaged or incomplete/,
+        );
       });
 
       it('more compressed photos than the memory bound, naming the limit and a way out', async () => {

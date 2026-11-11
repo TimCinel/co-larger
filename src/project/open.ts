@@ -88,6 +88,16 @@ export async function openProject(
   );
   const manifestEntry = entries.find((entry) => entry.path === PROJECT_FILE);
   if (!manifestEntry) {
+    const nested = entries.find(
+      (entry) =>
+        /^[^/]+\/project\.json$/.test(entry.path) &&
+        !entry.path.startsWith('__MACOSX/'),
+    );
+    if (nested) {
+      throw new ProjectError(
+        `This zip has project.json inside a folder ("${nested.path}"), but it must be at the top level of the zip. Open the folder, select its contents (project.json and photos) and compress those instead of the folder itself.`,
+      );
+    }
     throw new ProjectError(
       'This zip has no project.json, so it is not a co-larger project.',
     );

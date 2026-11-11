@@ -492,11 +492,11 @@ export async function inflateZipEntry(
         } catch {
           throw new BackingFileError();
         }
-        throw DAMAGED(entry.path);
+        throw DAMAGED_DATA(entry.path);
       }
       if (chunk.done) break;
       total += chunk.value.length;
-      if (total > entry.size) throw DAMAGED(entry.path);
+      if (total > entry.size) throw DAMAGED_DATA(entry.path);
       crc.update(chunk.value);
       parts.push(chunk.value as Uint8Array<ArrayBuffer>);
       pending += chunk.value.length;
@@ -509,9 +509,8 @@ export async function inflateZipEntry(
   } finally {
     await reader.cancel().catch(() => undefined);
   }
-  if (total !== entry.size || crc.value !== entry.crc) {
-    throw DAMAGED(entry.path);
-  }
+  if (total !== entry.size) throw DAMAGED_DATA(entry.path);
+  if (crc.value !== entry.crc) throw DAMAGED(entry.path);
   return new Blob(parts, { type });
 }
 
@@ -584,6 +583,12 @@ export class Crc32 {
 export const DAMAGED = (path: string): ProjectError =>
   new ProjectError(
     `This project file is damaged: "${path}" does not match its checksum. Save it again from the original, or use a good copy.`,
+  );
+
+/** A compressed entry that cannot be unpacked to its declared length. */
+export const DAMAGED_DATA = (path: string): ProjectError =>
+  new ProjectError(
+    `This project file is damaged: the data of "${path}" is damaged or incomplete. Save it again from the original, or use a good copy.`,
   );
 
 /**

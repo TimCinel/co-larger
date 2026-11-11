@@ -46,7 +46,8 @@ collage-project.colarger.zip
   a system zip adds are ignored like any other file nobody lists, as long as
   their names are safe and their method is Store or DEFLATE. `project.json`
   must be at the root of the zip (zipping the containing folder from Finder
-  puts it one level down, which is refused as "no project.json").
+  puts it one level down, which is refused with a message saying so and
+  suggesting compressing the folder's contents instead).
 - Archives are limited to 4 GB (no ZIP64), 10 000 entries, 5 000 photos and
   1 GB per photo. `project.json` is limited to 32 MB.
 - Names must be relative paths with no `..`, empty or `.` segments, no
