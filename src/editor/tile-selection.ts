@@ -51,6 +51,11 @@ export interface TileSelectionOptions {
   readonly emptyFocus?: () => HTMLElement | null;
   /** While an import runs, include changes wait for it (see store.ts). */
   readonly imports?: Pick<ImportActivity, 'isBusy'>;
+  /**
+   * An extra sentence for a photo's description (the low-resolution
+   * warning, #15), or null. Spoken with the tile's name when it is focused.
+   */
+  readonly warningFor?: (photoId: string) => string | null;
 }
 
 export interface TileSelection {
@@ -230,6 +235,9 @@ export function createTileSelection(
     } else if (selection.kind === 'swapping' && selection.photoId === photoId) {
       text += ', selected, waiting for a tile to swap with';
     }
+    // After the state, so what comes first stays as it was.
+    const warning = options.warningFor?.(photoId);
+    if (warning) text += `. ${warning.replace(/\.$/, '')}`;
     return text;
   }
 

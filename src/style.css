@@ -1016,3 +1016,166 @@ button.primary:hover:not(:disabled) {
     display: none;
   }
 }
+
+/* Low-resolution warnings (#15): editor chrome over the canvas and tray.
+   Colour is never the only signal: a low tile has an amber triangle with one
+   mark, a very low tile a red octagon with two. */
+:root {
+  --res-low: #ffb020;
+  --res-very-low: #ff5a5f;
+}
+
+.res-layer,
+.res-box,
+.res-badge {
+  pointer-events: none;
+}
+
+.res-layer {
+  position: absolute;
+  /* Its size is set from the canvas's, so the many badges that move with a
+     dial drag are laid out and painted inside it, not against the page. */
+  contain: strict;
+}
+
+.res-layer[hidden],
+.res-box[hidden],
+.res-badge[hidden],
+.res-tooltip[hidden],
+.res-summary[hidden] {
+  display: none;
+}
+
+.res-box {
+  position: absolute;
+  box-sizing: border-box;
+}
+
+.res-badge {
+  position: absolute;
+  /* On the canvas it is moved with a transform (no layout per move). */
+  top: 0;
+  left: 0;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  font:
+    700 11px/1 system-ui,
+    sans-serif;
+  color: #1b1200;
+}
+
+/* The shape is a pseudo-element, so a focus ring is not clipped with it. It
+   is an image rather than a clip-path: badges move with every frame of a
+   dial drag, and a clipped layer costs more to paint than a small image. */
+.res-badge::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M10 0 20 20H0Z' fill='%23ffb020' stroke='%23000' stroke-width='1' stroke-linejoin='round'/%3E%3C/svg%3E")
+    center / 100% 100% no-repeat;
+}
+
+.res-badge[data-level='very-low'] {
+  color: #fff;
+}
+
+.res-badge[data-level='very-low']::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M6 0.5H14L19.5 6V14L14 19.5H6L0.5 14V6Z' fill='%23ff5a5f' stroke='%23000' stroke-width='1'/%3E%3C/svg%3E");
+}
+
+.res-glyph {
+  position: relative;
+  letter-spacing: -0.05em;
+  margin-top: 4px;
+}
+
+.res-badge[data-level='very-low'] .res-glyph {
+  margin-top: 0;
+}
+
+.res-badge:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px #000;
+}
+
+/* Hovering or focusing the summary outlines the affected tiles. */
+.res-layer.highlight .res-box {
+  outline: 3px solid var(--res-low);
+  outline-offset: -3px;
+}
+
+.res-layer.highlight .res-box[data-level='very-low'] {
+  outline-color: var(--res-very-low);
+  outline-style: dashed;
+}
+
+.res-tooltip {
+  /* Hoverable while it is shown (WCAG 1.4.13); hidden, it is not rendered. */
+  pointer-events: auto;
+  position: absolute;
+  z-index: 6;
+  max-width: min(20rem, calc(100% - 12px));
+  padding: 0.4rem 0.6rem;
+  background: var(--panel);
+  border: 1px solid var(--res-low);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 50%);
+  font-size: 0.85rem;
+}
+
+.res-tooltip[data-level='very-low'] {
+  border-color: var(--res-very-low);
+}
+
+.res-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.res-summary {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  text-align: left;
+  font-size: 0.85rem;
+  border-color: var(--res-low);
+}
+
+.res-summary[data-level='very-low'] {
+  border-color: var(--res-very-low);
+}
+
+.res-summary[aria-pressed='true'] {
+  background: #3a3320;
+}
+
+.res-summary-glyph {
+  flex: none;
+  width: 1.1rem;
+  text-align: center;
+  font-weight: 700;
+  color: var(--res-low);
+}
+
+.res-summary[data-level='very-low'] .res-summary-glyph {
+  color: var(--res-very-low);
+}
+
+.res-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* On a tray thumbnail: bottom-left, away from the include tick. */
+.res-badge-tray {
+  top: auto;
+  right: auto;
+  bottom: 4px;
+  left: 4px;
+}

@@ -4,6 +4,19 @@ Versions are calendar-based, `YYYY.MM.N`: the year, the month, and a counter
 that starts at 0 each month. Tags have no `v` prefix. See
 [docs/releasing.md](docs/releasing.md) for how a release is made.
 
+## Unreleased
+
+### Editing
+
+- Low-resolution warnings: a tile whose photo is too small for the size it is
+  exported or printed at gets an amber triangle (low, more than 1.5 times
+  enlarged) or a red octagon (very low, more than 3 times). Hover or focus the
+  badge to see why, including the effective DPI on a canvas with a physical
+  size. The same marker is on the tray thumbnails, and a summary next to
+  Export counts the affected photos and highlights them. "Show resolution
+  warnings" turns it off for the session. Export is never blocked and the
+  warnings are not saved in the project.
+
 ## 2026.11.0 - 2026-11-12
 
 First release. co-larger is a photo collage maker that runs entirely in the

@@ -80,6 +80,20 @@ major difference: tile sizes are configurable, from uniform to a few very large
   from the original photos, not the previews.
 - The export matches the editor preview exactly, apart from resolution.
 
+### Low-resolution warnings
+
+- A tile whose photo is too small for the size it is exported or printed at
+  gets a badge: the upscale factor (export pixels per original pixel, for the
+  region the crop shows) above 1.5 is "low" (amber triangle), above 3 is "very
+  low" (red octagon). On a canvas with a physical size the explanation gives
+  the effective DPI (below 200 and 100 at 300 DPI); on a pixel canvas, the
+  enlargement.
+- The same marker is on the tray thumbnails of photos in the collage, and a
+  one-line summary sits next to Export. Hover or keyboard focus on a badge
+  explains it. Export is never blocked, and the warning never moves photos.
+- "Show resolution warnings" in the settings panel turns it off for the
+  session. It is derived from the editor state and is never exported or saved.
+
 ### Save and load
 
 - Save project: downloads a single zip containing the original photos and a
@@ -92,7 +106,6 @@ major difference: tile sizes are configurable, from uniform to a few very large
 ## v2 (not in v1)
 
 - Lock a photo as a feature, so re-rolls keep it in a large slot.
-- Warn when a photo's resolution is too low for its printed tile size.
 - Drag the dividers between tiles to resize them.
 - Touch and mobile support.
 - Text overlay.

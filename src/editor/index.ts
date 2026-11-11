@@ -46,6 +46,25 @@ export {
   pixelsFromMm,
   type PhysicalSize,
 } from './physical';
+export {
+  createResolutionWarnings,
+  type ResolutionWarnings,
+  type ResolutionWarningsOptions,
+} from './resolution-warnings';
+export {
+  countLevels,
+  describeResolution,
+  levelForFactor,
+  levelLabel,
+  LOW_FACTOR,
+  resolutionWarnings,
+  summaryText,
+  tileResolution,
+  VERY_LOW_FACTOR,
+  type PhotoSize,
+  type ResolutionLevel,
+  type TileResolution,
+} from './resolution';
 export { createLayoutControls, describeVariation } from './controls';
 export {
   coverSource,
