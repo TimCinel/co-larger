@@ -3,6 +3,14 @@
 An open-source photo collage maker that runs entirely in your browser. Photos
 never leave your machine: there is no backend.
 
+**Try it: <https://timcinel.github.io/co-larger/>**
+
+The GitHub repository is a read-only mirror. Issues and pull requests are
+handled on the author's self-hosted Git server, so please do not open them
+here. The site above is published from the mirror to GitHub Pages on every
+change to `master`; the same build is also available as a Docker image (see
+[Run with Docker](#run-with-docker)).
+
 Unlike most collage makers, tile sizes are configurable, from uniform to a few
 very large "feature" photos among many small ones. See [spec.md](spec.md) for
 the planned scope. The app is at an early stage: you can add photos (file picker
