@@ -1,0 +1,75 @@
+# Rebuilds the CI builder image (ci/Dockerfile) when its inputs change.
+# On master it pushes docker.io/timcinel/co-larger-builder:<tag> unless that
+# tag exists (ci/tag.sh keys the tag on the lockfile and ci/Dockerfile), and
+# moves :latest if the commit is still master's tip. On pull requests it only
+# builds, without logging in, to show the image still builds. The paths are
+# the image's inputs and the scripts that build and publish it. CI's "Pick
+# builder image" job finds the new tag on its next run. See ci/README.md.
+name: Builder image
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - package-lock.json
+      - ci/Dockerfile
+      - ci/build.sh
+      - ci/tag.sh
+      - ci/hub-tag.sh
+      - .forgejo/workflows/builder-image.yaml
+  pull_request:
+    paths:
+      - package-lock.json
+      - ci/Dockerfile
+      - ci/build.sh
+      - ci/tag.sh
+      - ci/hub-tag.sh
+      - .forgejo/workflows/builder-image.yaml
+  workflow_dispatch:
+
+# Publishing runs one at a time, queued rather than cancelled. Forgejo's
+# concurrency is best-effort, so ci/build.sh also never overwrites a tag.
+# Pull request builds push nothing and are grouped per branch.
+concurrency:
+  group: builder-image-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
+
+jobs:
+  builder-image:
+    name: Build builder image
+    runs-on: general-ci
+    # Docker CLI and buildx. The job talks to the runner's per-job Docker
+    # daemon through DOCKER_HOST, which the runner sets up.
+    container:
+      image: docker.io/library/docker:29.9.3-cli
+    steps:
+      - name: Install Node (for actions/checkout), bash and curl
+        run: apk add --no-cache nodejs bash curl
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Trust the checkout (git in a container)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Build only (pull requests, other branches)
+        if: github.event_name == 'pull_request' || github.ref != 'refs/heads/master'
+        run: PUSH=0 ci/build.sh
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io
+      - name: Build and push
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        env:
+          # Lets ci/build.sh read master's tip (git ls-remote) with the job
+          # token, without putting the token on a command line.
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
+        run: PUSH=1 ci/build.sh
+      - name: Log out
+        if: always()
+        run: docker logout docker.io || true

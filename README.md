@@ -40,11 +40,13 @@ npm run dev
 | `npm run format`        | Format all files with Prettier.                                     |
 | `npm run typecheck`     | Type check with `tsc`.                                              |
 | `npm run check`         | Run lint, type check, tests and build, as CI does.                  |
+| `npm run test:scripts`  | Test the CI image scripts with stubs (`ci/test-scripts.sh`).        |
 | `npm run check:browser` | Real-browser check of import and editor (local only; needs Chrome). |
 
-CI runs in a builder image with dependencies pre-fetched. After changing
-`package-lock.json`, rebuild it with `ci/build.sh` (see `ci/README.md`) and
-update the tag in `.forgejo/workflows/ci.yaml`.
+CI runs in a builder image with dependencies pre-installed. CI rebuilds and
+publishes it when `package-lock.json` or `ci/Dockerfile` changes on `master`,
+and the check job picks it up on its next run; nothing needs editing by hand
+(see `ci/README.md`).
 
 The layout engine (`src/layout/`) is a pure TypeScript library. To see it
 working, run `npm run dev` and open `/demo/layout.html`: a development-only page
@@ -170,9 +172,9 @@ filesystem, probes on `/healthz`) is in [docs/kubernetes.md](docs/kubernetes.md)
 
 ### Rebuilding and publishing the image
 
-The image is built and pushed from a developer's machine, for both
-architectures at once, with one command (CI does not build images yet; see
-issue #37):
+CI builds and pushes the image, for both architectures at once, when a release
+tag is pushed (`.forgejo/workflows/release-image.yaml`; see
+`docs/releasing.md`). It runs `docker/build.sh`, which also works by hand:
 
 ```sh
 docker login   # Docker Hub, once
@@ -180,9 +182,11 @@ docker/build.sh
 ```
 
 The script refuses to run with uncommitted changes, so every image matches a
-commit, and pushes one manifest list tagged with the short commit and `latest`
-and with the version from `package.json`. `PUSH=0
-docker/build.sh` builds for the local architecture only, without pushing.
+commit, and pushes one manifest list tagged with the version from
+`package.json` and the short commit, and with `latest` for the highest
+release. It publishes only a tagged release and never overwrites an existing
+version (see `docs/releasing.md`). `PUSH=0 docker/build.sh` builds for the
+local architecture only, without pushing.
 
 The top bar shows the `package.json` version and the short commit it was built
 from, beside the title (narrow windows show the version alone; the commit is in

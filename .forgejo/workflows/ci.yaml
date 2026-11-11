@@ -6,15 +6,51 @@ on:
   pull_request:
 
 jobs:
+  # A job's container image is fixed before its steps run, so this small job
+  # picks the builder image for the check job: the one built for this
+  # commit's lockfile and ci/Dockerfile if it exists (the "Builder image"
+  # workflow pushes it on master), else the newest one. Tags are never
+  # re-pushed, so the cluster's pull-through cache cannot serve a stale copy.
+  # See ci/README.md.
+  builder:
+    name: Pick builder image
+    runs-on: general-ci
+    container:
+      # Small image that has git and wget, and is pulled quickly.
+      image: docker.io/library/docker:29.9.3-cli
+    outputs:
+      image: ${{ steps.pick.outputs.image }}
+    steps:
+      - name: Fetch the lockfile and ci/ at this commit
+        env:
+          TOKEN: ${{ github.token }}
+          URL: ${{ github.server_url }}/${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          git init -q .
+          git -c credential.helper='!f() { echo username=x-access-token; echo "password=$TOKEN"; }; f' \
+            fetch -q --depth 1 --no-tags "$URL" "$SHA" &&
+            git checkout -q FETCH_HEAD -- package-lock.json ci ||
+            echo "Could not fetch the commit; falling back to the newest builder image"
+      - name: Pick the image
+        id: pick
+        run: |
+          if [ -x ci/resolve-image.sh ]; then
+            image=$(ci/resolve-image.sh)
+          else
+            image=docker.io/timcinel/co-larger-builder:latest
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
   check:
     name: Lint, type check, test and build
+    needs: builder
     runs-on: general-ci
     container:
       # Docker Hub builder image with dependencies pre-installed (see
-      # ci/README.md). Rebuild with ci/build.sh after changing
-      # package-lock.json, then update this tag. CI still works, only more
-      # slowly, when the image is stale.
-      image: docker.io/timcinel/co-larger-builder:lock-cddf86d9b162-r2
+      # ci/README.md). If it was built for another lockfile, the install
+      # step runs npm ci instead: slower, same result.
+      image: ${{ needs.builder.outputs.image || 'docker.io/timcinel/co-larger-builder:latest' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -26,9 +62,12 @@ jobs:
         # link it (no unpack: that is CPU-bound on this runner); otherwise
         # install normally, using the image's npm cache where it can.
         run: |
+          echo "Builder image: $(cat /opt/deps/image-tag 2>/dev/null || echo 'unknown (built before image-tag)')"
           if [ "$(sha256sum package-lock.json | cut -d' ' -f1)" = "$(cat /opt/deps/lock.sha256)" ]; then
+            echo "Lockfile matches the image: linking its node_modules"
             ln -s /opt/deps/node_modules node_modules
           else
+            echo "Lockfile differs from the image: installing with npm ci"
             npm ci --prefer-offline --no-audit --no-fund
           fi
       - name: Lint
@@ -37,5 +76,7 @@ jobs:
         run: npm run typecheck
       - name: Test
         run: npm test
+      - name: Test image scripts
+        run: npm run test:scripts
       - name: Build
         run: npm run build

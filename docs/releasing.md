@@ -31,8 +31,9 @@ description, because the issue stays open until the tag, release and image
 exist.
 
 Changing `package-lock.json` changes the hash the CI builder image is keyed on
-(see `ci/README.md`), so CI falls back to `npm ci` and is slower than usual for
-that run. Do not rebuild the builder image as part of a release.
+(see `ci/README.md`), so the pull request's CI falls back to `npm ci` and is a
+little slower than usual. After the merge, CI rebuilds and pushes the builder
+image by itself; there is nothing to do by hand.
 
 ## 2. Wait for CI, then merge
 
@@ -73,26 +74,57 @@ fj release create --repo tim/co-larger --tag VERSION \
 
 Check it with `fj release view --repo tim/co-larger VERSION`.
 
-## 5. Build and push the Docker image
+## 5. Check the Docker image CI built
 
-The image is built on a developer's machine, for `linux/amd64` and
-`linux/arm64` at once, and pushed as one multi-arch manifest. The working tree
-must be clean, and `HEAD` must be the tagged commit:
+Pushing the tag in step 3 starts the "Release image" workflow
+(`.forgejo/workflows/release-image.yaml`). It checks the tag is `YYYY.MM.N` and
+equals the `version` in `package.json`, logs in to Docker Hub with the
+`DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` Actions secrets, and runs
+`docker/build.sh` on the tagged commit. That builds `linux/amd64` and
+`linux/arm64` at once and pushes one multi-arch manifest tagged with the
+version and the 12-character commit, and with `latest` when VERSION is the
+highest `YYYY.MM.N` tag in the repository. Labels carry no internal host
+names. No emulation is involved: the `Dockerfile`'s build stage runs on the
+runner's own architecture (its output is static files) and the arm64 image
+only copies those files onto the arm64 nginx base.
+
+Before building, `docker/release-tags.sh` checks that the tag exists on the
+remote and points at the commit being built, and asks Docker Hub about the
+version and commit tags. It refuses to overwrite an existing version tag,
+leaves an existing commit tag alone, and stops if Docker Hub cannot answer
+(network error, rate limit). Releases publish one at a time (the workflow's
+`concurrency` group). Wait for it:
+
+```sh
+forgejo-logs runs | head    # the "Build app image" job for the tag
+```
+
+If it fails, read the log (`forgejo-logs log <run>`), fix the cause in a pull
+request if it is in the repository, and re-run the workflow
+(`forgejo-logs rerun <run>`). Do not move or re-create the tag. A re-run after
+the image was already pushed fails with "already exists"; that is expected,
+check the pushed image instead. If CI cannot build it at all, build it by hand
+as below.
+
+### By hand (fallback)
+
+From a clean working tree at the tagged commit, with Docker Hub login done by
+the owner beforehand (`docker login`; do not script it, and do not put
+credentials in a script, a file or a command line):
 
 ```sh
 git switch --detach VERSION
 docker/build.sh
 ```
 
-`docker/build.sh` tags `timcinel/co-larger` with the 12-character commit,
-`latest` and the `version` from `package.json` (it skips the version tag only
-while that is the placeholder `0.0.0`). The only variable it reads is `PUSH`:
-`PUSH=0` builds for the local architecture only and loads it into the local
-Docker instead of pushing. Labels carry no internal host names.
+`docker/build.sh` applies the same checks and tags as CI, reading the tags
+from the `core` remote (`REMOTE=` names another). `PUSH=0` builds for the local
+architecture only and loads it into the local Docker instead of pushing. To
+rebuild a version that is already on Docker Hub, on purpose (for example a
+broken push), the owner runs it with `ALLOW_RETAG=1`; CI never sets it. If the
+push is refused, stop and ask the owner.
 
-Docker Hub login is done by the owner, beforehand, with `docker login`. Do not
-script it, and do not put credentials in a script, a file or a command line. If
-the push is refused, stop and ask the owner.
+### Check
 
 Check the pushed tags are the same manifest and cover both architectures:
 

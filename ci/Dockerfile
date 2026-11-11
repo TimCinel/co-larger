@@ -1,5 +1,6 @@
 # CI builder image: node plus this project's dependencies, ready to use.
-# See ci/README.md. Build with ci/build.sh (context is the repo root).
+# See ci/README.md. CI builds and pushes it on master when this file or the
+# lockfile changes; ci/build.sh (context is the repo root) does the build.
 FROM docker.io/library/node:24-bookworm@sha256:8fa96264f302f58bbb13aa7339c541547b56975766ce956c875da149452a3e40
 
 # Fixed, world-readable and writable npm cache, independent of the job's user
@@ -21,3 +22,8 @@ RUN --mount=type=bind,source=package.json,target=/src/package.json \
     && cd / && rm -rf /tmp/node-compile-cache /root/.cache \
        /opt/npm-cache/_logs /opt/npm-cache/_update-notifier-last-checked \
     && chmod -R a+rwX /opt/npm-cache /opt/deps
+
+# The image's own tag (ci/tag.sh), so a CI log can say which image it ran in.
+# Last, so the dependency layer above is reused when only this changes.
+ARG BUILDER_TAG=unknown
+RUN echo "$BUILDER_TAG" > /opt/deps/image-tag
