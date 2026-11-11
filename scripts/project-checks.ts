@@ -276,6 +276,7 @@ async function expectError(
   p: Page,
   file: Buffer,
   pattern: RegExp,
+  screenshot?: string,
 ): Promise<{ ok: boolean; message: string }> {
   await openFile(p, {
     name: 'bad.zip',
@@ -290,6 +291,12 @@ async function expectError(
     { timeout: 120_000 },
   );
   const message = await p.locator('.project-dialog-body').innerText();
+  if (screenshot) {
+    await p.screenshot({
+      path: screenshot,
+      clip: { x: 0, y: 0, width: 1280, height: 800 },
+    });
+  }
   await p.getByRole('button', { name: 'OK' }).click();
   await p.waitForFunction(
     () => !document.querySelector<HTMLDialogElement>('.project-dialog')!.open,
@@ -351,7 +358,14 @@ export async function checkProject(
   try {
     const small = await checkSmall(browser, origin, check, tmp, options);
     await checkOpfs(browser, origin, check, small);
-    await checkDeflated(browser, origin, check, tmp, small);
+    await checkDeflated(
+      browser,
+      origin,
+      check,
+      tmp,
+      small,
+      options.screenshots,
+    );
     await checkRoundTrips(browser, origin, check, small.zipPath);
     if (!process.env.SKIP_LARGE)
       await checkLarge(browser, origin, check, tmp, 100);
@@ -1050,6 +1064,7 @@ async function checkDeflated(
   check: Check,
   tmp: string,
   small: SmallResult,
+  screenshots?: string,
 ): Promise<void> {
   console.log('\n  DEFLATE-compressed photos (issue #43)');
   const files = unzipSync(new Uint8Array(readFileSync(small.zipPath)));
@@ -1199,7 +1214,12 @@ async function checkDeflated(
       v.setUint32(at + 24, big, true);
     },
   );
-  const bound = await expectError(e, huge, /512 MB.*without compression/);
+  const bound = await expectError(
+    e,
+    huge,
+    /512 MB.*without compression/,
+    screenshots ? join(screenshots, 'issue-43-memory-bound.png') : undefined,
+  );
   check(
     'more inflated photo data than the memory bound is refused, naming the limit',
     bound.ok,
