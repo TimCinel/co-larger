@@ -19,10 +19,10 @@
  *                                                  # (prints numbers only)
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readdirSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium, firefox, type Page } from 'playwright-core';
+import { chromium, firefox, type Browser, type Page } from 'playwright-core';
 import { createServer } from 'vite';
 import { checkA2, checkExport, exportRealFolder } from './export-checks.ts';
 import { checkProject, projectRealFolder } from './project-checks.ts';
@@ -4907,6 +4907,76 @@ async function checkUndo(
   await ctx.close();
 }
 
+/** The version in the page (issue #44): meta tags, the link, no layout shift. */
+async function checkVersion(browser: Browser): Promise<void> {
+  const expected = (
+    JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+      version: string;
+    }
+  ).version;
+  for (const [width, height] of [
+    [900, 620],
+    [1440, 900],
+  ] as const) {
+    const ctx = await browser.newContext({ viewport: { width, height } });
+    const p = await ctx.newPage();
+    await p.goto(origin);
+    await p.waitForSelector('.tray');
+    const info = await p.evaluate(() => {
+      const meta = (name: string): string =>
+        document.querySelector<HTMLMetaElement>(`meta[name=${name}]`)
+          ?.content ?? '';
+      const link = document.querySelector<HTMLAnchorElement>('a.version')!;
+      const box = (sel: string): string => {
+        const r = document.querySelector(sel)!.getBoundingClientRect();
+        return [r.x, r.y, r.width, r.height].map(Math.round).join(',');
+      };
+      const boxes = (): string =>
+        ['.collage-canvas', '.tray', '.sidebar'].map(box).join(' ');
+      const before = boxes();
+      const text = link.textContent;
+      link.textContent += ' with a much longer suffix';
+      return {
+        version: meta('version'),
+        commit: meta('commit'),
+        text,
+        href: link.href,
+        target: link.target,
+        rel: link.rel,
+        stable: before === boxes(),
+        within:
+          link.getBoundingClientRect().right <=
+          document.querySelector('.sidebar')!.getBoundingClientRect().right,
+      };
+    });
+    const at = `${String(width)} x ${String(height)}`;
+    check(
+      `the page reports the package.json version (${at})`,
+      info.version === expected,
+      `${info.version} / ${expected}`,
+    );
+    check(
+      `the UI shows the version, commit and a dev marker (${at})`,
+      info.text.startsWith(
+        `co-larger ${expected}${info.commit === '' ? '' : ` (${info.commit})`} dev`,
+      ),
+      info.text,
+    );
+    check(
+      `the version links to the public repository in a new tab (${at})`,
+      info.href === 'https://github.com/TimCinel/co-larger' &&
+        info.target === '_blank' &&
+        info.rel === 'noopener noreferrer',
+      `${info.href} ${info.target} ${info.rel}`,
+    );
+    check(
+      `a longer version text does not move the canvas, tray or panel (${at})`,
+      info.stable && info.within,
+    );
+    await ctx.close();
+  }
+}
+
 const server = await createServer({
   root,
   server: { port: 5199 },
@@ -5381,6 +5451,7 @@ await checkPixelRatio(browser);
 await checkSelection(browser);
 await checkCrop(browser);
 await checkUndo(browser);
+await checkVersion(browser);
 await checkImportOnce(browser);
 await checkDeferredSelection(browser);
 await checkCropPerformance(browser);

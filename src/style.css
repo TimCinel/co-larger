@@ -386,15 +386,22 @@ button.primary:hover:not(:disabled) {
 }
 
 /* Canvas settings: a column beside the collage and the tray. */
-.settings {
+.sidebar {
   /* After the stage in the page, but before it in the tab order. */
   order: 2;
   flex: none;
   width: 15.5rem;
-  overflow-y: auto;
-  padding: 0.25rem 1rem 1rem;
+  display: flex;
+  flex-direction: column;
   background: var(--panel);
   border-left: 1px solid var(--panel-border);
+}
+
+.settings {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.25rem 1rem 1rem;
   display: flex;
   flex-direction: column;
 }
@@ -972,17 +979,21 @@ button.primary:hover:not(:disabled) {
   margin-top: 0.75rem;
 }
 
-/* The build's version, at the foot of the settings panel; it links to the
-   public repository. Small and muted so it stays out of the way. */
+/* The build's version, under the settings panel; it links to the public
+   repository. Small and muted so it stays out of the way. */
 .version {
-  margin-top: 0.75rem;
+  flex: none;
+  padding: 0.35rem 1rem;
+  border-top: 1px solid var(--panel-border);
   color: var(--muted);
   font-size: 0.75rem;
   font-variant-numeric: tabular-nums;
   text-align: center;
+  text-decoration: none;
   overflow-wrap: anywhere;
 }
 
 .version:hover {
   color: var(--text);
+  text-decoration: underline;
 }

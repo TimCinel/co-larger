@@ -228,8 +228,12 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
       createExportControls({ doc, editor, photos: store, deps: browserDeps })
         .element,
     );
-  settings.append(createVersionLink(doc, APP_NAME));
-  workspace.append(settings, stage);
+  // The version sits under the panel, outside its scroll area, so it is
+  // always visible and never moves the collage or the tray.
+  const sidebar = doc.createElement('div');
+  sidebar.className = 'sidebar';
+  sidebar.append(settings, createVersionLink(doc, APP_NAME));
+  workspace.append(sidebar, stage);
   shell.append(header, workspace);
   root.replaceChildren(shell);
 
