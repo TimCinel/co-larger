@@ -5377,14 +5377,19 @@ async function checkVersion(browser: Browser): Promise<void> {
   ).version;
   for (const [width, height] of [
     [900, 620],
-    [1101, 700],
+    [1201, 700],
     [1440, 900],
   ] as const) {
     const ctx = await browser.newContext({ viewport: { width, height } });
     const p = await ctx.newPage();
     await p.goto(origin);
     await p.waitForSelector('.tray');
-    await p.waitForSelector('.collage-canvas');
+    await p.setInputFiles(
+      'input[type=file]:not(.project-input)',
+      await makeSyntheticPhotos(p, 6),
+    );
+    await p.waitForSelector('.collage-canvas', { state: 'visible' });
+    await waitDrawn(p);
     const info = await p.evaluate(() => {
       const meta = (name: string): string =>
         document.querySelector<HTMLMetaElement>(`meta[name=${name}]`)
