@@ -143,6 +143,7 @@ prefix and redirect `/collage` to `/collage/` (the trailing slash matters,
 because relative URLs resolve against it). With nginx:
 
 ```nginx
+absolute_redirect off;               # keep redirects relative
 location = /collage { return 301 /collage/; }
 location /collage/ {
     proxy_pass http://co-larger:8080/;   # trailing slash strips /collage/
