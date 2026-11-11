@@ -1,6 +1,6 @@
 # TEMPORARY (issue #37 review): does this Forgejo queue runs in the same
 # concurrency group with cancel-in-progress: false? Push twice quickly and
-# compare start and end times. Removed before merge. Attempt 1
+# compare start and end times. Removed before merge. Attempt 2
 name: Throwaway concurrency probe
 
 on:
