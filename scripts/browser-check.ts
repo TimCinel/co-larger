@@ -3896,6 +3896,238 @@ async function checkCropPerformance(
   await ctx.close();
 }
 
+/** Instruments the page: every committed editor change, and each photo added. */
+function watchImport(p: Page): Promise<void> {
+  return p.evaluate(() => {
+    const w = window as any;
+    const { editor, store } = w.__app;
+    const base = editor.getState();
+    w.__imp = {
+      base,
+      commits: 0,
+      commitPhotos: [] as number[],
+      adds: 0,
+      changedMidImport: false,
+      progressSeen: 0,
+      samples: 0,
+    };
+    editor.subscribe((state: any, change: any) => {
+      if (change.transient) return;
+      w.__imp.commits++;
+      w.__imp.commitPhotos.push(state.photos.length);
+    });
+    store.subscribe((c: any) => {
+      if (c.kind !== 'added') return;
+      w.__imp.adds += c.ids.length;
+      if (editor.getState() !== w.__imp.base) w.__imp.changedMidImport = true;
+    });
+    const bar = document.querySelector<HTMLElement>('.progress')!;
+    const tick = () => {
+      if (!bar.hidden) w.__imp.progressSeen++;
+      w.__imp.samples++;
+      w.__imp.raf = requestAnimationFrame(tick);
+    };
+    tick();
+  });
+}
+
+/** Imports lay the collage out once, when the whole batch is in (issue #35). */
+async function checkImportOnce(
+  browser: import('playwright-core').Browser,
+): Promise<void> {
+  const ctx = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+  });
+  const p = await ctx.newPage();
+  const errors: string[] = [];
+  p.on('pageerror', (e) => errors.push(e.message));
+  await p.goto(origin);
+  await p.waitForSelector('.tray');
+  const named = (files: SyntheticPhoto[], prefix: string): SyntheticPhoto[] =>
+    files.map((f) => ({ ...f, name: `${prefix}-${f.name}` }));
+  const state = (): Promise<any> => p.evaluate(() => (window as any).__imp);
+
+  // 1. Fifty photos into an empty app: one commit, at the end.
+  await watchImport(p);
+  await p.setInputFiles(
+    'input[type=file]',
+    named(await makeSyntheticPhotos(p, 50, 0.5), 'a'),
+  );
+  await p.waitForFunction(
+    () => (window as any).__app.store.getPhotos().length === 50,
+    undefined,
+    { timeout: 60000 },
+  );
+  await waitDrawn(p);
+  let s = await state();
+  check(
+    '#35: 50 photos into an empty app give exactly one committed editor change',
+    s.commits === 1 && s.commitPhotos[0] === 50,
+    JSON.stringify(s.commitPhotos),
+  );
+  check(
+    '#35: the editor never changed while the photos were arriving',
+    s.adds === 50 && !s.changedMidImport,
+  );
+  check(
+    '#35: the progress indicator was visible during the import',
+    s.progressSeen > 0,
+    `${String(s.progressSeen)} of ${String(s.samples)} frames`,
+  );
+
+  // 2. Twenty more into a showing collage: nothing moves until the end.
+  const before = await canvasPixels(p);
+  const stateBefore = await p.evaluate(() => {
+    const e = (window as any).__app.editor.getState();
+    return JSON.stringify([e.seed, e.assignment, e.plan]);
+  });
+  await p.evaluate(() => {
+    const w = window as any;
+    cancelAnimationFrame(w.__imp.raf);
+    w.__samples = [];
+    w.__baseState = w.__app.editor.getState();
+    w.__baseCommits = w.__imp.commits;
+    const canvas =
+      document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    const sig = () => {
+      const d = canvas
+        .getContext('2d')!
+        .getImageData(0, 0, canvas.width, canvas.height).data;
+      let h = 0;
+      for (let i = 0; i < d.length; i += 97) h = (h * 31 + d[i]!) | 0;
+      return h;
+    };
+    w.__sig0 = sig();
+    w.__dim0 = `${String(canvas.width)}x${String(canvas.height)}`;
+    const bar = document.querySelector<HTMLElement>('.progress')!;
+    const tick = () => {
+      w.__samples.push({
+        photos: w.__app.store.getPhotos().length,
+        same: w.__app.editor.getState() === w.__baseState,
+        // The tray's scrollbar can narrow the canvas by a few pixels as it
+        // fills; that redraws the same arrangement at another size.
+        sig:
+          `${String(canvas.width)}x${String(canvas.height)}` !== w.__dim0 ||
+          sig() === w.__sig0,
+        drawnSame: w.__app.view.lastRender()?.state === w.__baseState,
+        busy: !bar.hidden,
+        dim: `${String(canvas.width)}x${String(canvas.height)}`,
+      });
+      w.__imp.raf = requestAnimationFrame(tick);
+    };
+    tick();
+  });
+  await p.setInputFiles(
+    'input[type=file]',
+    named(await makeSyntheticPhotos(p, 20, 0.5), 'b'),
+  );
+  await p.waitForFunction(
+    () => (window as any).__app.store.getPhotos().length === 70,
+    undefined,
+    { timeout: 60000 },
+  );
+  await waitDrawn(p);
+  const mid = await p.evaluate(() => {
+    const w = window as any;
+    const during = w.__samples.filter(
+      (x: any) => x.busy && x.photos < 70 && x.photos > 50,
+    );
+    return {
+      during: during.length,
+      allSame: during.every((x: any) => x.same && x.drawnSame && x.sig),
+      dims: [...new Set(w.__samples.map((x: any) => x.dim))].join(' '),
+      stateSame: during.every((x: any) => x.same && x.drawnSame),
+      pixelsSame: during.every((x: any) => x.sig),
+      commits: w.__imp.commits - w.__baseCommits,
+      progress: w.__samples.filter((x: any) => x.busy).length,
+      photos: w.__app.editor.getState().photos.length,
+    };
+  });
+  s = await state();
+  check(
+    '#35: 20 more photos leave the showing collage (state and canvas pixels) unchanged until the batch completes',
+    mid.during > 0 && mid.allSame,
+    `${String(mid.during)} frames sampled mid-import; state ${String(mid.stateSame)}, pixels ${String(mid.pixelsSame)}, canvas ${String(mid.dims)}`,
+  );
+  check(
+    '#35: then the collage re-rolls exactly once, with all 70',
+    mid.commits === 1 && mid.photos === 70 && s.commitPhotos.at(-1) === 70,
+    `commits ${String(mid.commits)}`,
+  );
+  const stateAfter = await p.evaluate(() => {
+    const e = (window as any).__app.editor.getState();
+    return JSON.stringify([e.seed, e.assignment, e.plan]);
+  });
+  check(
+    '#35: the final arrangement differs from the one before the import',
+    stateAfter !== stateBefore &&
+      (await canvasPixels(p)).join() !== before.join(),
+  );
+  check(
+    '#35: the tray count shows every photo selected during and after',
+    (await p.evaluate(() => (window as any).__app.store.getSelectedCount())) ===
+      70,
+  );
+
+  // 3. Some files that cannot be decoded: still one layout, at the end.
+  const good = named(await makeSyntheticPhotos(p, 6, 0.5), 'c');
+  const bad = [1, 2, 3].map((n) => ({
+    name: `broken-${String(n)}.jpg`,
+    mimeType: 'image/jpeg',
+    buffer: Buffer.from(`not an image ${String(n)}`),
+  }));
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__baseCommits = w.__imp.commits;
+    w.__baseCount = w.__app.editor.getState().photos.length;
+  });
+  await p.setInputFiles('input[type=file]', [
+    ...bad.slice(0, 1),
+    ...good,
+    ...bad.slice(1),
+  ]);
+  await p.waitForFunction(
+    () => (window as any).__app.store.getPhotos().length === 76,
+    undefined,
+    { timeout: 60000 },
+  );
+  await waitDrawn(p);
+  const partial = await p.evaluate(() => {
+    const w = window as any;
+    return {
+      commits: w.__imp.commits - w.__baseCommits,
+      photos: w.__app.editor.getState().photos.length,
+    };
+  });
+  check(
+    '#35: an import with undecodable files re-rolls once, with what was added',
+    partial.commits === 1 && partial.photos === 76,
+    JSON.stringify(partial),
+  );
+
+  // 4. Every file fails: no re-roll at all.
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__baseCommits = w.__imp.commits;
+  });
+  await p.setInputFiles(
+    'input[type=file]',
+    bad.map((f) => ({ ...f, name: `again-${f.name}` })),
+  );
+  await p.waitForSelector('.notice');
+  await p.waitForFunction(
+    () => document.querySelector<HTMLElement>('.progress')!.hidden,
+  );
+  await p.waitForTimeout(300);
+  check(
+    '#35: an import where every file fails causes no re-roll',
+    (await state()).commits - 0 ===
+      (await p.evaluate(() => (window as any).__baseCommits)),
+  );
+  check('#35: no page errors', errors.length === 0, errors.join(' | '));
+  await ctx.close();
+}
+
 /** The collage canvas's pixels. */
 function canvasPixels(p: Page): Promise<number[]> {
   return p.evaluate(() => {
@@ -4995,6 +5227,7 @@ await checkPixelRatio(browser);
 await checkSelection(browser);
 await checkCrop(browser);
 await checkUndo(browser);
+await checkImportOnce(browser);
 await checkCropPerformance(browser);
 await checkExport(browser, origin, check, {
   screenshots: process.argv.includes('--export-screenshot')
@@ -5128,6 +5361,13 @@ if (realDir) {
     });
   }, 250);
   const baseline = rss();
+  await real.evaluate(() => {
+    const w = window as any;
+    w.__realCommits = 0;
+    w.__app.editor.subscribe((_: unknown, change: any) => {
+      if (!change.transient) w.__realCommits++;
+    });
+  });
   const t0 = Date.now();
   await real.setInputFiles('input[type=file]', files);
   await real.waitForFunction(
@@ -5142,6 +5382,10 @@ if (realDir) {
   );
   const seconds = (Date.now() - t0) / 1000;
   clearInterval(sampler);
+  await real.waitForTimeout(500);
+  console.log(
+    `  committed editor changes during the import: ${String(await real.evaluate(() => (window as any).__realCommits))}`,
+  );
   const stats = await real.evaluate(() => {
     const w = window as unknown as { __gaps: number[]; __long: number[] };
     const gaps = [...w.__gaps].sort((a, b) => a - b);

@@ -8,7 +8,7 @@
 import type { PhotoStore } from '../photos';
 import type { FrameScheduler } from './frames';
 import type { TileSelection } from './tile-selection';
-import type { EditorStore } from './store';
+import type { EditorStore, ImportActivity } from './store';
 import { UndoManager } from './undo-manager';
 
 export interface UndoControlsOptions {
@@ -23,6 +23,8 @@ export interface UndoControlsOptions {
   readonly notify: (message: string) => void;
   /** The collage canvas: a press on it may start a crop pan. */
   readonly canvas: HTMLElement;
+  /** Undo and redo wait while an import runs. */
+  readonly imports?: ImportActivity;
 }
 
 export interface UndoControls {
@@ -76,6 +78,7 @@ export function createUndoControls(options: UndoControlsOptions): UndoControls {
   const manager = new UndoManager({
     editor,
     photos: options.photos,
+    imports: options.imports,
     isGestureHeld: () => held.size > 0,
     onHistoryCleared: options.notify,
     prepare: () => {

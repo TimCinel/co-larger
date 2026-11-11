@@ -54,16 +54,17 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   const doc = root.ownerDocument;
   const store = options.store ?? new PhotoStore();
   const frames = new FrameScheduler(doc.defaultView as Window);
-  // Tray changes reach the editor once per frame, so an import of many
-  // photos re-rolls once per frame rather than once per photo.
+  const importer = new PhotoImporter(store, {
+    decode: options.decode ?? decodePhoto,
+  });
+  // Tray changes reach the editor once per frame, and not at all while an
+  // import runs: the collage is laid out once, when the import finishes.
   const editor = new EditorStore({
     photoStore: store,
+    imports: importer,
     scheduleSync: (sync) => {
       frames.request('photos', sync);
     },
-  });
-  const importer = new PhotoImporter(store, {
-    decode: options.decode ?? decodePhoto,
   });
 
   const shell = doc.createElement('div');
@@ -146,6 +147,7 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     doc,
     editor,
     photos: store,
+    imports: importer,
     frames,
     selection,
     canvas: view.canvas,
