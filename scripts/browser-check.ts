@@ -2613,9 +2613,31 @@ async function checkSelection(
     { width: 900, height: 620 },
   ]) {
     await p.setViewportSize(size);
+    // The canvas is re-fitted by a ResizeObserver after the resize: wait
+    // until its box has stopped changing, or tile centres are read from the
+    // old layout and the clicks land elsewhere.
+    await p.waitForFunction(
+      () => {
+        const w = window as any;
+        const r = document
+          .querySelector<HTMLCanvasElement>('.collage-canvas')!
+          .getBoundingClientRect();
+        const key = `${String(r.x)},${String(r.y)},${String(r.width)},${String(r.height)}`;
+        if (w.__fitKey !== key) {
+          w.__fitKey = key;
+          w.__fitFrames = 0;
+        } else {
+          w.__fitFrames++;
+        }
+        return w.__fitFrames >= 8;
+      },
+      undefined,
+      { polling: 'raf' },
+    );
     await waitDrawn(p);
     let inside = true;
     let tried = 0;
+    const problems: string[] = [];
     for (let slot = 0; slot < 6; slot++) {
       // A narrow window can push part of the collage off screen: check the
       // tiles that are on screen, however many the arrangement leaves.
@@ -2632,13 +2654,16 @@ async function checkSelection(
         box.y + box.height > size.height
       ) {
         inside = false;
+        problems.push(
+          `slot ${String(slot)} at ${JSON.stringify(c)}: menu ${JSON.stringify(box)}`,
+        );
       }
     }
     await outsideClick();
     check(
       `the menu stays inside the viewport for every tile at ${String(size.width)} x ${String(size.height)}`,
       inside && tried >= 1,
-      `${String(tried)} tiles tried`,
+      `${String(tried)} tiles tried${problems.length ? `; ${problems.join('; ')}` : ''}`,
     );
   }
   await p.setViewportSize({ width: 1280, height: 800 });
