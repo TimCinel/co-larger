@@ -44,6 +44,12 @@ const INSET = 4;
 export interface ResolutionWarnings {
   /** The summary and the checkbox; the export section puts it by Download. */
   readonly element: HTMLElement;
+  /**
+   * The badge layer and the tooltip, for the app to append to the collage
+   * element after the tile selection's own overlays, so that Tab from the
+   * canvas reaches the tile menu before the badges.
+   */
+  readonly overlay: readonly HTMLElement[];
   isEnabled(): boolean;
   setEnabled(enabled: boolean): void;
   /** The warning for a photo in the collage, or undefined (none, or turned off). */
@@ -105,7 +111,6 @@ export function createResolutionWarnings(
   tooltip.setAttribute('role', 'tooltip');
   tooltip.id = 'res-tooltip';
   tooltip.hidden = true;
-  view.element.append(layer, tooltip);
 
   const pool: Marker[] = [];
   /** The marker whose tooltip is showing. */
@@ -512,6 +517,7 @@ export function createResolutionWarnings(
 
   return {
     element,
+    overlay: [layer, tooltip],
     isEnabled: () => enabled,
     setEnabled,
     warningFor: (photoId) => (enabled ? byPhoto.get(photoId) : undefined),

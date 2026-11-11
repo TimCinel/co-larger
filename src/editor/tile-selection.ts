@@ -230,13 +230,14 @@ export function createTileSelection(
     const position = slotOf(photoId) + 1;
     const total = last?.state.assignment.length ?? 0;
     let text = `${name}, tile ${String(position)} of ${String(total)}`;
-    const warning = options.warningFor?.(photoId);
-    if (warning) text += `. ${warning.replace(/\.$/, '')}`;
     if (selection.kind === 'selected' && selection.photoId === photoId) {
       text += ', selected';
     } else if (selection.kind === 'swapping' && selection.photoId === photoId) {
       text += ', selected, waiting for a tile to swap with';
     }
+    // After the state, so what comes first stays as it was.
+    const warning = options.warningFor?.(photoId);
+    if (warning) text += `. ${warning.replace(/\.$/, '')}`;
     return text;
   }
 

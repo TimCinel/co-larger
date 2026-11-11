@@ -86,6 +86,7 @@ export function createTray(
     readonly url: string;
     /** The marker for a low-resolution warning, made when first needed. */
     mark: HTMLElement | null;
+    said: HTMLElement | null;
     level: ResolutionLevel | undefined;
   }
   const items = new Map<string, Item>();
@@ -131,7 +132,14 @@ export function createTray(
     button.addEventListener('focus', () => {
       if (activeId !== photo.id) setActive(photo.id);
     });
-    const item: Item = { li, button, url, mark: null, level: undefined };
+    const item: Item = {
+      li,
+      button,
+      url,
+      mark: null,
+      said: null,
+      level: undefined,
+    };
     items.set(photo.id, item);
     // The explanation is worked out when asked for: its numbers change
     // while the dial is dragged, and no thumbnail should pay for that.
@@ -156,7 +164,7 @@ export function createTray(
       if (level === undefined) {
         item.mark?.remove();
         item.mark = null;
-        item.button.setAttribute('aria-label', name);
+        item.button.removeAttribute('aria-describedby');
         item.button.title = name;
         continue;
       }
@@ -167,16 +175,24 @@ export function createTray(
         const glyph = doc.createElement('span');
         glyph.className = 'res-glyph';
         mark.append(glyph);
+        // Said after the photo's name (which stays the button's name): the
+        // button is described by this text, not renamed by it.
+        const said = doc.createElement('span');
+        said.className = 'sr-only';
+        said.id = `res-said-${id}`;
+        mark.append(said);
         item.mark = mark;
+        item.said = said;
         item.button.append(mark);
+        item.button.setAttribute('aria-describedby', said.id);
       }
       item.mark.dataset.level = level;
       const glyph = item.mark.firstElementChild;
       if (glyph) glyph.textContent = level === 'very-low' ? '!!' : '!';
-      item.button.setAttribute(
-        'aria-label',
-        `${name}, ${level === 'very-low' ? 'very low' : 'low'} resolution`,
-      );
+      if (item.said) {
+        item.said.textContent =
+          level === 'very-low' ? 'Very low resolution' : 'Low resolution';
+      }
     }
   }
 

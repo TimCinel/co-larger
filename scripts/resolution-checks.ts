@@ -309,6 +309,25 @@ export async function checkResolution(
       marks['r2-300x200.jpg'] === 'very-low',
     JSON.stringify(marks),
   );
+  check(
+    'resolution: a flagged thumbnail keeps the photo name as its name and is described as low resolution',
+    await p.evaluate(() => {
+      const btn = document.querySelector<HTMLElement>(
+        '.thumb[aria-label="r2-300x200.jpg"]',
+      );
+      const said = document.getElementById(
+        btn?.getAttribute('aria-describedby') ?? '',
+      );
+      const clean = document.querySelector<HTMLElement>(
+        '.thumb[aria-label="r0-6000x4000.jpg"]',
+      );
+      return (
+        said?.textContent === 'Very low resolution' &&
+        !!clean &&
+        !clean.hasAttribute('aria-describedby')
+      );
+    }),
+  );
   const text = await summary(p);
   check(
     'resolution: the summary near Export counts them',
@@ -447,30 +466,29 @@ export async function checkResolution(
   // canvas) includes the warning.
   await p.locator('.collage-canvas').focus();
   const described: string[] = [];
-  for (let i = 0; i < 6; i++) {
-    await p.keyboard.press(
-      [
-        'ArrowUp',
-        'ArrowLeft',
-        'ArrowUp',
-        'ArrowLeft',
-        'ArrowDown',
-        'ArrowRight',
-      ][i]!,
+  const directions = ['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'];
+  for (let i = 0; i < 16; i++) {
+    const label = await p.evaluate(
+      () =>
+        document.querySelector('.collage-canvas')!.getAttribute('aria-label') ??
+        '',
     );
-    described.push(
-      await p.evaluate(
-        () =>
-          document
-            .querySelector('.collage-canvas')!
-            .getAttribute('aria-label') ?? '',
-      ),
-    );
+    described.push(label);
+    if (
+      described.some((d) => d.includes('r0-6000x4000.jpg')) &&
+      described.some((d) => d.includes('resolution: this tile uses'))
+    ) {
+      break;
+    }
+    await p.keyboard.press(directions[i % 4]!);
   }
   check(
     'resolution: the canvas description of a flagged tile includes the warning, an unflagged one does not',
     described.some((d) => d.includes('resolution: this tile uses')) &&
-      described.some((d) => !d.includes('resolution: this tile uses')),
+      described.some((d) => d.includes('r0-6000x4000.jpg')) &&
+      described
+        .filter((d) => d.includes('r0-6000x4000.jpg'))
+        .every((d) => !d.includes('resolution')),
     described.join(' | '),
   );
 

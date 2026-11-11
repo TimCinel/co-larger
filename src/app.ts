@@ -170,6 +170,9 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     emptyFocus: () => addButton,
     warningFor: (id) => resolution.describe(id),
   });
+  // After the selection's menu in the DOM: Tab from the canvas reaches the
+  // menu first, then the badges.
+  view.element.append(...resolution.overlay);
   // Opening a project resets the undo history on purpose: no toast for it.
   let installing = false;
   const undo = createUndoControls({
