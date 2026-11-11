@@ -13,12 +13,13 @@ change to `master`; the same build is also available as a Docker image (see
 
 Unlike most collage makers, tile sizes are configurable, from uniform to a few
 very large "feature" photos among many small ones. See [spec.md](spec.md) for
-the planned scope. The app is at an early stage: you can add photos (file picker
-or drag and drop), choose which are included, see them as a mosaic with a
-size-variation dial and Shuffle, and set the canvas: a ratio preset, a custom
-size in pixels or in millimetres and DPI (with A4, A3 and A2 presets), the
-border and the background colour. Swap, crop, undo, export and save are not
-built yet.
+the scope and [CHANGELOG.md](CHANGELOG.md) for what each release contains. You
+can add photos (file picker or drag and drop), choose which are included, see
+them as a mosaic with a size-variation dial and Shuffle, set the canvas (ratio,
+pixels or millimetres and DPI with A4, A3 and A2 presets, border, background),
+swap, remove and crop tiles, undo and redo, export PNG or JPEG at full
+resolution, and save and open a project as a zip. It works in desktop browsers
+only; there is no touch support yet.
 
 ## Development
 
@@ -134,9 +135,9 @@ docker run --rm -p 8080:8080 timcinel/co-larger
 # open http://localhost:8080/
 ```
 
-Tags: `latest`, and the 12-character git commit (`timcinel/co-larger:<commit>`)
-that the image was built from. Pin the commit tag, or the digest, in
-deployments.
+Tags: `latest`, the release version (`timcinel/co-larger:2026.11.0`) and the
+12-character git commit (`timcinel/co-larger:<commit>`) that the image was built
+from. Pin a version or commit tag, or the digest, in deployments.
 
 - **Port:** 8080 (the container runs as uid 101, so it cannot bind port 80).
 - **Health:** `GET /healthz` returns `200 ok`. Use it for Docker and Kubernetes
@@ -180,7 +181,7 @@ docker/build.sh
 
 The script refuses to run with uncommitted changes, so every image matches a
 commit, and pushes one manifest list tagged with the short commit and `latest`
-(and with the version from `package.json` once it is not `0.0.0`). `PUSH=0
+and with the version from `package.json`. `PUSH=0
 docker/build.sh` builds for the local architecture only, without pushing.
 
 The top bar shows the `package.json` version and the short commit it was built
@@ -202,6 +203,12 @@ docker run -d --rm --name co-larger -p 8080:8080 timcinel/co-larger
 node scripts/docker-check.ts http://localhost:8080/
 docker stop co-larger
 ```
+
+## Releases
+
+Versions are calendar-based (`YYYY.MM.N`). [CHANGELOG.md](CHANGELOG.md) lists
+what each release contains, and [docs/releasing.md](docs/releasing.md) has the
+steps to cut one.
 
 ## Licence
 
