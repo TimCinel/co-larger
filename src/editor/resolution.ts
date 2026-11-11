@@ -126,9 +126,43 @@ function pixels(width: number, height: number): string {
   return `${String(Math.round(width))} × ${String(Math.round(height))} px`;
 }
 
-/** One decimal, no trailing ".0": `2.2`, `3`. */
-function oneDecimal(value: number): string {
-  return String(Math.round(value * 10) / 10);
+/**
+ * A factor for people, never contradicting its level. One decimal (`2.2×`,
+ * `3×`), except near a threshold, where rounding could make a flagged tile
+ * read as the threshold itself: just over the threshold it says "just over
+ * 1.5×" and within 0.05 of it, two decimals. Exactly at a threshold (which
+ * is not flagged) it is "1.5×" or "3×".
+ */
+export function formatFactor(factor: number): string {
+  for (const edge of [LOW_FACTOR, VERY_LOW_FACTOR]) {
+    const over = factor - edge;
+    if (Math.abs(over) >= 0.05) continue;
+    if (Math.abs(over) <= edge * EPSILON) return `${String(edge)}×`;
+    if (over < 0) return `${factor.toFixed(2)}×`;
+    if (over < 0.005) return `just over ${String(edge)}×`;
+    return `${factor.toFixed(2)}×`;
+  }
+  return `${String(Math.round(factor * 10) / 10)}×`;
+}
+
+/**
+ * The effective DPI for people: "about 138 DPI", or, when rounding would
+ * land on the DPI of the threshold the tile is past (200 and 100 at a 300
+ * DPI canvas), "just under 200 DPI", so it never reads as good enough.
+ */
+export function formatDpi(
+  effectiveDpi: number,
+  canvasDpi: number,
+  level: ResolutionLevel,
+): string {
+  const rounded = Math.round(effectiveDpi);
+  if (level !== 'ok') {
+    const edge = Math.round(
+      canvasDpi / (level === 'very-low' ? VERY_LOW_FACTOR : LOW_FACTOR),
+    );
+    if (rounded >= edge) return `just under ${String(edge)} DPI`;
+  }
+  return `about ${String(rounded)} DPI`;
 }
 
 /** The label of a level: "Low resolution" or "Very low resolution". */
@@ -149,9 +183,9 @@ export function describeResolution(
   const tile = pixels(warning.tileWidth, warning.tileHeight);
   const head = `${levelLabel(warning.level)}: this tile uses ${used} of the photo`;
   if (physical && warning.effectiveDpi !== null) {
-    return `${head} but prints at ${tile}, about ${String(Math.round(warning.effectiveDpi))} DPI at this size.`;
+    return `${head} but prints at ${tile}, ${formatDpi(warning.effectiveDpi, physical.dpi, warning.level)} at this size.`;
   }
-  return `${head} but exports at ${tile}, so it will be enlarged ${oneDecimal(warning.factor)}×.`;
+  return `${head} but exports at ${tile}, so it will be enlarged ${formatFactor(warning.factor)}.`;
 }
 
 /** How many tiles are at each level. */

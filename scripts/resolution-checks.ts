@@ -9,13 +9,21 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { unzipSync } from 'fflate';
+import { imageSize } from './export-checks.ts';
 import type { Browser, Page } from 'playwright-core';
 
 type Check = (name: string, ok: boolean, detail?: string) => void;
 
 const STATE_MODULE = '/src/editor/state.ts';
+const fixtures = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'tests',
+  'fixtures',
+);
 const sha = (bytes: Buffer): string =>
   createHash('sha256').update(bytes).digest('hex');
 
@@ -265,7 +273,7 @@ export async function checkResolution(
   );
   check(
     'resolution: a pixel canvas explains it as an enlargement',
-    /^Very low resolution: this tile uses 2000 × 1000 px of the photo but exports at 6002 × 3001 px, so it will be enlarged 3×\.$/.test(
+    /^Very low resolution: this tile uses 2000 × 1000 px of the photo but exports at 6002 × 3001 px, so it will be enlarged just over 3×\.$/.test(
       veryLow?.label ?? '',
     ),
     veryLow?.label ?? '',
@@ -389,14 +397,48 @@ export async function checkResolution(
     (await tooltip()) === small.label,
     (await tooltip()) ?? 'no tooltip',
   );
+  const tooltipBox = (): Promise<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null> =>
+    p.evaluate(() => {
+      const el = document.querySelector<HTMLElement>('.res-tooltip');
+      if (!el || el.getClientRects().length === 0) return null;
+      const r = el.getBoundingClientRect();
+      return { x: r.x, y: r.y, width: r.width, height: r.height };
+    });
+  const box1 = (await tooltipBox())!;
+  // Into the tooltip, crossing the gap between it and the badge.
+  await p.mouse.move(box1.x + box1.width / 2, box1.y + box1.height / 2, {
+    steps: 8,
+  });
+  await p.waitForTimeout(700);
+  check(
+    'resolution: the tooltip is hoverable: moving from the badge into it keeps it open',
+    (await tooltip()) === small.label,
+    (await tooltip()) ?? 'closed',
+  );
   await p.mouse.move(
     small.tile.x + small.tile.width / 2,
     small.tile.y + small.tile.height / 2,
+    { steps: 4 },
   );
-  await p.waitForTimeout(50);
+  await p.waitForTimeout(800);
   check(
-    'resolution: moving off the badge hides the tooltip',
+    'resolution: moving away from the badge and the tooltip closes it after a short wait',
     (await tooltip()) === null,
+  );
+  await p.mouse.move(bx, by);
+  await p.waitForTimeout(50);
+  await p.mouse.move(2, 2);
+  await p.waitForTimeout(100);
+  const stillThere = (await tooltip()) !== null;
+  await p.waitForTimeout(700);
+  check(
+    'resolution: leaving the page area waits a moment (to reach the tooltip), then closes',
+    stillThere && (await tooltip()) === null,
   );
   await p.mouse.move(bx, by);
   await p.mouse.down();
@@ -554,6 +596,115 @@ export async function checkResolution(
   await p.keyboard.press('Escape');
   await act(p, 'setCrop', smallId, { x: 0.5, y: 0.5, zoom: 1 });
 
+  // Gestures start fine with a tooltip showing: hover the badge, go to
+  // another part of the tile (inside the grace period) and wheel or drag.
+  await p.mouse.click(
+    small.tile.x + small.tile.width / 2,
+    small.tile.y + small.tile.height / 2,
+  );
+  await act(p, 'setCrop', smallId, { x: 0.5, y: 0.5, zoom: 2 });
+  const spot = async (): Promise<[number, number]> => {
+    const b = await onSmall();
+    const tb = await tooltipBox();
+    let px = b.tile.x + b.tile.width / 2;
+    const py = b.tile.y + b.tile.height - 30;
+    if (
+      tb &&
+      px > tb.x &&
+      px < tb.x + tb.width &&
+      py > tb.y &&
+      py < tb.y + tb.height
+    ) {
+      px = b.tile.x + 20;
+    }
+    return [px, py];
+  };
+  let nb = await onSmall();
+  await p.mouse.move(...centre(nb));
+  await p.waitForTimeout(60);
+  const shownBeforeWheel = (await tooltip()) !== null;
+  const [sx1, sy1] = await spot();
+  await p.mouse.move(sx1, sy1);
+  const z0 = (await crop()).zoom;
+  await p.mouse.wheel(0, -400);
+  await p.waitForTimeout(400);
+  check(
+    'resolution: with a tooltip showing, the wheel over the tile still zooms it (and closes the tooltip)',
+    shownBeforeWheel && (await crop()).zoom > z0 && (await tooltip()) === null,
+    `${String(z0)} -> ${(await crop()).zoom.toFixed(2)}`,
+  );
+  nb = await onSmall();
+  await p.mouse.move(...centre(nb));
+  await p.waitForTimeout(60);
+  const shownBeforeDrag = (await tooltip()) !== null;
+  const [sx2, sy2] = await spot();
+  await p.mouse.move(sx2, sy2);
+  const c0 = await crop();
+  await p.mouse.down();
+  for (let i = 1; i <= 8; i++) await p.mouse.move(sx2 - i * 10, sy2 - i * 3);
+  await p.mouse.up();
+  await drawn(p);
+  const c1 = await crop();
+  check(
+    'resolution: with a tooltip showing, a drag on the tile still pans it (and closes the tooltip)',
+    shownBeforeDrag &&
+      (c1.x !== c0.x || c1.y !== c0.y) &&
+      (await tooltip()) === null,
+    `${JSON.stringify(c0)} -> ${JSON.stringify(c1)}`,
+  );
+  await p.keyboard.press('Escape');
+
+  // Swap by clicking the second tile on its badge.
+  const slotsOf = (): Promise<string[]> =>
+    p.evaluate(() => [...(window as any).__app.editor.getState().assignment]);
+  const nameOfId = (id: string): Promise<string> =>
+    p.evaluate((i) => (window as any).__app.store.getPhoto(i).file.name, id);
+  await act(p, 'setCrop', smallId, { x: 0.5, y: 0.5, zoom: 1 });
+  let swapped = false;
+  let swapDetail = '';
+  for (const [first, second] of [
+    ['r1-1200x800.jpg', 'r2-300x200.jpg'],
+    ['r2-300x200.jpg', 'r1-1200x800.jpg'],
+  ] as const) {
+    const before = await slotsOf();
+    const names = await Promise.all(before.map(nameOfId));
+    const a = (await badges(p)).find((x) => x.photo === first);
+    const b = (await badges(p)).find((x) => x.photo === second);
+    if (!a || !b) continue;
+    await p.mouse.click(
+      a.tile.x + a.tile.width / 2,
+      a.tile.y + a.tile.height / 2,
+    );
+    await p.getByRole('button', { name: 'Swap', exact: true }).click();
+    const [cx, cy] = centre(b);
+    // The menu may cover the badge: then the other direction is tried.
+    const open = await p.evaluate(
+      ([x, y]) =>
+        document.elementFromPoint(x as number, y as number)?.tagName ===
+        'CANVAS',
+      [cx, cy],
+    );
+    if (!open) {
+      await p.keyboard.press('Escape');
+      continue;
+    }
+    await p.mouse.click(cx, cy);
+    await drawn(p);
+    const after = await slotsOf();
+    const namesAfter = await Promise.all(after.map(nameOfId));
+    const ia = names.indexOf(first);
+    const ib = names.indexOf(second);
+    swapped = namesAfter[ia] === second && namesAfter[ib] === first;
+    swapDetail = `${first} <-> ${second}: ${names.join(',')} -> ${namesAfter.join(',')}`;
+    break;
+  }
+  check(
+    'resolution: choosing Swap and clicking the second tile on its badge swaps the two photos',
+    swapped,
+    swapDetail,
+  );
+  await p.keyboard.press('Escape');
+
   // --- 4. The badge follows the tile through resizes, the dial, the border --
   const aligned = (found: Badge[]): boolean =>
     found.length > 0 &&
@@ -648,6 +799,20 @@ export async function checkResolution(
   check(
     'resolution: going back to A4 removes the warning and the summary',
     (await badges(p)).length === 0 && (await summary(p)) === null,
+  );
+
+  // 150 DPI: A0 landscape, 1189 x 841 mm.
+  await act(p, 'setPhysicalSize', 1189, 841, 150);
+  const tw = Math.round((1189 * 150) / 25.4);
+  const th = Math.round((841 * 150) / 25.4);
+  const f150 = tw / ((2000 * tw) / th);
+  const at150 = await badges(p);
+  check(
+    'resolution: a 150 DPI canvas reports its own effective DPI',
+    at150.length === 1 &&
+      at150[0]?.label ===
+        `Low resolution: this tile uses ${String(Math.round((2000 * tw) / th))} × 2000 px of the photo but prints at ${String(tw)} × ${String(th)} px, about ${String(Math.round(150 / f150))} DPI at this size.`,
+    at150[0]?.label ?? 'none',
   );
 
   // --- 7. Zooming a crop across the thresholds -----------------------------
@@ -788,19 +953,47 @@ export async function checkResolution(
   );
   await reloaded.close();
 
+  await checkRotated(browser, origin, check);
+  await checkTooltipsInViewport(browser, origin, check);
   if (screenshots) await shoot(browser, origin, screenshots);
   await ctx.close();
 }
 
-/** Screenshots for the pull request: synthetic photos only. */
-async function shoot(
+/** An EXIF-rotated photo is measured by its upright size. */
+async function checkRotated(
   browser: Browser,
   origin: string,
-  dir: string,
+  check: Check,
 ): Promise<void> {
   const { ctx, p } = await newPage(browser, origin);
-  mkdirSync(dir, { recursive: true });
-  const out = (name: string): string => join(dir, `issue-15-${name}.png`);
+  const file = join(fixtures, 'orient-6.jpg');
+  const header = imageSize(readFileSync(file));
+  await p.setInputFiles('input[type=file]', file);
+  await p.waitForFunction(
+    () => (window as any).__app.editor.getState().photos.length === 1,
+  );
+  const dims = await p.evaluate(() => {
+    const photo = (window as any).__app.store.getPhotos()[0];
+    return { w: photo.width as number, h: photo.height as number };
+  });
+  // Twice the upright size: factor 2, low.
+  await act(p, 'setCanvasSize', dims.w * 2, dims.h * 2);
+  const found = await badges(p);
+  check(
+    'resolution: an EXIF-rotated photo is measured by its rotated (upright) size',
+    header !== null &&
+      dims.w === header.height &&
+      dims.h === header.width &&
+      found.length === 1 &&
+      found[0]?.label ===
+        `Low resolution: this tile uses ${String(dims.w)} × ${String(dims.h)} px of the photo but exports at ${String(dims.w * 2)} × ${String(dims.h * 2)} px, so it will be enlarged 2×.`,
+    `${JSON.stringify(header)} ${JSON.stringify(dims)} ${found[0]?.label ?? 'none'}`,
+  );
+  await ctx.close();
+}
+
+/** The twelve-photo scene used by the screenshots and the viewport check. */
+async function buildScene(p: Page): Promise<void> {
   await addSized(p, [
     [5200, 3500],
     [4200, 2800],
@@ -820,6 +1013,84 @@ async function shoot(
   await act(p, 'shuffle', 11);
   await p.locator('#size-variation').fill('0.6');
   await drawn(p);
+}
+
+/** The tooltip of the badge nearest each canvas corner stays in the viewport. */
+async function checkTooltipsInViewport(
+  browser: Browser,
+  origin: string,
+  check: Check,
+): Promise<void> {
+  const { ctx, p } = await newPage(browser, origin, 900, 620);
+  await buildScene(p);
+  const corners = await p.evaluate(() => {
+    const r = document
+      .querySelector<HTMLElement>('.collage-canvas')!
+      .getBoundingClientRect();
+    return [
+      [r.left, r.top],
+      [r.right, r.top],
+      [r.left, r.bottom],
+      [r.right, r.bottom],
+    ] as [number, number][];
+  });
+  const found = await badges(p);
+  const results: string[] = [];
+  let ok = found.length >= 3;
+  for (const [cx, cy] of corners) {
+    const nearest = [...found].sort(
+      (a, b) =>
+        Math.hypot(a.rect.x + 10 - cx, a.rect.y + 10 - cy) -
+        Math.hypot(b.rect.x + 10 - cx, b.rect.y + 10 - cy),
+    )[0];
+    if (!nearest) {
+      ok = false;
+      continue;
+    }
+    await p.mouse.move(2, 2);
+    await p.waitForTimeout(450);
+    await p.mouse.move(nearest.rect.x + 10, nearest.rect.y + 10);
+    await p.waitForTimeout(100);
+    const box = await p.evaluate(() => {
+      const el = document.querySelector<HTMLElement>('.res-tooltip');
+      if (!el || el.getClientRects().length === 0) return null;
+      const r = el.getBoundingClientRect();
+      return {
+        left: r.left,
+        top: r.top,
+        right: r.right,
+        bottom: r.bottom,
+        w: window.innerWidth,
+        h: window.innerHeight,
+      };
+    });
+    const inside =
+      box !== null &&
+      box.left >= 0 &&
+      box.top >= 0 &&
+      box.right <= box.w + 0.5 &&
+      box.bottom <= box.h + 0.5;
+    ok &&= inside;
+    results.push(inside ? 'in' : `OUT ${JSON.stringify(box)}`);
+  }
+  check(
+    'resolution: at 900 x 620 the tooltip of the badge nearest each canvas corner stays inside the viewport',
+    ok,
+    results.join(' '),
+  );
+  await ctx.close();
+}
+
+/** Screenshots for the pull request: synthetic photos only. */
+async function shoot(
+  browser: Browser,
+  origin: string,
+  dir: string,
+): Promise<void> {
+  const { ctx, p } = await newPage(browser, origin);
+  mkdirSync(dir, { recursive: true });
+  const out = (name: string): string => join(dir, `issue-15-${name}.png`);
+  await buildScene(p);
   await p.locator('.tray-grid').evaluate((el) => (el.scrollLeft = 0));
   const hoverBadge = async (level: string): Promise<void> => {
     const b = (await badges(p)).find((x) => x.level === level);

@@ -1027,8 +1027,7 @@ button.primary:hover:not(:disabled) {
 
 .res-layer,
 .res-box,
-.res-badge,
-.res-tooltip {
+.res-badge {
   pointer-events: none;
 }
 
@@ -1114,6 +1113,8 @@ button.primary:hover:not(:disabled) {
 }
 
 .res-tooltip {
+  /* Hoverable while it is shown (WCAG 1.4.13); hidden, it is not rendered. */
+  pointer-events: auto;
   position: absolute;
   z-index: 6;
   max-width: min(20rem, calc(100% - 12px));

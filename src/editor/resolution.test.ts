@@ -3,6 +3,8 @@ import { DEFAULT_CROP } from './crop';
 import {
   countLevels,
   describeResolution,
+  formatDpi,
+  formatFactor,
   levelForFactor,
   LOW_FACTOR,
   resolutionWarnings,
@@ -284,5 +286,52 @@ describe('wording', () => {
       '2 photos are low resolution for this size (1 very low)',
     );
     expect(countLevels([warning, very, very])).toEqual({ low: 1, veryLow: 2 });
+  });
+});
+
+describe('formatFactor and formatDpi', () => {
+  it('never reads as the threshold it is past', () => {
+    const shown = [1.5, 1.5004, 1.501, 1.55, 3, 3.001, 3.04, 4.55].map(
+      formatFactor,
+    );
+    expect(shown).toEqual([
+      '1.5×',
+      'just over 1.5×',
+      'just over 1.5×',
+      '1.6×',
+      '3×',
+      'just over 3×',
+      '3.04×',
+      '4.6×',
+    ]);
+    expect(formatFactor(1.52)).toBe('1.52×');
+    expect(formatFactor(2.96)).toBe('2.96×');
+    expect(formatFactor(2.2)).toBe('2.2×');
+  });
+
+  it('says just under at the DPI of a threshold, about elsewhere', () => {
+    // 300 DPI canvas: 1.5 is 200 DPI, 3 is 100 DPI.
+    expect(formatDpi(300 / 1.501, 300, 'low')).toBe('just under 200 DPI');
+    expect(formatDpi(300 / 1.55, 300, 'low')).toBe('about 194 DPI');
+    expect(formatDpi(300 / 3.001, 300, 'very-low')).toBe('just under 100 DPI');
+    expect(formatDpi(300 / 3.2, 300, 'very-low')).toBe('about 94 DPI');
+    expect(formatDpi(300 / 2.2, 300, 'low')).toBe('about 136 DPI');
+  });
+
+  it('is what the explanation uses near a threshold', () => {
+    const near = {
+      slot: 0,
+      photoId: 'a',
+      level: 'very-low' as const,
+      factor: 3.001,
+      tileWidth: 6002,
+      tileHeight: 3001,
+      sourceWidth: 2000,
+      sourceHeight: 1000,
+      effectiveDpi: null,
+    };
+    expect(describeResolution(near, undefined)).toMatch(
+      /enlarged just over 3×\.$/,
+    );
   });
 });

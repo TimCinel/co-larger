@@ -90,6 +90,7 @@ export function createResolutionWarnings(
 ): ResolutionWarnings {
   const { doc, view, editor, photos } = options;
   const { canvas } = view;
+  const win = doc.defaultView as Window;
 
   let enabled = true;
   let warnings: readonly TileResolution[] = [];
@@ -208,7 +209,30 @@ export function createResolutionWarnings(
     hovered = marker;
   }
 
+  /**
+   * Hovering: the tooltip stays while the pointer is over the badge or the
+   * tooltip, with a short grace period for crossing the gap between them
+   * (WCAG 1.4.13: hoverable).
+   */
+  const GRACE_MS = 350;
+  let hideTimer: number | null = null;
+  function cancelHide(): void {
+    if (hideTimer !== null) win.clearTimeout(hideTimer);
+    hideTimer = null;
+  }
+  function scheduleHide(): void {
+    if (hideTimer !== null || !hovered) return;
+    if (doc.activeElement === hovered.badge) return;
+    hideTimer = win.setTimeout(() => {
+      hideTimer = null;
+      if (doc.activeElement !== hovered?.badge) hideTooltip();
+    }, GRACE_MS);
+  }
+  tooltip.addEventListener('pointerenter', cancelHide);
+  tooltip.addEventListener('pointerleave', scheduleHide);
+
   function hideTooltip(): void {
+    cancelHide();
     tooltip.hidden = true;
     hovered?.badge.removeAttribute('aria-describedby');
     hovered = null;
@@ -236,17 +260,37 @@ export function createResolutionWarnings(
   }
   canvas.addEventListener('pointermove', (event) => {
     // While a button is held the pointer is selecting, swapping or panning.
-    const marker = event.buttons === 0 ? badgeAt(event) : null;
-    if (marker === hovered) return;
-    if (doc.activeElement === hovered?.badge) return;
-    hideTooltip();
-    if (marker) showTooltip(marker);
+    if (event.buttons !== 0) {
+      if (doc.activeElement !== hovered?.badge) hideTooltip();
+      return;
+    }
+    const marker = badgeAt(event);
+    if (marker) {
+      cancelHide();
+      if (marker === hovered || doc.activeElement === hovered?.badge) return;
+      hideTooltip();
+      showTooltip(marker);
+    } else {
+      scheduleHide();
+    }
   });
-  for (const type of ['pointerleave', 'pointerdown', 'wheel'] as const) {
+  // The pointer may be on its way to the tooltip: leaving the canvas waits.
+  canvas.addEventListener('pointerleave', scheduleHide);
+  for (const type of ['pointerdown', 'wheel'] as const) {
     canvas.addEventListener(type, () => {
       if (doc.activeElement !== hovered?.badge) hideTooltip();
     });
   }
+  // A press anywhere but the tooltip dismisses it.
+  doc.addEventListener(
+    'pointerdown',
+    (event) => {
+      const target = event.target;
+      if (target instanceof Node && tooltip.contains(target)) return;
+      if (doc.activeElement !== hovered?.badge) hideTooltip();
+    },
+    true,
+  );
 
   // --- Summary and checkbox ---
   const element = doc.createElement('div');
