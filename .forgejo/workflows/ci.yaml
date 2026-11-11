@@ -10,11 +10,14 @@ jobs:
     name: Lint, type check, test and build
     runs-on: general-ci
     container:
-      # Docker Hub builder image with dependencies pre-installed (see
-      # ci/README.md). Rebuild with ci/build.sh after changing
-      # package-lock.json, then update this tag. CI still works, only more
-      # slowly, when the image is stale.
-      image: docker.io/timcinel/co-larger-builder:lock-cddf86d9b162-r2
+      # Docker Hub builder image with dependencies pre-installed. The
+      # "Builder image" workflow rebuilds it and moves :latest when the
+      # lockfile or ci/Dockerfile changes on master, so this line never needs
+      # editing. :latest may be older than this checkout (a pull request that
+      # changes the lockfile, or before the rebuild finishes); the install
+      # step below then runs npm ci, which is slower but equally correct.
+      # See ci/README.md.
+      image: docker.io/timcinel/co-larger-builder:latest
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -26,9 +29,12 @@ jobs:
         # link it (no unpack: that is CPU-bound on this runner); otherwise
         # install normally, using the image's npm cache where it can.
         run: |
+          echo "Builder image: $(cat /opt/deps/image-tag 2>/dev/null || echo 'unknown (built before image-tag)')"
           if [ "$(sha256sum package-lock.json | cut -d' ' -f1)" = "$(cat /opt/deps/lock.sha256)" ]; then
+            echo "Lockfile matches the image: linking its node_modules"
             ln -s /opt/deps/node_modules node_modules
           else
+            echo "Lockfile differs from the image: installing with npm ci"
             npm ci --prefer-offline --no-audit --no-fund
           fi
       - name: Lint

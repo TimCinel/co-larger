@@ -1,6 +1,7 @@
-# TEMPORARY (issue #37): what can the runner do for image builds?
-# Round 2: the job sees DOCKER_HOST=tcp://docker:2376 and /certs/client.
-# Builds without pushing. Removed before merge.
+# TEMPORARY (issue #37), round 3: push the builder image with ci/build.sh to
+# a throwaway tag (citest-<sha>, never latest), then re-push that tag with
+# different content and time how long the cluster's pull-through cache keeps
+# serving the old one. Removed before merge.
 name: Runner diagnostics
 
 on:
@@ -9,76 +10,62 @@ on:
     paths: [.forgejo/workflows/diag-runner.yaml]
 
 jobs:
-  docker-daemon:
+  push-test:
     runs-on: general-ci
     container:
       image: docker.io/library/docker:29.9.3-cli
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - name: Daemon
-        run: |
-          set +e
-          env | grep -E '^DOCKER' | sort
-          ls -l /certs/client 2>&1
-          docker version
-          docker info
-          docker buildx version
-          docker buildx ls
-          docker ps --format '{{.Image}} {{.Names}}' | head -20
-          ls /proc/sys/fs/binfmt_misc 2>&1
-      - name: Multi-arch, COPY-only final stage, default driver
-        run: |
-          set +e
-          mkdir -p /tmp/ma && cd /tmp/ma
-          cat > Dockerfile <<'EOF'
-          FROM --platform=$BUILDPLATFORM docker.io/library/alpine:3.20 AS build
-          RUN echo built-on-$(uname -m) > /out
-          FROM docker.io/library/alpine:3.20
-          COPY --from=build /out /out
-          EOF
-          time docker buildx build --platform linux/amd64,linux/arm64 --provenance=false -t diag-ma:1 . \
-            && echo "MULTIARCH DEFAULT DRIVER: OK" || echo "MULTIARCH DEFAULT DRIVER: FAIL"
-          docker buildx imagetools inspect diag-ma:1 2>&1 | head
-          docker image inspect diag-ma:1 --format '{{.Architecture}}' 2>&1
-      - name: Multi-arch, docker-container driver
-        run: |
-          set +e
-          cd /tmp/ma
-          docker buildx create --name diag-bk --driver docker-container --bootstrap \
-            && echo "CREATE DOCKER-CONTAINER BUILDER: OK" || echo "CREATE DOCKER-CONTAINER BUILDER: FAIL"
-          time docker buildx build --builder diag-bk --platform linux/amd64,linux/arm64 --provenance=false . \
-            && echo "MULTIARCH CONTAINER DRIVER: OK" || echo "MULTIARCH CONTAINER DRIVER: FAIL"
-          docker buildx rm diag-bk
-      - name: Is arm64 emulation available? (RUN in an arm64 stage)
-        run: |
-          set +e
-          mkdir -p /tmp/emu && cd /tmp/emu
-          printf 'FROM docker.io/library/alpine:3.20\nRUN uname -m\n' > Dockerfile
-          time docker buildx build --platform linux/arm64 --progress plain --no-cache . 2>&1 | tail -8
-          echo "exit ${PIPESTATUS[0]}"
-      - name: Clean up
-        if: always()
-        run: docker image rm diag-ma:1 2>/dev/null; true
-
-  real-builds:
-    runs-on: general-ci
-    container:
-      image: docker.io/library/docker:29.9.3-cli
-    steps:
-      - name: Node for actions/checkout
-        run: time apk add --no-cache nodejs
-      - name: Check out repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - run: apk add --no-cache nodejs bash
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
-      - name: App image, amd64 + arm64, no push
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - id: tag
+        run: echo "tag=citest-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Log in to Docker Hub
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io
+      - name: First push with ci/build.sh (throwaway tag, latest untouched)
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: time env PUSH=1 LATEST=0 TAG="$TAG" ci/build.sh
+      - name: Pull through the mirror, then re-push the same tag with new content
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          set +e
-          git config --global --add safe.directory "$PWD"
-          time docker buildx build --platform linux/amd64,linux/arm64 --provenance=false --sbom=false \
-            --build-arg GIT_COMMIT="$(git rev-parse HEAD)" -f Dockerfile . \
-            && echo "APP MULTIARCH: OK" || echo "APP MULTIARCH: FAIL"
-      - name: Builder image, amd64, no push
+          set -u
+          R=docker.io/timcinel/co-larger-builder
+          digest() { docker buildx imagetools inspect "$R:$TAG" --format '{{json .Manifest.Digest}}' | tr -d '"'; }
+          pulled() { docker image rm -f "$R:$TAG" >/dev/null 2>&1; docker pull -q "$R:$TAG" >/dev/null && docker image inspect "$R:$TAG" --format '{{range .RepoDigests}}{{.}} {{end}}'; }
+          D1=$(digest); echo "hub digest 1: $D1"
+          echo "pulled via daemon (mirror): $(pulled)"
+          docker buildx build --platform linux/amd64 -f ci/Dockerfile --provenance=false --sbom=false \
+            --build-arg "BUILDER_TAG=$TAG-v2" -t "$R:$TAG" --push . >/dev/null 2>&1
+          D2=$(digest); echo "hub digest 2: $D2"
+          start=$(date +%s)
+          while :; do
+            got=$(pulled); el=$(( $(date +%s) - start ))
+            case "$got" in *"$D2"*) echo "after ${el}s the mirror serves digest 2: STALE-WINDOW <= ${el}s"; break;; esac
+            echo "after ${el}s the mirror still serves: $got"
+            [ "$el" -ge 600 ] && { echo "STILL STALE after 10 minutes"; break; }
+            sleep 20
+          done
+      - name: Log out
+        if: always()
+        run: docker logout docker.io || true
+
+  consume:
+    needs: push-test
+    runs-on: general-ci
+    container:
+      image: docker.io/timcinel/co-larger-builder:${{ needs.push-test.outputs.tag }}
+    steps:
+      - name: Which image did the job container get?
         run: |
-          set +e
-          time docker buildx build --platform linux/amd64 --provenance=false --sbom=false -f ci/Dockerfile . \
-            && echo "BUILDER: OK" || echo "BUILDER: FAIL"
+          echo "image-tag file: $(cat /opt/deps/image-tag)"
+          cat /opt/deps/lock.sha256

@@ -3,10 +3,15 @@
 # manifest to Docker Hub, tagged with the short commit, `latest` and (when
 # package.json carries one) the version. Requires `docker login` (Docker Hub)
 # beforehand and a clean working tree, so an image always matches a commit.
+# CI runs it when a release tag is pushed (.forgejo/workflows/release-image.yaml).
 # The source and url labels are set empty on purpose: they would otherwise be
 # inherited from the nginx base image and point at its repository. Add a public
 # URL once the project has one; do not use an internal host name here.
-# Set PUSH=0 to build for the local platform only and load it instead.
+# Set PUSH=0 to build for the local platform only and load it instead;
+# PLATFORM=linux/amd64,linux/arm64 with PUSH=0 builds both without pushing
+# (needs a Docker with the containerd image store).
+# Set EXPECT_VERSION to fail unless package.json has that version (CI passes
+# the release tag, so an image is never pushed under the wrong version).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -21,13 +26,18 @@ FULL=$(git rev-parse HEAD)
 VERSION=$(node -p "require('./package.json').version")
 CREATED=$(git log -1 --format=%cI)
 
+if [ -n "${EXPECT_VERSION:-}" ] && [ "$EXPECT_VERSION" != "$VERSION" ]; then
+  echo "package.json has version $VERSION, expected $EXPECT_VERSION; not building." >&2
+  exit 1
+fi
+
 TAGS=(-t "$REPO:latest" -t "$REPO:$REV")
 # 0.0.0 is the placeholder before the first release; it is not a version.
 if [ "$VERSION" != "0.0.0" ]; then TAGS+=(-t "$REPO:$VERSION"); fi
 
 if [ "${PUSH:-1}" = 0 ]; then
   TARGET=(--load)
-  PLATFORM=
+  PLATFORM=${PLATFORM:-}
 else
   TARGET=(--push)
   PLATFORM=linux/amd64,linux/arm64
@@ -47,7 +57,7 @@ docker buildx build ${PLATFORM:+--platform "$PLATFORM"} -f Dockerfile \
   "${TAGS[@]}" "${TARGET[@]}" .
 
 if [ "${PUSH:-1}" = 0 ]; then
-  echo "Built $REPO:$REV locally (not pushed)"
+  echo "Built $REPO:$REV${PLATFORM:+ for $PLATFORM} locally (not pushed)"
 else
   echo "Pushed $REPO:$REV (also latest)"
   docker buildx imagetools inspect "$REPO:$REV"

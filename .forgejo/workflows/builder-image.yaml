@@ -1,0 +1,58 @@
+# Rebuilds the CI builder image (ci/Dockerfile) when its inputs change.
+# On master it pushes docker.io/timcinel/co-larger-builder:<tag> and :latest
+# (ci/tag.sh names the tag after the lockfile and ci/Dockerfile). On pull
+# requests it only builds, without secrets, to show the image still builds.
+# The CI check job runs in :latest and checks it matches the lockfile, so it
+# picks up the new image on its next run. See ci/README.md.
+name: Builder image
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - package-lock.json
+      - ci/Dockerfile
+      - ci/build.sh
+      - ci/tag.sh
+      - .forgejo/workflows/builder-image.yaml
+  pull_request:
+    paths:
+      - package-lock.json
+      - ci/Dockerfile
+      - ci/build.sh
+      - ci/tag.sh
+      - .forgejo/workflows/builder-image.yaml
+  workflow_dispatch:
+
+jobs:
+  builder-image:
+    name: Build builder image
+    runs-on: general-ci
+    # Docker CLI and buildx. The job talks to the runner's per-job Docker
+    # daemon through DOCKER_HOST, which the runner sets up.
+    container:
+      image: docker.io/library/docker:29.9.3-cli
+    steps:
+      - name: Install Node (for actions/checkout) and bash
+        run: apk add --no-cache nodejs bash
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Trust the checkout (git in a container)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Build only (pull requests, other branches)
+        if: github.event_name == 'pull_request' || github.ref != 'refs/heads/master'
+        run: PUSH=0 ci/build.sh
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: printf '%s' "$DOCKERHUB_TOKEN" | docker login --username "$DOCKERHUB_USERNAME" --password-stdin docker.io
+      - name: Build and push
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        run: PUSH=1 ci/build.sh
+      - name: Log out
+        if: always()
+        run: docker logout docker.io || true
