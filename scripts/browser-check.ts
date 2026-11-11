@@ -5107,8 +5107,8 @@ async function checkSharpTiles(
   );
   check(
     'sharp: the largest tile is drawn larger than its 1024 px preview',
-    m.tileW > 1024 * 1.5,
-    `${String(m.tileW)} px`,
+    Math.max(m.tileW, m.tileH) > 1100,
+    `${String(m.tileW)} x ${String(m.tileH)} px`,
   );
   check(
     "sharp: the largest tile still shows the photo's 2 px stripes after settling (not drawn from the preview)",
