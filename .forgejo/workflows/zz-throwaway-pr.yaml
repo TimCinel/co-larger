@@ -1,0 +1,44 @@
+# TEMPORARY (issue #37 review): are secrets set on same-repository pull
+# requests (existence only, never printed), and do the new scripts work on the
+# runner against the real Docker Hub API and git remote? Pushes nothing.
+# Removed before merge.
+name: Throwaway PR checks
+
+on:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: general-ci
+    container:
+      image: docker.io/library/docker:29.9.3-cli
+    steps:
+      - name: Secrets present on this pull_request run? (existence only)
+        env:
+          T: ${{ secrets.DOCKERHUB_TOKEN }}
+          U: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          if [ -n "$T" ]; then echo "DOCKERHUB_TOKEN: set"; else echo "DOCKERHUB_TOKEN: empty"; fi
+          if [ -n "$U" ]; then echo "DOCKERHUB_USERNAME: set"; else echo "DOCKERHUB_USERNAME: empty"; fi
+      - run: apk add --no-cache nodejs bash curl
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - name: Real lookups and decisions, no push
+        env:
+          GIT_TOKEN: ${{ github.token }}
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: credential.helper
+          GIT_CONFIG_VALUE_0: '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
+        run: |
+          set +e
+          echo "== ls-remote master"; git ls-remote --exit-code origin refs/heads/master; echo "exit $?"
+          echo "== ls-remote tags"; git ls-remote --tags origin; echo "exit $?"
+          echo "== hub-tag co-larger 2026.11.0"; ci/hub-tag.sh co-larger 2026.11.0; echo "exit $?"
+          echo "== hub-tag builder missing"; ci/hub-tag.sh co-larger-builder lock-000000000000-00000000; echo "exit $?"
+          echo "== release-tags 2026.11.0 (exists: must refuse)"
+          docker/release-tags.sh 2026.11.0 cfa559dc62a099cbdecc932ecf72cf5f7770d2cd; echo "exit $?"
+          echo "== ci/build.sh PUSH=1 with an existing tag and a stub docker (must skip, leave latest)"
+          PUSH=1 TAG=lock-cddf86d9b162-r2 DOCKER=echo ci/build.sh; echo "exit $?"
+          echo "== resolve-image.sh"; ci/resolve-image.sh; echo "exit $?"

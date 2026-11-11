@@ -1,0 +1,24 @@
+# TEMPORARY (issue #37 review): does this Forgejo queue runs in the same
+# concurrency group with cancel-in-progress: false? Push twice quickly and
+# compare start and end times. Removed before merge. Attempt 1
+name: Throwaway concurrency probe
+
+on:
+  push:
+    branches: [issue-37-ci-images]
+    paths: [.forgejo/workflows/zz-throwaway-concurrency.yaml]
+
+concurrency:
+  group: zz-throwaway-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: general-ci
+    container:
+      image: docker.io/library/docker:29.9.3-cli
+    steps:
+      - run: |
+          echo "start $(date -u +%T) sha ${GITHUB_SHA}"
+          sleep 60
+          echo "end $(date -u +%T) sha ${GITHUB_SHA}"
