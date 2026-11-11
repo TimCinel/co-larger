@@ -11,10 +11,13 @@
 import type { Photo, PhotoStore } from '../photos';
 import type { Tile } from '../layout';
 import type { FrameScheduler } from './frames';
-import { ImageCache } from './images';
+import { ImageCache, type ImageCacheStats } from './images';
 import { fitSize, renderCollage, tileAt } from './render';
 import { cropOf, type EditorState } from './state';
 import type { EditorStore } from './store';
+
+/** How long a drag or zoom must rest before sharper images are decoded. */
+const SETTLE_MS = 200;
 
 /** Space kept clear around the collage, in CSS pixels. */
 const MARGIN = 24;
@@ -46,7 +49,15 @@ export interface CollageView {
      * only at 0 (another draw follows each decode).
      */
     readonly pending: number;
+    /**
+     * Tiles drawn from a smaller image than the cache means to hold for
+     * them (a sharper one is decoding, or held back during a drag or zoom).
+     * Pixels are final only when this and `pending` are 0.
+     */
+    readonly upgrading: number;
   } | null;
+  /** The image cache's byte accounting, for tests and diagnostics. */
+  imageCacheStats(): ImageCacheStats;
   /**
    * Calls `listener` after every draw (and after the canvas is hidden for an
    * empty collage), when `lastRender` and the canvas's size are current.
@@ -159,12 +170,14 @@ export function createCollageView(options: CollageViewOptions): CollageView {
         (cache.isFailed(id) ? 'failed' : null),
     );
     tiles = result.tiles;
+    cache.endFrame();
     const { queued, loading } = cache.stats();
     last = {
       state,
       tiles,
       missing: result.missing,
       pending: queued + loading,
+      upgrading: cache.upgradingTiles(),
     };
   }
 
@@ -185,7 +198,26 @@ export function createCollageView(options: CollageViewOptions): CollageView {
       );
     }
   });
-  editor.subscribe(scheduleRender);
+  // Sharper images are decoded only once a drag or zoom has settled: while
+  // the user moves the dial or a crop, tile sizes change every frame.
+  let settleTimer: number | null = null;
+  const settleInteraction = (): void => {
+    settleTimer = null;
+    if (editor.isDragging()) {
+      // Still held (a pointer resting mid-drag): keep waiting.
+      settleTimer = win.setTimeout(settleInteraction, SETTLE_MS);
+      return;
+    }
+    cache.setInteracting(false);
+  };
+  editor.subscribe((_state, change) => {
+    if (change.transient || (settleTimer !== null && !change.restored)) {
+      cache.setInteracting(true);
+      if (settleTimer !== null) win.clearTimeout(settleTimer);
+      settleTimer = win.setTimeout(settleInteraction, SETTLE_MS);
+    }
+    scheduleRender();
+  });
 
   // Re-fit when the area is resized.
   new ResizeObserver((entries) => {
@@ -233,6 +265,7 @@ export function createCollageView(options: CollageViewOptions): CollageView {
       return tile && photoId !== undefined ? { tile, photoId } : null;
     },
     lastRender: () => last,
+    imageCacheStats: () => cache.stats(),
     onRender(listener) {
       renderListeners.add(listener);
       return () => {
