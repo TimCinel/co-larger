@@ -76,6 +76,7 @@ export class PhotoImporter {
   private nextToStart = 0;
   private nextToCommit = 0;
   private workers = 0;
+  private holds = 0;
 
   constructor(store: PhotoStore, options: ImporterOptions) {
     this.store = store;
@@ -99,7 +100,26 @@ export class PhotoImporter {
    * listener never sees a photo arrive while this reads false.
    */
   isBusy(): boolean {
-    return this.jobs.length > 0;
+    return this.jobs.length > 0 || this.holds > 0;
+  }
+
+  /**
+   * Makes `isBusy()` true until the returned function is called, as if an
+   * import were running, so the editor lays out once afterwards (and not
+   * in between) and undo waits. Opening a project (#12) holds the importer
+   * while it swaps the photos and the collage in. Calling the release
+   * function again does nothing. Listeners are told when the last hold is
+   * released, like when a queue goes idle.
+   */
+  hold(): () => void {
+    this.holds++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.holds--;
+      this.emit();
+    };
   }
 
   /**

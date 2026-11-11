@@ -20,6 +20,11 @@ import {
   type UndoControls,
 } from './editor';
 import { browserDeps, createExportControls } from './export';
+import {
+  classifyDrop,
+  createProjectControls,
+  type ProjectControls,
+} from './project';
 import { installDropTarget } from './ui/dropzone';
 import { createNotices, summaryMessages } from './ui/notices';
 import { createTray } from './ui/tray';
@@ -43,6 +48,8 @@ export interface App {
   readonly selection: TileSelection;
   /** Undo and redo: the history of committed changes. */
   readonly undo: UndoControls;
+  /** Save and open project (#12). */
+  readonly project: ProjectControls;
 }
 
 /**
@@ -145,6 +152,8 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     frames,
     emptyFocus: () => addButton,
   });
+  // Opening a project resets the undo history on purpose: no toast for it.
+  let installing = false;
   const undo = createUndoControls({
     doc,
     editor,
@@ -154,7 +163,7 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     selection,
     canvas: view.canvas,
     notify: (message) => {
-      notices.show(message);
+      if (!installing) notices.show(message);
     },
     announce: (text) => {
       announcer.textContent = text;
@@ -181,9 +190,40 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   // The panel comes first in the DOM, so Tab reaches it before the tray's
   // thumbnails; CSS (`order`) keeps it on the right.
   const settings = createCanvasSettings(doc, editor, frames);
+  const project = createProjectControls({
+    doc,
+    editor,
+    photos: store,
+    imports: importer,
+    decode: options.decode ?? decodePhoto,
+    install: (opened, fileName) => {
+      // One synchronous swap, held as an import so the collage is laid out
+      // once, already in its saved arrangement: no frame is drawn between
+      // the steps, the editor's sync finds the restored sets equal, and the
+      // history restarts without a toast.
+      installing = true;
+      const release = importer.hold();
+      try {
+        store.clear();
+        store.addPhotos(opened.photos);
+        editor.restore(opened.state);
+      } finally {
+        release();
+        installing = false;
+      }
+      announcer.textContent = `Opened ${fileName}`;
+    },
+    onBusyChange: (busy) => {
+      addButton.disabled = busy;
+    },
+    notify: (message) => {
+      notices.show(message);
+    },
+  });
   settings
     .querySelector('.settings-footer')
     ?.append(
+      project.element,
       createExportControls({ doc, editor, photos: store, deps: browserDeps })
         .element,
     );
@@ -206,6 +246,10 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   });
 
   const addFiles = (files: File[], folders: string[] = []): void => {
+    if (project.isBusy()) {
+      notices.show('Wait for the project to finish opening or saving.');
+      return;
+    }
     void importer.enqueue(files).then((summary) => {
       for (const message of summaryMessages(summary, folders)) {
         notices.show(message);
@@ -219,7 +263,20 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     input.value = '';
   });
   installDropTarget(doc, shell, ({ files, folders }) => {
-    addFiles(files, folders);
+    // A lone zip is a project to open; anything else is photos.
+    const dropped = classifyDrop(files);
+    if (dropped.project) {
+      project.openFile(dropped.project);
+      return;
+    }
+    if (dropped.ignoredZips.length > 0) {
+      notices.show(
+        'To open a project, drop its .zip on its own, without photos.',
+      );
+    }
+    if (dropped.photos.length > 0 || folders.length > 0) {
+      addFiles(dropped.photos, folders);
+    }
   });
 
   let wasActive = false;
@@ -238,5 +295,5 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   importer.subscribe(showProgress);
 
   // The drop overlay is shown through the `dragging` class on the shell.
-  return { store, editor, view, selection, undo };
+  return { store, editor, view, selection, undo, project };
 }

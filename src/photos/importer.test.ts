@@ -235,4 +235,49 @@ describe('PhotoImporter', () => {
     expect(summary.failures.map((f) => f.name)).toEqual(['zero.jpg']);
     expect(importer.getProgress().active).toBe(false);
   });
+
+  describe('hold', () => {
+    it('is busy until released, and tells listeners when it goes idle', () => {
+      const store = new PhotoStore();
+      const importer = new PhotoImporter(store, {
+        decode: () => Promise.resolve(makeDecoded()),
+        yieldToMain: instantly,
+      });
+      const busy: boolean[] = [];
+      importer.subscribe(() => busy.push(importer.isBusy()));
+      expect(importer.isBusy()).toBe(false);
+      const release = importer.hold();
+      expect(importer.isBusy()).toBe(true);
+      expect(importer.getProgress().active).toBe(false);
+      release();
+      release(); // again: nothing
+      expect(importer.isBusy()).toBe(false);
+      expect(busy).toEqual([false]);
+    });
+
+    it('stays busy through an import until the hold is released too', async () => {
+      const store = new PhotoStore();
+      const importer = new PhotoImporter(store, {
+        decode: () => Promise.resolve(makeDecoded()),
+        yieldToMain: instantly,
+      });
+      const release = importer.hold();
+      await importer.enqueue([makeFile('a.jpg')]);
+      expect(importer.isBusy()).toBe(true);
+      release();
+      expect(importer.isBusy()).toBe(false);
+    });
+
+    it('nested holds release one by one', () => {
+      const importer = new PhotoImporter(new PhotoStore(), {
+        decode: () => Promise.resolve(makeDecoded()),
+      });
+      const a = importer.hold();
+      const b = importer.hold();
+      a();
+      expect(importer.isBusy()).toBe(true);
+      b();
+      expect(importer.isBusy()).toBe(false);
+    });
+  });
 });

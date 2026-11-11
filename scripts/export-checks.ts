@@ -72,7 +72,7 @@ export async function newExportPage(
 }
 
 /** Adds generated photos (gradients, text; the first has a red disc). */
-async function addPhotos(
+export async function addPhotos(
   p: Page,
   count: number,
   scale = 1,
@@ -148,7 +148,11 @@ async function addPhotos(
   );
 }
 
-function action(p: Page, name: string, ...args: unknown[]): Promise<void> {
+export function action(
+  p: Page,
+  name: string,
+  ...args: unknown[]
+): Promise<void> {
   return p.evaluate(
     async ({ name, args, module }) => {
       const actions = await import(/* @vite-ignore */ module);
@@ -160,7 +164,7 @@ function action(p: Page, name: string, ...args: unknown[]): Promise<void> {
   );
 }
 
-async function waitDrawn(p: Page): Promise<void> {
+export async function waitDrawn(p: Page): Promise<void> {
   await p.waitForFunction(
     () => {
       const app = (window as any).__app;
@@ -1027,7 +1031,7 @@ async function checkOrientationAndSharpness(
 }
 
 /** Peak resident memory of a browser's processes, sampled with ps. */
-function browserRssMb(marker: string): number {
+export function browserRssMb(marker: string): number {
   const out = execFileSync('ps', ['-axo', 'rss=,command='], {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,

@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { chromium, firefox, type Page } from 'playwright-core';
 import { createServer } from 'vite';
 import { checkA2, checkExport, exportRealFolder } from './export-checks.ts';
+import { checkProject, projectRealFolder } from './project-checks.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtures = join(root, 'tests', 'fixtures');
@@ -4958,6 +4959,36 @@ if (exportDirIndex >= 0) {
   process.exit(0);
 }
 
+// `--project-dir <folder>`: save and open a real folder, numbers only.
+const projectDirIndex = process.argv.indexOf('--project-dir');
+if (projectDirIndex >= 0) {
+  const dir = process.argv[projectDirIndex + 1] ?? '';
+  const files = readdirSync(dir)
+    .filter((f) => /\.jpe?g$/i.test(f))
+    .map((f) => join(dir, f));
+  await projectRealFolder(browser, origin, files);
+  await browser.close();
+  await server.close();
+  process.exit(0);
+}
+
+// `--project-only`: just the save and open checks, while working on them.
+if (process.argv.includes('--project-only')) {
+  await checkProject(browser, origin, check, {
+    screenshots: process.argv.includes('--project-screenshot')
+      ? join(root, 'docs', 'screenshots')
+      : undefined,
+  });
+  await browser.close();
+  await server.close();
+  console.log(
+    failures === 0
+      ? '\nAll checks passed'
+      : `\n${String(failures)} check(s) FAILED`,
+  );
+  process.exit(failures === 0 ? 0 : 1);
+}
+
 // `--export-only`: just the export checks (without A2), while working on them.
 if (process.argv.includes('--export-only')) {
   await checkExport(browser, origin, check, {
@@ -5358,6 +5389,7 @@ await checkExport(browser, origin, check, {
     ? join(root, 'docs', 'screenshots')
     : undefined,
 });
+await checkProject(browser, origin, check);
 await checkA2(
   browser,
   origin,

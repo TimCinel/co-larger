@@ -761,7 +761,8 @@ button.primary:hover:not(:disabled) {
 }
 
 .export-quality[hidden],
-.export-running[hidden] {
+.export-running[hidden],
+.project-running[hidden] {
   display: none;
 }
 
@@ -771,24 +772,30 @@ button.primary:hover:not(:disabled) {
 }
 
 .export-hint,
-.export-status {
+.export-status,
+.project-hint,
+.project-status {
   margin: 0.4rem 0 0;
   color: var(--muted);
   font-size: 0.85rem;
 }
 
-.export-error {
+.export-error,
+.project-error {
   margin: 0.4rem 0 0;
   color: #f1a0a8;
   font-size: 0.85rem;
 }
 
 .export-error:empty,
-.export-status:empty {
+.export-status:empty,
+.project-error:empty,
+.project-status:empty {
   display: none;
 }
 
-.export-running {
+.export-running,
+.project-running {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -797,7 +804,8 @@ button.primary:hover:not(:disabled) {
   font-size: 0.85rem;
 }
 
-.export-progress {
+.export-progress,
+.project-progress {
   flex: 1 1 100%;
   accent-color: var(--accent);
 }
@@ -910,4 +918,56 @@ button.primary:hover:not(:disabled) {
 .undo-controls {
   display: flex;
   gap: 0.4rem;
+}
+
+/* Project (#12): Save and Open, and the dialog for opening. */
+.project-buttons {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.project-buttons button {
+  flex: 1;
+}
+
+.project-dialog {
+  max-width: min(28rem, calc(100vw - 2rem));
+  padding: 1.25rem;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.project-dialog::backdrop {
+  background: rgb(0 0 0 / 0.6);
+}
+
+.project-dialog h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--text);
+}
+
+.project-dialog-body {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+}
+
+.project-dialog progress {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.project-dialog progress[hidden] {
+  display: none;
+}
+
+.project-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
 }
