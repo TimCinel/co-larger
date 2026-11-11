@@ -10,11 +10,13 @@ import {
   createCollageView,
   createLayoutControls,
   createSizeReadout,
+  createUndoControls,
   createTileSelection,
   EditorStore,
   FrameScheduler,
   type CollageView,
   type TileSelection,
+  type UndoControls,
 } from './editor';
 import { browserDeps, createExportControls } from './export';
 import { installDropTarget } from './ui/dropzone';
@@ -38,6 +40,8 @@ export interface App {
   readonly view: CollageView;
   /** Which tile is selected, and the Swap / Remove menu. */
   readonly selection: TileSelection;
+  /** Undo and redo: the history of committed changes. */
+  readonly undo: UndoControls;
 }
 
 /**
@@ -138,6 +142,17 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     frames,
     emptyFocus: () => addButton,
   });
+  const undo = createUndoControls({
+    doc,
+    editor,
+    photos: store,
+    frames,
+    selection,
+    announce: (text) => {
+      announcer.textContent = text;
+    },
+  });
+  layoutControls.after(undo.element);
   const dropOverlay = doc.createElement('div');
   dropOverlay.className = 'drop-overlay';
   dropOverlay.textContent = 'Drop photos to add them';
@@ -201,5 +216,5 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   importer.subscribe(showProgress);
 
   // The drop overlay is shown through the `dragging` class on the shell.
-  return { store, editor, view, selection };
+  return { store, editor, view, selection, undo };
 }

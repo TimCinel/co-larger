@@ -36,13 +36,25 @@
  *   assignment and crops refer to photos by id (and assignment's seeded
  *   variety hashes the id), then validateEditorState and `restore`.
  *
- * Behaviour #10 should decide deliberately (documented, not yet chosen):
+ *  * Undo and redo (undo-manager.ts, history.ts) decide the open cases:
  *
- * - `restore` during an import excludes photos already imported that the
- *   snapshot does not name: they stay in the tray, unticked, with no notice.
- * - A tray sync (a toggle, or an import finishing) that lands mid-drag
- *   commits the partial drag, so one physical drag can then give two
- *   committed states.
+ * - History keeps at most 100 undo steps (HISTORY_LIMIT), one per committed
+ *   notification; transient ones and restores are never recorded.
+ * - Unfinished gesture when Undo or Redo is pressed (a drag, a wheel burst,
+ *   a colour picker closed on its starting colour): the view ends its
+ *   gestures, then `commitPending` commits what is left as its own entry,
+ *   and only then is the step applied. Undo therefore reverts that gesture
+ *   first; nothing is lost and the store is never left mid-gesture.
+ * - Import: adding or removing photos in the PhotoStore is a boundary. The
+ *   history is cleared and the re-roll the import causes is the new
+ *   baseline, so undo never crosses an import (photos cannot be un-added).
+ *   Queued tray syncs are applied before every undo, so `restore` never
+ *   runs between an import and its sync: it cannot exclude imported photos
+ *   the snapshot does not name. Undo during a running import works on the
+ *   steps since the latest batch of photos; undo or redo during an export
+ *   is safe because export renders from its own snapshot.
+ * - A tray sync that lands mid-drag commits the partial drag (one extra
+ *   entry), which is acceptable: each is a real change the user made.
  *
  * Each notification says whether the change is `transient` (a step of a dial
  * drag that will be followed by a commit), committed, or a restore. One user
@@ -293,6 +305,17 @@ export class EditorStore {
    */
   commitVariation(value: number): void {
     this.dispatch((state) => setVariation(state, value));
+  }
+
+  /**
+   * Commits whatever is mid-gesture (a transient state, or a deferred
+   * assignment) as it stands, as one committed notification. Nothing
+   * happens if the store is not mid-gesture. Undo calls it first, so an
+   * unfinished gesture is never lost and never left pending.
+   */
+  commitPending(): void {
+    this.settleNow();
+    this.set(this.state, false);
   }
 
   /** True while a dial drag has not been committed. */

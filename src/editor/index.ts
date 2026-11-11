@@ -145,3 +145,10 @@ export {
   type SelectionEvent,
   type SelectionState,
 } from './selection';
+export { History, HISTORY_LIMIT } from './history';
+export {
+  UndoManager,
+  type StepResult,
+  type UndoManagerOptions,
+} from './undo-manager';
+export { createUndoControls, type UndoControls } from './undo-controls';
