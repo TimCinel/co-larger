@@ -1,4 +1,16 @@
 import type { Photo, PhotoStore } from '../photos';
+import type { ResolutionLevel } from '../editor/resolution';
+
+/**
+ * What the tray needs of the low-resolution warnings (#15): the level of a
+ * photo's warning (undefined for none, or when turned off), its explanation,
+ * and a notice when levels change.
+ */
+export interface ResolutionMarks {
+  levelOf(photoId: string): ResolutionLevel | undefined;
+  describe(photoId: string): string | null;
+  onChange(listener: () => void): () => void;
+}
 
 /**
  * The tray: a toolbar ("N / M selected", add/remove all, and a button to
@@ -7,7 +19,11 @@ import type { Photo, PhotoStore } from '../photos';
  * one scrolling row, so the collage keeps most of the page; expanded they
  * wrap into a grid showing every photo.
  */
-export function createTray(doc: Document, store: PhotoStore): HTMLElement {
+export function createTray(
+  doc: Document,
+  store: PhotoStore,
+  resolution?: ResolutionMarks,
+): HTMLElement {
   const tray = doc.createElement('section');
   tray.className = 'tray';
   tray.setAttribute('aria-label', 'Photo tray');
@@ -68,6 +84,9 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
     readonly li: HTMLLIElement;
     readonly button: HTMLButtonElement;
     readonly url: string;
+    /** The marker for a low-resolution warning, made when first needed. */
+    mark: HTMLElement | null;
+    level: ResolutionLevel | undefined;
   }
   const items = new Map<string, Item>();
 
@@ -112,9 +131,53 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
     button.addEventListener('focus', () => {
       if (activeId !== photo.id) setActive(photo.id);
     });
-    items.set(photo.id, { li, button, url });
+    const item: Item = { li, button, url, mark: null, level: undefined };
+    items.set(photo.id, item);
+    // The explanation is worked out when asked for: its numbers change
+    // while the dial is dragged, and no thumbnail should pay for that.
+    const explain = (): void => {
+      const text = resolution?.describe(photo.id);
+      if (text) button.title = `${photo.file.name}. ${text}`;
+    };
+    button.addEventListener('pointerenter', explain);
+    button.addEventListener('focus', explain);
     li.append(button);
     return li;
+  }
+
+  /** Shows or clears each thumbnail's marker; touches only those that changed. */
+  function syncMarks(): void {
+    if (!resolution) return;
+    for (const [id, item] of items) {
+      const level = resolution.levelOf(id);
+      if (level === item.level) continue;
+      item.level = level;
+      const name = store.getPhoto(id)?.file.name ?? '';
+      if (level === undefined) {
+        item.mark?.remove();
+        item.mark = null;
+        item.button.setAttribute('aria-label', name);
+        item.button.title = name;
+        continue;
+      }
+      if (!item.mark) {
+        const mark = doc.createElement('span');
+        mark.className = 'res-badge res-badge-tray';
+        mark.setAttribute('aria-hidden', 'true');
+        const glyph = doc.createElement('span');
+        glyph.className = 'res-glyph';
+        mark.append(glyph);
+        item.mark = mark;
+        item.button.append(mark);
+      }
+      item.mark.dataset.level = level;
+      const glyph = item.mark.firstElementChild;
+      if (glyph) glyph.textContent = level === 'very-low' ? '!!' : '!';
+      item.button.setAttribute(
+        'aria-label',
+        `${name}, ${level === 'very-low' ? 'very low' : 'low'} resolution`,
+      );
+    }
   }
 
   function sync(): void {
@@ -148,6 +211,7 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
     empty.hidden = total > 0;
     expand.hidden = total === 0;
     grid.hidden = total === 0;
+    syncMarks();
   }
 
   grid.addEventListener('keydown', (event) => {
@@ -190,6 +254,7 @@ export function createTray(doc: Document, store: PhotoStore): HTMLElement {
   });
 
   store.subscribe(sync);
+  resolution?.onChange(syncMarks);
   sync();
   // Remaining object URLs are released with the page.
   doc.defaultView?.addEventListener('pagehide', () => {

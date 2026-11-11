@@ -12,10 +12,12 @@ import {
   createSizeReadout,
   createUndoControls,
   createTileSelection,
+  createResolutionWarnings,
   SELECTION_DEFERRED,
   EditorStore,
   FrameScheduler,
   type CollageView,
+  type ResolutionWarnings,
   type TileSelection,
   type UndoControls,
 } from './editor';
@@ -47,6 +49,8 @@ export interface App {
   readonly view: CollageView;
   /** Which tile is selected, and the Swap / Remove menu. */
   readonly selection: TileSelection;
+  /** Low-resolution warnings: badges, summary and the session toggle. */
+  readonly resolution: ResolutionWarnings;
   /** Undo and redo: the history of committed changes. */
   readonly undo: UndoControls;
   /** Save and open project (#12). */
@@ -150,6 +154,12 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
       );
     },
   });
+  const resolution = createResolutionWarnings({
+    doc,
+    view,
+    editor,
+    photos: store,
+  });
   const selection = createTileSelection({
     doc,
     view,
@@ -158,6 +168,7 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     imports: importer,
     frames,
     emptyFocus: () => addButton,
+    warningFor: (id) => resolution.describe(id),
   });
   // Opening a project resets the undo history on purpose: no toast for it.
   let installing = false;
@@ -182,7 +193,11 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   dropOverlay.textContent = 'Drop photos to add them';
   main.append(view.element, dropOverlay);
 
-  const tray = createTray(doc, store);
+  const tray = createTray(doc, store, {
+    levelOf: (id) => resolution.warningFor(id)?.level,
+    describe: (id) => resolution.describe(id),
+    onChange: (listener) => resolution.onChange(listener),
+  });
 
   // Notices sit in the tray, so they never cover the collage.
   tray.append(notices.element);
@@ -227,13 +242,16 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
       notices.show(message);
     },
   });
-  settings
-    .querySelector('.settings-footer')
-    ?.append(
-      project.element,
-      createExportControls({ doc, editor, photos: store, deps: browserDeps })
-        .element,
-    );
+  settings.querySelector('.settings-footer')?.append(
+    project.element,
+    createExportControls({
+      doc,
+      editor,
+      photos: store,
+      deps: browserDeps,
+      extra: resolution.element,
+    }).element,
+  );
   workspace.append(settings, stage);
   shell.append(header, workspace);
   root.replaceChildren(shell);
@@ -302,5 +320,5 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   importer.subscribe(showProgress);
 
   // The drop overlay is shown through the `dragging` class on the shell.
-  return { store, editor, view, selection, undo, project };
+  return { store, editor, view, selection, resolution, undo, project };
 }

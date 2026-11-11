@@ -51,6 +51,11 @@ export interface TileSelectionOptions {
   readonly emptyFocus?: () => HTMLElement | null;
   /** While an import runs, include changes wait for it (see store.ts). */
   readonly imports?: Pick<ImportActivity, 'isBusy'>;
+  /**
+   * An extra sentence for a photo's description (the low-resolution
+   * warning, #15), or null. Spoken with the tile's name when it is focused.
+   */
+  readonly warningFor?: (photoId: string) => string | null;
 }
 
 export interface TileSelection {
@@ -225,6 +230,8 @@ export function createTileSelection(
     const position = slotOf(photoId) + 1;
     const total = last?.state.assignment.length ?? 0;
     let text = `${name}, tile ${String(position)} of ${String(total)}`;
+    const warning = options.warningFor?.(photoId);
+    if (warning) text += `. ${warning.replace(/\.$/, '')}`;
     if (selection.kind === 'selected' && selection.photoId === photoId) {
       text += ', selected';
     } else if (selection.kind === 'swapping' && selection.photoId === photoId) {

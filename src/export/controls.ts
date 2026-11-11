@@ -26,6 +26,11 @@ export interface ExportControlsOptions {
   readonly editor: Pick<EditorStore, 'getState' | 'subscribe'>;
   readonly photos: { getPhoto(id: string): Photo | undefined };
   readonly deps: ExportDeps;
+  /**
+   * Shown under the Download button: the low-resolution summary and its
+   * checkbox (#15). Export is never blocked by it.
+   */
+  readonly extra?: HTMLElement;
   /** Hands the finished file to the user. Defaults to a download link. */
   readonly save?: (blob: Blob, fileName: string) => void;
 }
@@ -148,6 +153,7 @@ export function createExportControls(
     qualityRow,
     download,
     hint,
+    ...(options.extra ? [options.extra] : []),
     running,
     status,
     failure,

@@ -13,6 +13,7 @@
  *   node scripts/browser-check.ts --selection-screenshot  # and docs/screenshots/issue-8-*.png
  *   node scripts/browser-check.ts --crop-screenshot  # and docs/screenshots/issue-9-*.png
  *   node scripts/browser-check.ts --undo-screenshot  # and docs/screenshots/issue-10-undo.png
+ *   node scripts/browser-check.ts --resolution-only [--resolution-screenshot]  # just the #15 checks, and docs/screenshots/issue-15-*.png
  *   node scripts/browser-check.ts --tray-screenshot  # and docs/screenshots/photo-tray.png
  *   node scripts/browser-check.ts --port 5301     # another dev server port (or BROWSER_CHECK_PORT)
  *   node scripts/browser-check.ts --only sharp,cap,drag  # the editor image checks (#27)
@@ -28,6 +29,7 @@ import { chromium, firefox, type Browser, type Page } from 'playwright-core';
 import { createServer } from 'vite';
 import { checkA2, checkExport, exportRealFolder } from './export-checks.ts';
 import { checkProject, projectRealFolder } from './project-checks.ts';
+import { checkResolution } from './resolution-checks.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtures = join(root, 'tests', 'fixtures');
@@ -5516,6 +5518,26 @@ if (process.argv.includes('--a2-only')) {
 const browser = await chromium.launch({ channel: 'chrome' });
 console.log(`Browser: Chrome ${browser.version()}`);
 
+// `--resolution-only`: just the low-resolution warnings (#15).
+if (process.argv.includes('--resolution-only')) {
+  await checkResolution(
+    browser,
+    origin,
+    check,
+    process.argv.includes('--resolution-screenshot')
+      ? join(root, 'docs', 'screenshots')
+      : undefined,
+  );
+  await browser.close();
+  await server.close();
+  console.log(
+    failures === 0
+      ? '\nAll checks passed'
+      : `\n${String(failures)} check(s) FAILED`,
+  );
+  process.exit(failures === 0 ? 0 : 1);
+}
+
 // `--export-dir <folder>`: A2 export of real photos, numbers only.
 const exportDirIndex = process.argv.indexOf('--export-dir');
 if (exportDirIndex >= 0) {
@@ -5983,6 +6005,14 @@ await checkSharpTiles(
 await checkCacheCap(browser, 100);
 await checkCacheCap(browser, 300);
 await checkDialDrag(browser);
+await checkResolution(
+  browser,
+  origin,
+  check,
+  process.argv.includes('--resolution-screenshot')
+    ? join(root, 'docs', 'screenshots')
+    : undefined,
+);
 await checkExport(browser, origin, check, {
   screenshots: process.argv.includes('--export-screenshot')
     ? join(root, 'docs', 'screenshots')
