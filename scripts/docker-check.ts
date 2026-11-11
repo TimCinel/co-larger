@@ -95,6 +95,37 @@ const policy = await page.evaluate(async () => {
 });
 check('page is served with a Content-Security-Policy', policy.length > 0);
 
+// The page reports the version in package.json, and the commit it was built
+// from (a 7-character hash, or empty when the build had no Git metadata).
+const expectedVersion = (
+  JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+  ) as { version: string }
+).version;
+const reported = await page.evaluate(() => ({
+  version:
+    document.querySelector<HTMLMetaElement>('meta[name=version]')?.content ??
+    '',
+  commit:
+    document.querySelector<HTMLMetaElement>('meta[name=commit]')?.content ?? '',
+  shown: document.querySelector<HTMLAnchorElement>('a.version')?.textContent,
+}));
+check(
+  'page reports the version from package.json',
+  reported.version === expectedVersion,
+  `page ${reported.version}, package.json ${expectedVersion}`,
+);
+check(
+  'page reports a short commit hash',
+  /^[0-9a-f]{7}$/.test(reported.commit),
+  reported.commit === '' ? 'none' : reported.commit,
+);
+check(
+  'the UI shows the version and commit',
+  reported.shown === `co-larger ${expectedVersion} (${reported.commit})`,
+  reported.shown ?? 'no .version link',
+);
+
 async function addPhotos(p: Page, count: number): Promise<void> {
   await p.evaluate(async (count) => {
     const sizes = [

@@ -11,6 +11,11 @@ COPY package.json package-lock.json ./
 RUN npm ci --ignore-scripts --no-audit --no-fund
 COPY index.html vite.config.ts tsconfig.json ./
 COPY src ./src
+# The image has no Git metadata (.dockerignore keeps .git out), so the commit
+# is passed in: docker build --build-arg GIT_COMMIT=$(git rev-parse HEAD) .
+# Without it the page shows the version only. vite.config.ts reads it.
+ARG GIT_COMMIT=
+ENV GIT_COMMIT=$GIT_COMMIT
 RUN npm run build
 
 # nginx 1.30 (stable), Alpine, running as uid 101 and listening on 8080.

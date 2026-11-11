@@ -971,3 +971,18 @@ button.primary:hover:not(:disabled) {
   gap: 0.5rem;
   margin-top: 0.75rem;
 }
+
+/* The build's version, at the foot of the settings panel; it links to the
+   public repository. Small and muted so it stays out of the way. */
+.version {
+  margin-top: 0.75rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.version:hover {
+  color: var(--text);
+}

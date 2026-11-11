@@ -28,6 +28,7 @@ import {
 import { installDropTarget } from './ui/dropzone';
 import { createNotices, summaryMessages } from './ui/notices';
 import { createTray } from './ui/tray';
+import { createVersionLink } from './version';
 
 export const APP_NAME = 'co-larger';
 
@@ -227,6 +228,7 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
       createExportControls({ doc, editor, photos: store, deps: browserDeps })
         .element,
     );
+  settings.append(createVersionLink(doc, APP_NAME));
   workspace.append(settings, stage);
   shell.append(header, workspace);
   root.replaceChildren(shell);
