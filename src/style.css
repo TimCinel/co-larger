@@ -971,3 +971,48 @@ button.primary:hover:not(:disabled) {
   gap: 0.5rem;
   margin-top: 0.75rem;
 }
+
+/* The build's version, beside the title in the top bar; it links to the
+   public repository. Small and muted so it stays out of the way. It sits on
+   the title's baseline and never wraps, so the bar keeps its height. */
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.version {
+  flex: none;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  text-decoration: none;
+}
+
+.version:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+/* Narrow windows: the top bar is full, so the version alone (the commit
+   stays in the tooltip) goes in the bar's bottom-left corner, under the
+   title, out of the layout flow. The bar always has 15 px free there. */
+@media (max-width: 1200px) {
+  .topbar {
+    position: relative;
+  }
+
+  .version {
+    position: absolute;
+    left: 1rem;
+    bottom: 0.15rem;
+    font-size: 0.65rem;
+    line-height: 1.2;
+  }
+
+  .version-commit,
+  .version-dev {
+    display: none;
+  }
+}

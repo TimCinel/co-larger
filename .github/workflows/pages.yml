@@ -43,6 +43,9 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
+        env:
+          # Shown in the page next to the version (vite.config.ts).
+          GIT_COMMIT: ${{ github.sha }}
       - name: Upload site
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:

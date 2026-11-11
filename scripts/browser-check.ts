@@ -21,10 +21,10 @@
  *                                                  # (prints numbers only)
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readdirSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium, firefox, type Page } from 'playwright-core';
+import { chromium, firefox, type Browser, type Page } from 'playwright-core';
 import { createServer } from 'vite';
 import { checkA2, checkExport, exportRealFolder } from './export-checks.ts';
 import { checkProject, projectRealFolder } from './project-checks.ts';
@@ -5363,6 +5363,126 @@ const port = Number(
     process.env.BROWSER_CHECK_PORT ??
     5199,
 );
+/**
+ * The version in the page (issue #44): the meta tags, the link, and that the
+ * link changes no box: the top bar, canvas, tray and settings panel measure
+ * the same with it shown and hidden, with a realistic long version, and it
+ * overlaps nothing in the bar.
+ */
+async function checkVersion(browser: Browser): Promise<void> {
+  const expected = (
+    JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+      version: string;
+    }
+  ).version;
+  for (const [width, height] of [
+    [900, 620],
+    [1201, 700],
+    [1440, 900],
+  ] as const) {
+    const ctx = await browser.newContext({ viewport: { width, height } });
+    const p = await ctx.newPage();
+    await p.goto(origin);
+    await p.waitForSelector('.tray');
+    await p.setInputFiles(
+      'input[type=file]:not(.project-input)',
+      await makeSyntheticPhotos(p, 6),
+    );
+    await p.waitForSelector('.collage-canvas', { state: 'visible' });
+    await waitDrawn(p);
+    const info = await p.evaluate(() => {
+      const meta = (name: string): string =>
+        document.querySelector<HTMLMetaElement>(`meta[name=${name}]`)
+          ?.content ?? '';
+      const link = document.querySelector<HTMLAnchorElement>('a.version')!;
+      const rect = (el: Element): string => {
+        const r = el.getBoundingClientRect();
+        return [r.x, r.y, r.width, r.height].map(Math.round).join(',');
+      };
+      const boxes = (): string =>
+        ['.topbar', '.collage-canvas', '.tray', '.settings']
+          .map((sel) => rect(document.querySelector(sel)!))
+          .join(' ');
+      const shown = link.textContent;
+      const hrefs = {
+        href: link.href,
+        target: link.target,
+        rel: link.rel,
+        title: link.title,
+        label: link.getAttribute('aria-label') ?? '',
+      };
+      // A longer version than the real one, as in the first release.
+      const parts = link.querySelectorAll('span');
+      if (parts[0]) parts[0].textContent = '2026.11.0';
+      const withLink = boxes();
+      const l = link.getBoundingClientRect();
+      const overlaps = [...document.querySelector('.topbar')!.children]
+        .filter((el) => !el.contains(link) && !(el as HTMLElement).hidden)
+        .filter((el) => {
+          const r = el.getBoundingClientRect();
+          return (
+            r.width > 2 &&
+            r.height > 2 &&
+            l.left < r.right &&
+            l.right > r.left &&
+            l.top < r.bottom &&
+            l.bottom > r.top
+          );
+        })
+        .map((el) => el.className || el.tagName);
+      const bar = document.querySelector('.topbar')!.getBoundingClientRect();
+      const inBar = l.top >= bar.top && l.bottom <= bar.bottom;
+      link.style.display = 'none';
+      const without = boxes();
+      return {
+        version: meta('version'),
+        commit: meta('commit'),
+        shown,
+        ...hrefs,
+        same: withLink === without,
+        withLink,
+        without,
+        overlaps,
+        inBar,
+      };
+    });
+    const at = `${String(width)} x ${String(height)}`;
+    check(
+      `the page reports the package.json version (${at})`,
+      info.version === expected,
+      `${info.version} / ${expected}`,
+    );
+    check(
+      `the UI shows the version, commit and a dev marker (${at})`,
+      // Narrow windows hide the commit and the marker by CSS only.
+      info.shown ===
+        `${expected}${info.commit === '' ? '' : ` (${info.commit})`} dev`,
+      info.shown,
+    );
+    check(
+      `the version links to the public repository in a new tab, with a full name (${at})`,
+      info.href === 'https://github.com/TimCinel/co-larger' &&
+        info.target === '_blank' &&
+        info.rel === 'noopener noreferrer' &&
+        info.title.startsWith(expected) &&
+        info.label.startsWith(`co-larger version ${expected}`) &&
+        info.label.endsWith('source on GitHub'),
+      `${info.title} / ${info.label}`,
+    );
+    check(
+      `the version moves no box: top bar, canvas, tray and settings panel (${at})`,
+      info.same,
+      `${info.withLink} vs ${info.without}`,
+    );
+    check(
+      `the version overlaps nothing in the top bar and stays inside it (${at})`,
+      info.overlaps.length === 0 && info.inBar,
+      info.overlaps.join(', '),
+    );
+    await ctx.close();
+  }
+}
+
 const server = await createServer({
   root,
   server: { port, strictPort: true },
@@ -5850,6 +5970,7 @@ await checkPixelRatio(browser);
 await checkSelection(browser);
 await checkCrop(browser);
 await checkUndo(browser);
+await checkVersion(browser);
 await checkImportOnce(browser);
 await checkDeferredSelection(browser);
 await checkCropPerformance(browser);

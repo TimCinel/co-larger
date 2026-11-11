@@ -183,6 +183,17 @@ commit, and pushes one manifest list tagged with the short commit and `latest`
 (and with the version from `package.json` once it is not `0.0.0`). `PUSH=0
 docker/build.sh` builds for the local architecture only, without pushing.
 
+The top bar shows the `package.json` version and the short commit it was built
+from, beside the title (narrow windows show the version alone; the commit is in
+the tooltip). Both are also in `<meta name="version">` and
+`<meta name="commit">`. Builds in a
+Git checkout read the commit from Git; the image build has no `.git`, so
+`docker/build.sh` passes it as `--build-arg GIT_COMMIT=<hash>` (set the
+`GIT_COMMIT` environment variable for any other build). Without a commit the
+page shows the version alone, and `scripts/docker-check.ts` accepts that.
+Pass `--expect-commit <hash>` to the checker to require the commit and check it
+(for an image from `docker/build.sh`: `--expect-commit $(git rev-parse HEAD)`).
+
 To check an image the way it was verified, run it and point a real Chrome at it
 (needs Chrome; add `--subpath` to check it behind a proxy under `/collage/`):
 

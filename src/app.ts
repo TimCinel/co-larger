@@ -28,6 +28,7 @@ import {
 import { installDropTarget } from './ui/dropzone';
 import { createNotices, summaryMessages } from './ui/notices';
 import { createTray } from './ui/tray';
+import { createVersionLink } from './version';
 
 export const APP_NAME = 'co-larger';
 
@@ -116,8 +117,14 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
 
   const sizeReadout = createSizeReadout(doc, editor);
 
+  // The version sits beside the title, in the top bar, so it takes no space
+  // from the collage, the tray or the settings panel.
+  const brand = doc.createElement('div');
+  brand.className = 'brand';
+  brand.append(title, createVersionLink(doc, APP_NAME));
+
   header.append(
-    title,
+    brand,
     sizeReadout,
     addButton,
     progress,

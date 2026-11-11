@@ -35,6 +35,7 @@ fi
 
 docker buildx build ${PLATFORM:+--platform "$PLATFORM"} -f Dockerfile \
   --provenance=false --sbom=false \
+  --build-arg "GIT_COMMIT=$FULL" \
   --label org.opencontainers.image.title=co-larger \
   --label "org.opencontainers.image.description=co-larger: a client-side photo collage maker, served as a static site by nginx" \
   --label "org.opencontainers.image.version=$REV" \
