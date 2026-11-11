@@ -2,8 +2,8 @@
 # On master it pushes docker.io/timcinel/co-larger-builder:<tag> and :latest
 # (ci/tag.sh names the tag after the lockfile and ci/Dockerfile). On pull
 # requests it only builds, without secrets, to show the image still builds.
-# The CI check job runs in :latest and checks it matches the lockfile, so it
-# picks up the new image on its next run. See ci/README.md.
+# CI's "Pick builder image" job finds the new tag on its next run. See
+# ci/README.md.
 name: Builder image
 
 on:

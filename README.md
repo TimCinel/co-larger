@@ -42,9 +42,10 @@ npm run dev
 | `npm run check`         | Run lint, type check, tests and build, as CI does.                  |
 | `npm run check:browser` | Real-browser check of import and editor (local only; needs Chrome). |
 
-CI runs in a builder image with dependencies pre-fetched. After changing
-`package-lock.json`, rebuild it with `ci/build.sh` (see `ci/README.md`) and
-update the tag in `.forgejo/workflows/ci.yaml`.
+CI runs in a builder image with dependencies pre-installed. CI rebuilds and
+publishes it when `package-lock.json` or `ci/Dockerfile` changes on `master`,
+and the check job picks it up on its next run; nothing needs editing by hand
+(see `ci/README.md`).
 
 The layout engine (`src/layout/`) is a pure TypeScript library. To see it
 working, run `npm run dev` and open `/demo/layout.html`: a development-only page
@@ -170,9 +171,9 @@ filesystem, probes on `/healthz`) is in [docs/kubernetes.md](docs/kubernetes.md)
 
 ### Rebuilding and publishing the image
 
-The image is built and pushed from a developer's machine, for both
-architectures at once, with one command (CI does not build images yet; see
-issue #37):
+CI builds and pushes the image, for both architectures at once, when a release
+tag is pushed (`.forgejo/workflows/release-image.yaml`; see
+`docs/releasing.md`). It runs `docker/build.sh`, which also works by hand:
 
 ```sh
 docker login   # Docker Hub, once

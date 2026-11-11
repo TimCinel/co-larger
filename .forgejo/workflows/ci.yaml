@@ -6,18 +6,51 @@ on:
   pull_request:
 
 jobs:
-  check:
-    name: Lint, type check, test and build
+  # A job's container image is fixed before its steps run, so this small job
+  # picks the builder image for the check job: the one built for this
+  # commit's lockfile and ci/Dockerfile if it exists (the "Builder image"
+  # workflow pushes it on master), else the newest one. Tags are never
+  # re-pushed, so the cluster's pull-through cache cannot serve a stale copy.
+  # See ci/README.md.
+  builder:
+    name: Pick builder image
     runs-on: general-ci
     container:
-      # Docker Hub builder image with dependencies pre-installed. The
-      # "Builder image" workflow rebuilds it and moves :latest when the
-      # lockfile or ci/Dockerfile changes on master, so this line never needs
-      # editing. :latest may be older than this checkout (a pull request that
-      # changes the lockfile, or before the rebuild finishes); the install
-      # step below then runs npm ci, which is slower but equally correct.
-      # See ci/README.md.
-      image: docker.io/timcinel/co-larger-builder:latest
+      # Small image that has git and wget, and is pulled quickly.
+      image: docker.io/library/docker:29.9.3-cli
+    outputs:
+      image: ${{ steps.pick.outputs.image }}
+    steps:
+      - name: Fetch the lockfile and ci/ at this commit
+        env:
+          TOKEN: ${{ github.token }}
+          URL: ${{ github.server_url }}/${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          git init -q .
+          git -c credential.helper='!f() { echo username=x-access-token; echo "password=$TOKEN"; }; f' \
+            fetch -q --depth 1 --no-tags "$URL" "$SHA" &&
+            git checkout -q FETCH_HEAD -- package-lock.json ci ||
+            echo "Could not fetch the commit; falling back to the newest builder image"
+      - name: Pick the image
+        id: pick
+        run: |
+          if [ -x ci/resolve-image.sh ]; then
+            image=$(ci/resolve-image.sh)
+          else
+            image=docker.io/timcinel/co-larger-builder:latest
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+  check:
+    name: Lint, type check, test and build
+    needs: builder
+    runs-on: general-ci
+    container:
+      # Docker Hub builder image with dependencies pre-installed (see
+      # ci/README.md). If it was built for another lockfile, the install
+      # step runs npm ci instead: slower, same result.
+      image: ${{ needs.builder.outputs.image || 'docker.io/timcinel/co-larger-builder:latest' }}
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
