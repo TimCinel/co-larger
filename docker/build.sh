@@ -3,6 +3,9 @@
 # manifest to Docker Hub, tagged with the short commit, `latest` and (when
 # package.json carries one) the version. Requires `docker login` (Docker Hub)
 # beforehand and a clean working tree, so an image always matches a commit.
+# The source and url labels are set empty on purpose: they would otherwise be
+# inherited from the nginx base image and point at its repository. Add a public
+# URL once the project has one; do not use an internal host name here.
 # Set PUSH=0 to build for the local platform only and load it instead.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -38,6 +41,7 @@ docker buildx build ${PLATFORM:+--platform "$PLATFORM"} -f Dockerfile \
   --label "org.opencontainers.image.revision=$FULL" \
   --label "org.opencontainers.image.created=$CREATED" \
   --label "org.opencontainers.image.url=" \
+  --label "org.opencontainers.image.source=" \
   --label org.opencontainers.image.licenses=MIT \
   "${TAGS[@]}" "${TARGET[@]}" .
 
