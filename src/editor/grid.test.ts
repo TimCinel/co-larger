@@ -108,14 +108,58 @@ describe('columns', () => {
     expect(back.assignment).toEqual(auto.assignment);
   });
 
-  it('choosing the count Auto already shows changes only the setting', () => {
-    const auto = grid(12);
-    const shown = gridColumnsOf(auto.plan);
-    const swapped = swapTiles(auto, 0, 5);
-    const fixed = setColumns(swapped, shown);
-    expect(fixed.columns).toBe(shown);
-    expect(fixed.plan).toBe(swapped.plan);
-    expect(fixed.assignment).toBe(swapped.assignment);
+  it('every change of setting re-rolls a fresh equal grid, even to the same column count', () => {
+    // 12 square photos on 16:9: Auto gives 4 columns.
+    const squares = Array.from({ length: 12 }, (_, i) => ({
+      id: `s${String(i)}`,
+      aspect: 1,
+    }));
+    const auto = createEditorState({
+      seed: 5,
+      photos: squares,
+      layout: 'grid',
+    });
+    expect(gridColumnsOf(auto.plan)).toBe(4);
+    const four = setColumns(auto, 4);
+    // Hand-moved divider and a swap, then each kind of same-count change.
+    const distorted = swapTiles(moveDivider(four, '', 0.37651), 0, 5);
+    expect(distorted.plan.root).toMatchObject({ fraction: 0.37651 });
+    const cases: [string, EditorState, 'auto' | number][] = [
+      ['4 to Auto', distorted, 'auto'],
+      ['Auto to 4', swapTiles(moveDivider(auto, '', 0.37651), 0, 5), 4],
+      [
+        '20 to 30 (both clamp to 12)',
+        moveDivider(setColumns(auto, 20), '', 0.4),
+        30,
+      ],
+    ];
+    for (const [what, from, to] of cases) {
+      const next = setColumns(from, to);
+      expect(next, what).not.toBe(from);
+      expect(columnsOf(next), what).toBe(to);
+      const fresh = createEditorState({
+        seed: 5,
+        photos: squares,
+        layout: 'grid',
+        columns: to,
+      });
+      expect(next.plan, what).toEqual(fresh.plan);
+      expect(next.assignment, what).toEqual(fresh.assignment);
+    }
+    const reroll = setColumns(distorted, 'auto');
+    expect(reroll.plan.root).toMatchObject({ fraction: 1 / 3 });
+    // The value already selected: nothing at all.
+    expect(setColumns(distorted, 4)).toBe(distorted);
+    expect(setColumns(auto, 'auto')).toBe(auto);
+  });
+
+  it('the layout already selected is a no-op; switching always re-rolls', () => {
+    const g = moveDivider(grid(9, 3), '', 0.45);
+    expect(setLayout(g, 'grid')).toBe(g);
+    const back = setLayout(setLayout(g, 'mosaic'), 'grid');
+    expect(back.plan).toEqual(grid(9, 3).plan);
+    const m = createEditorState({ seed: 3, photos: photosOf(9) });
+    expect(setLayout(m, 'mosaic')).toBe(m);
   });
 
   it('a setting above the photo count is clamped for planning and kept', () => {
@@ -307,6 +351,21 @@ describe('dividers in a grid', () => {
   });
 });
 
+/** A grid state's JSON with the slots of its first two cells exchanged. */
+function swappedSlots(value: Record<string, unknown>): Record<string, unknown> {
+  const plan = value.plan as {
+    root: {
+      first: { first: { slot: number }; second: { first: { slot: number } } };
+    };
+  };
+  const row = plan.root.first;
+  [row.first.slot, row.second.first.slot] = [
+    row.second.first.slot,
+    row.first.slot,
+  ];
+  return value;
+}
+
 describe('validation', () => {
   it('round-trips grid states through JSON', () => {
     for (const s of [grid(1), grid(7, 3), grid(30, 1), grid(5, 20)]) {
@@ -325,12 +384,28 @@ describe('validation', () => {
       ['layout mosaic spelled out', { ...json(s), layout: 'mosaic' }],
       ['layout brick', { ...json(s), layout: 'brick' }],
       ['columns 0', { ...json(s), columns: 0 }],
+      ['columns -3', { ...json(s), columns: -3 }],
       ['columns 2.5', { ...json(s), columns: 2.5 }],
+      ['columns 10001', { ...json(s), columns: 10001 }],
+      ['columns 1e308', { ...json(s), columns: 1e308 }],
       ['columns "3"', { ...json(s), columns: '3' }],
       ['columns null', { ...json(s), columns: null }],
       ['columns disagree', { ...json(s), columns: 2 }],
       ['grid plan, mosaic layout', { ...json(s), layout: undefined }],
       ['mosaic plan, grid layout', { ...json(mosaic), layout: 'grid' }],
+      [
+        'mosaic tree marked as a grid',
+        {
+          ...json(mosaic),
+          layout: 'grid',
+          plan: { ...(json(mosaic).plan as object), kind: 'grid' },
+        },
+      ],
+      [
+        'unknown plan kind',
+        { ...json(s), plan: { ...(json(s).plan as object), kind: 'brick' } },
+      ],
+      ['swapped slot numbers', swappedSlots(json(s))],
     ];
     for (const [what, value] of bad) {
       expect(() => validateEditorState(value), what).toThrow(RangeError);

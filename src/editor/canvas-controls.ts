@@ -38,6 +38,7 @@ import {
   type RatioPreset,
   type Side,
 } from './canvas-settings';
+import { DIAL_GRID_NOTE, DIAL_GRID_NOTE_ID } from './controls';
 import type { FrameScheduler } from './frames';
 import { GestureInput } from './gesture';
 import { DEFAULT_DPI, formatMm, physicalFor } from './physical';
@@ -169,7 +170,11 @@ export function createCanvasSettings(
   columnsNote.id = 'grid-columns-note';
   columns.setAttribute('aria-describedby', columnsNote.id);
   columnsRow.append(columnsLabel, columns);
-  layoutSection.append(layoutChoice, columnsRow, columnsNote);
+  const dialNote = doc.createElement('p');
+  dialNote.className = 'columns-note';
+  dialNote.id = DIAL_GRID_NOTE_ID;
+  dialNote.textContent = DIAL_GRID_NOTE;
+  layoutSection.append(layoutChoice, columnsRow, columnsNote, dialNote);
   columns.addEventListener('change', () => {
     const value = columns.value;
     editor.dispatch((state) =>
@@ -185,6 +190,7 @@ export function createCanvasSettings(
     layoutRadios.grid.checked = grid;
     columnsRow.hidden = !grid;
     columnsNote.hidden = !grid;
+    dialNote.hidden = !grid;
     if (!grid) return;
     const n = state.photos.length;
     const setting = columnsOf(state);

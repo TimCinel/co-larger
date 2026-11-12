@@ -53,8 +53,10 @@
  * - Layout (#20, `layout` and `columns`): Mosaic (the default) or Grid. Every
  *   re-roll above runs the planner the layout asks for (see arrange), so a
  *   grid stays a grid through Shuffle, the photos changing and the canvas
- *   ratio changing. setLayout re-rolls; setColumns re-rolls in a grid and
- *   only records the setting in a mosaic. In a grid the dial has no effect
+ *   ratio changing. setLayout re-rolls whenever the layout changes;
+ *   setColumns re-rolls in a grid whenever the setting changes (even to a
+ *   setting giving the same column count) and only records the setting in
+ *   a mosaic. In a grid the dial has no effect
  *   (the plan does not depend on it) but its value stays in the state, for
  *   when the user returns to Mosaic. Shuffle changes which photo is in which
  *   cell. A column setting above the photo count is kept as the user set it
@@ -347,12 +349,12 @@ export function setLayout(state: EditorState, layout: LayoutKind): EditorState {
 
 /**
  * Sets the Columns setting (#20): `'auto'` or a whole number from 1 to
- * MAX_COLUMNS. In a grid it re-rolls (one undo step), unless the grid it
- * would make is the one shown (Auto already picking that count, or two
- * settings both beyond the photo count): then only the setting changes and
- * the photos stay where they are. In a mosaic only the setting changes.
- * Returns `state` itself if the setting is unchanged. Throws a RangeError
- * for anything else.
+ * MAX_COLUMNS. In a grid every change of setting re-rolls (one undo step),
+ * even when the column count it gives is the one shown (Auto already
+ * picking that count, or two settings both beyond the photo count): like
+ * every re-roll it lays out a fresh, equal grid, discarding hand-moved
+ * dividers and swaps. In a mosaic only the setting changes. Returns `state`
+ * itself if the setting is unchanged. Throws a RangeError for anything else.
  */
 export function setColumns(
   state: EditorState,
@@ -361,10 +363,7 @@ export function setColumns(
   const setting = checkSetting(layoutOf(state), columns);
   if (setting.columns === columnsOf(state)) return state;
   const next = replaceSetting(state, setting);
-  if (layoutOf(state) !== 'grid') return next;
-  const before = gridColumnsFor(state.canvas, state.photos, columnsOf(state));
-  const after = gridColumnsFor(state.canvas, state.photos, setting.columns);
-  return before === after ? next : reroll(next, {});
+  return layoutOf(state) === 'grid' ? reroll(next, {}) : next;
 }
 
 /** Re-rolls with a new seed (the Shuffle button). No-op for the same seed. */

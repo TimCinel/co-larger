@@ -12,9 +12,10 @@
  * project saved by 2026.11.0 opens here as a mosaic, and grid projects saved
  * here open in 2026.11.0 (version 1) or are refused by it (version 2).
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { unzipSync } from 'fflate';
+import { unzipSync, zipSync } from 'fflate';
 import type { Browser, Page } from 'playwright-core';
 import { checkSeed } from './check-seed.ts';
 import { INIT_SCRIPT, LOAD_EXPORT } from './export-checks.ts';
@@ -341,6 +342,10 @@ export async function checkGrid(
       dialDisabled: dial.disabled,
       dialValue: dial.valueAsNumber,
       description: document.getElementById(describedBy)?.textContent ?? '',
+      noteVisible:
+        document.getElementById(describedBy)?.closest('.settings') !== null &&
+        (document.getElementById(describedBy)?.getClientRects().length ?? 0) >
+          0,
       columnsVisible: select.getClientRects().length > 0,
       label: select.labels[0]?.textContent ?? '',
       firstOption: select.options[0]?.textContent ?? '',
@@ -361,11 +366,13 @@ export async function checkGrid(
     JSON.stringify(inGrid),
   );
   check(
-    'in Grid the dial is disabled, keeps its value, and is described to assistive technology',
+    'in Grid the dial is disabled, keeps its value, and is described by a visible note in the Layout section',
     inGrid.dialDisabled &&
       inGrid.variation === 0.23 &&
       inGrid.dialValue === 0.23 &&
-      inGrid.description.includes('does not apply to the Grid layout'),
+      inGrid.noteVisible &&
+      inGrid.description ===
+        'Size variation applies to Mosaic only; its value is kept.',
     `${inGrid.description} (value ${String(inGrid.dialValue)})`,
   );
   check(
@@ -395,6 +402,116 @@ export async function checkGrid(
     await p.screenshot({
       path: join(options.screenshots, 'issue-20-full-grid.png'),
     });
+  }
+
+  // --- The dial's keys do nothing in Grid ------------------------------------
+  {
+    const before = await stateJson(p);
+    const c = await commits(p);
+    const focused = await p.evaluate(() => {
+      const dial = document.querySelector<HTMLInputElement>('#size-variation')!;
+      dial.focus();
+      return document.activeElement === dial;
+    });
+    for (const key of ['ArrowRight', 'ArrowLeft', 'End', 'Home', 'PageUp']) {
+      await p.keyboard.press(key);
+    }
+    await drawn(p);
+    check(
+      'in Grid the dial cannot take focus and its keys (arrows, Home, End, Page Up) change nothing',
+      !focused && (await commits(p)) === c && (await stateJson(p)) === before,
+    );
+  }
+
+  // --- Choosing what is already selected does nothing ------------------------
+  {
+    // Here: Grid, Columns 4.
+    const before = await stateJson(p);
+    const c = await commits(p);
+    await p.locator('label.segment', { hasText: 'Grid' }).click();
+    await p.selectOption('#grid-columns', '4');
+    await drawn(p);
+    check(
+      'clicking Grid while in Grid, or choosing the Columns value already selected, changes nothing',
+      (await p.inputValue('#grid-columns')) === '4' &&
+        (await commits(p)) === c &&
+        (await stateJson(p)) === before,
+    );
+  }
+
+  // --- Changing Columns always lays out a fresh, equal grid ------------------
+  {
+    /** Drags the root (first row) divider down by 30 CSS px. */
+    const dragRoot = async (): Promise<number> => {
+      const line = await p.evaluate(async (module) => {
+        const { dividersFor } = await import(/* @vite-ignore */ module);
+        const last = (window as any).__app.view.lastRender();
+        const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+        const r = c.getBoundingClientRect();
+        const s = r.width / c.width;
+        const d = dividersFor(last.state, c).find((x: any) => x.path === '');
+        const x = d.axis === 'x';
+        const centre = (d.cut + d.border / 2) * s;
+        const mid = ((d.from + d.to) / 2) * s;
+        return {
+          x: r.left + (x ? centre : mid),
+          y: r.top + (x ? mid : centre),
+          axis: d.axis as string,
+        };
+      }, STATE_MODULE);
+      const dx = line.axis === 'x' ? 30 : 0;
+      const dy = line.axis === 'y' ? 30 : 0;
+      await p.mouse.move(line.x, line.y);
+      await p.mouse.down();
+      for (let i = 1; i <= 8; i++) {
+        await p.mouse.move(line.x + (dx * i) / 8, line.y + (dy * i) / 8);
+        await p.waitForTimeout(16);
+      }
+      await p.mouse.up();
+      await drawn(p);
+      return p.evaluate(
+        () => (window as any).__app.editor.getState().plan.root.fraction,
+      );
+    };
+    const rootFraction = (): Promise<number> =>
+      p.evaluate(
+        () => (window as any).__app.editor.getState().plan.root.fraction,
+      );
+    const results: string[] = [];
+    let ok = true;
+    // 4 (what Auto also gives) to Auto, Auto to 4, and 20 to 15 (both one
+    // row of 12): each a fresh grid in one commit, and Undo puts back the
+    // hand-resized one.
+    for (const [from, to, expected] of [
+      ['4', 'auto', 1 / 3],
+      ['auto', '4', 1 / 3],
+      ['20', '15', 1 / 12],
+    ] as const) {
+      if (from === '20') await act(p, 'setColumns', 20);
+      else await p.selectOption('#grid-columns', from);
+      await drawn(p);
+      const dragged = await dragRoot();
+      const resized = await stateJson(p);
+      const c = await commits(p);
+      await p.selectOption('#grid-columns', to);
+      await drawn(p);
+      const f = await rootFraction();
+      const one = (await commits(p)) === c + 1;
+      const fresh = Math.abs(f - expected) < 1e-12;
+      await undo(p);
+      const restored = (await stateJson(p)) === resized;
+      ok &&= one && fresh && restored && Math.abs(dragged - expected) > 0.01;
+      results.push(
+        `${from} to ${to}: dragged ${dragged.toFixed(5)}, then ${f.toFixed(5)}, ${one ? 'one commit' : 'commits wrong'}, undo ${restored ? 'restores' : 'differs'}`,
+      );
+    }
+    check(
+      'changing Columns to a setting with the same column count (4 to Auto, Auto to 4, 20 to 15 for 12 photos) re-rolls a fresh equal grid in one commit, discarding the dragged divider; Undo restores it',
+      ok,
+      results.join('; '),
+    );
+    await p.selectOption('#grid-columns', '4');
+    await drawn(p);
   }
 
   // --- Columns by hand: a partial last row ----------------------------------
@@ -935,6 +1052,10 @@ async function checkGridProjects(
   await act(p, 'setColumns', 1);
   const stripState = await stateJson(p);
   const strip = await saveProject(p, 'grid-strip');
+  // A Columns setting above the photo count (20 for 12): one row, kept.
+  await act(p, 'setColumns', 20);
+  const wideState = await stateJson(p);
+  const wide = await saveProject(p, 'grid-wide');
   await ctx.close();
 
   const results: string[] = [];
@@ -942,11 +1063,12 @@ async function checkGridProjects(
   for (const [name, zip, expected, version] of [
     ['4 columns', gentle, gridState, 1],
     ['1 column', strip, stripState, 2],
+    ['20 columns for 12 photos', wide, wideState, 2],
   ] as const) {
     const { ctx: c2, p: q } = await newPage(browser, origin);
     const error = await openProject(q, zip);
     const opened = await stateJson(q);
-    const again = await saveProject(q, `grid-again-${name.replace(' ', '-')}`);
+    const again = await saveProject(q, `grid-again-${name.replace(/ /g, '-')}`);
     const same = rawJson(again).equals(rawJson(zip));
     const v = projectJson(zip).version as number;
     const fine = error === '' && opened === expected && same && v === version;
@@ -957,10 +1079,74 @@ async function checkGridProjects(
     await c2.close();
   }
   check(
-    'grid projects: save, open restores layout, columns and arrangement; save again is byte-identical (version 1 for 4 columns, 2 for a 21:1 column)',
+    'grid projects: save, open restores layout, columns and arrangement; save again is byte-identical (version 1 for 4 columns, 2 for a 21:1 column; a Columns setting of 20 for 12 photos is kept, one row of 1:6.75 cells, version 2)',
     ok,
     results.join('; '),
   );
+
+  // Hostile grid files are refused, and the open project stays as it was.
+  {
+    const entries = unzipSync(new Uint8Array(readFileSync(gentle)));
+    const json = projectJson(gentle);
+    const cases: [string, (project: any) => void][] = [
+      ['columns "4" (a string)', (j) => (j.state.columns = '4')],
+      ['a grid plan with no layout', (j) => delete j.state.layout],
+      [
+        'swapped slot numbers in the grid tree',
+        (j) => {
+          const row = j.state.plan.root.first;
+          [row.first.slot, row.second.first.slot] = [
+            row.second.first.slot,
+            row.first.slot,
+          ];
+        },
+      ],
+    ];
+    const { ctx: c3, p: q } = await newPage(browser, origin);
+    await addSized(q, TWELVE.slice(0, 5));
+    const before = await stateJson(q);
+    const failures: string[] = [];
+    for (const [what, change] of cases) {
+      const project = structuredClone(json);
+      change(project);
+      const files: Record<string, [Uint8Array, { level: 0 }]> = {};
+      for (const [name, bytes] of Object.entries(entries)) {
+        files[name] = [
+          name === 'project.json'
+            ? new TextEncoder().encode(JSON.stringify(project))
+            : bytes,
+          { level: 0 },
+        ];
+      }
+      const path = join(
+        tmpdir(),
+        `grid-hostile-${String(Date.now())}-${String(Math.random()).slice(2)}.zip`,
+      );
+      writeFileSync(path, zipSync(files));
+      const error = await openProject(q, path);
+      if (error) {
+        await q.getByRole('button', { name: 'OK' }).click();
+        await q
+          .waitForSelector('.project-dialog[open]', {
+            state: 'detached',
+            timeout: 10_000,
+          })
+          .catch(() => undefined);
+      }
+      if (
+        !error.includes('Could not open the project') ||
+        (await stateJson(q)) !== before
+      ) {
+        failures.push(`${what}: ${error.replace(/\s+/g, ' ').slice(0, 80)}`);
+      }
+    }
+    check(
+      'a grid project with columns as a string, a grid plan without the grid layout, or swapped slot numbers is refused, and the open project is unchanged',
+      failures.length === 0,
+      failures.join(' | '),
+    );
+    await c3.close();
+  }
 
   if (!options.releaseOrigin) return;
   // --- Release 2026.11.0, both directions -----------------------------------

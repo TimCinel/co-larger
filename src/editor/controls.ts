@@ -6,9 +6,12 @@ import type { FrameScheduler } from './frames';
 import { layoutOf } from './state';
 import type { EditorStore } from './store';
 
-/** Why the dial is disabled in a grid (#20), for its description. */
+/** Why the dial is disabled in a grid (#20): shown in the Layout section. */
 export const DIAL_GRID_NOTE =
-  'Size variation does not apply to the Grid layout. Its value is kept for Mosaic.';
+  'Size variation applies to Mosaic only; its value is kept.';
+
+/** The id of that visible note (canvas-controls.ts), which describes the dial. */
+export const DIAL_GRID_NOTE_ID = 'layout-dial-note';
 
 /** Steps of the dial (a range input from 0 to 1). */
 const DIAL_STEP = 0.01;
@@ -61,14 +64,7 @@ export function createLayoutControls(
     editor.shuffle();
   });
 
-  // In a grid the dial is disabled (#20): say why, to assistive technology
-  // (the description) and on hover (the title). Hidden text, so the top bar
-  // gains nothing visible.
-  const gridNote = doc.createElement('span');
-  gridNote.id = 'size-variation-note';
-  gridNote.className = 'sr-only';
-
-  group.append(label, low, dial, high, shuffle, gridNote);
+  group.append(label, low, dial, high, shuffle);
 
   // While the dial moves, apply at most one value per frame. Every event
   // that can end the gesture commits; DialInput makes that one commit per
@@ -100,9 +96,11 @@ export function createLayoutControls(
     const grid = layoutOf(state) === 'grid';
     dial.disabled = disabled || grid;
     shuffle.disabled = disabled;
-    gridNote.textContent = grid ? DIAL_GRID_NOTE : '';
+    // In a grid the dial is disabled (#20). Why is said in a visible note in
+    // the Layout section (the top bar gains nothing), which describes the
+    // dial for assistive technology, and on hover (the title).
     if (grid) {
-      dial.setAttribute('aria-describedby', gridNote.id);
+      dial.setAttribute('aria-describedby', DIAL_GRID_NOTE_ID);
       dial.title = DIAL_GRID_NOTE;
       group.classList.add('dial-off');
     } else {
