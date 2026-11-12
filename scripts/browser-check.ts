@@ -1917,8 +1917,11 @@ async function checkPhysicalSizes(p: Page): Promise<void> {
       ['size-width-mm', 'size-height-mm', 'size-dpi'].every(
         (id) => document.querySelector(`label[for=${id}]`) !== null,
       ) &&
+      // The group holding the units radios (the Layout group, #20, is
+      // another radio group in the same panel).
       document
-        .querySelector('[role=radiogroup]')
+        .querySelector('input[name=size-units]')
+        ?.closest('[role=radiogroup]')
         ?.getAttribute('aria-label') === 'Size units',
   );
   check(
