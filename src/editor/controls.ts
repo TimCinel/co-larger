@@ -3,7 +3,12 @@
  */
 import { DialInput } from './dial';
 import type { FrameScheduler } from './frames';
+import { layoutOf } from './state';
 import type { EditorStore } from './store';
+
+/** Why the dial is disabled in a grid (#20), for its description. */
+export const DIAL_GRID_NOTE =
+  'Size variation does not apply to the Grid layout. Its value is kept for Mosaic.';
 
 /** Steps of the dial (a range input from 0 to 1). */
 const DIAL_STEP = 0.01;
@@ -56,7 +61,14 @@ export function createLayoutControls(
     editor.shuffle();
   });
 
-  group.append(label, low, dial, high, shuffle);
+  // In a grid the dial is disabled (#20): say why, to assistive technology
+  // (the description) and on hover (the title). Hidden text, so the top bar
+  // gains nothing visible.
+  const gridNote = doc.createElement('span');
+  gridNote.id = 'size-variation-note';
+  gridNote.className = 'sr-only';
+
+  group.append(label, low, dial, high, shuffle, gridNote);
 
   // While the dial moves, apply at most one value per frame. Every event
   // that can end the gesture commits; DialInput makes that one commit per
@@ -85,8 +97,19 @@ export function createLayoutControls(
   const sync = (): void => {
     const state = editor.getState();
     const disabled = state.photos.length === 0;
-    dial.disabled = disabled;
+    const grid = layoutOf(state) === 'grid';
+    dial.disabled = disabled || grid;
     shuffle.disabled = disabled;
+    gridNote.textContent = grid ? DIAL_GRID_NOTE : '';
+    if (grid) {
+      dial.setAttribute('aria-describedby', gridNote.id);
+      dial.title = DIAL_GRID_NOTE;
+      group.classList.add('dial-off');
+    } else {
+      dial.removeAttribute('aria-describedby');
+      dial.removeAttribute('title');
+      group.classList.remove('dial-off');
+    }
     // Follow the state when it changes from elsewhere (undo, loading a
     // project), but never fight the user's own drag.
     if (!gesture.isBusy() && dial.valueAsNumber !== state.variation) {

@@ -1,8 +1,9 @@
 /**
- * The canvas settings panel: ratio presets, custom pixel size with an aspect
- * lock, the border slider and the background colour, plus the output size
- * readout for the top bar. Every change goes through the EditorStore's pure
- * actions (setCanvasSize, setBorder, setBackground).
+ * The canvas settings panel: the layout (Mosaic or Grid, and the grid's
+ * columns, #20), ratio presets, custom pixel size with an aspect lock, the
+ * border slider and the background colour, plus the output size readout for
+ * the top bar. Every change goes through the EditorStore's pure actions
+ * (setLayout, setColumns, setCanvasSize, setBorder, setBackground).
  *
  * The "Size" section has a units choice. In pixels it is two fields; in
  * millimetres (#7) it is paper presets, width and height in mm and a DPI,
@@ -41,13 +42,19 @@ import type { FrameScheduler } from './frames';
 import { GestureInput } from './gesture';
 import { DEFAULT_DPI, formatMm, physicalFor } from './physical';
 import {
+  columnsOf,
+  gridColumnsFor,
+  layoutOf,
   setBackground,
   setBorder,
   setCanvasSize,
+  setColumns,
+  setLayout,
   setPhysicalSize,
   switchToPhysical,
   switchToPixels,
   type CanvasSettings,
+  type LayoutKind,
 } from './state';
 import type { EditorStore } from './store';
 
@@ -119,6 +126,100 @@ export function createCanvasSettings(
     panel.append(group);
     return group;
   };
+
+  // --- Layout (#20): first, since it changes the arrangement -------------
+  const layoutSection = section('Layout', 'settings-layout');
+  const layoutChoice = doc.createElement('div');
+  layoutChoice.className = 'segmented';
+  layoutChoice.setAttribute('role', 'radiogroup');
+  layoutChoice.setAttribute('aria-label', 'Layout');
+  const layoutRadios = {} as Record<LayoutKind, HTMLInputElement>;
+  for (const [value, text] of [
+    ['mosaic', 'Mosaic'],
+    ['grid', 'Grid'],
+  ] as const) {
+    const label = doc.createElement('label');
+    label.className = 'segment';
+    const radio = doc.createElement('input');
+    radio.type = 'radio';
+    radio.name = 'layout-kind';
+    radio.value = value;
+    const face = doc.createElement('span');
+    face.textContent = text;
+    label.append(radio, face);
+    layoutChoice.append(label);
+    layoutRadios[value] = radio;
+    radio.addEventListener('change', () => {
+      if (!radio.checked) return;
+      editor.dispatch((state) => setLayout(state, value));
+    });
+  }
+  // Columns: Grid only. A native select: arrow keys and typing work, and
+  // each choice is one committed change.
+  const columnsRow = doc.createElement('div');
+  columnsRow.className = 'columns-row';
+  const columnsLabel = doc.createElement('label');
+  columnsLabel.htmlFor = 'grid-columns';
+  columnsLabel.textContent = 'Columns';
+  const columns = doc.createElement('select');
+  columns.id = 'grid-columns';
+  columns.className = 'columns-select';
+  const columnsNote = doc.createElement('p');
+  columnsNote.className = 'columns-note';
+  columnsNote.id = 'grid-columns-note';
+  columns.setAttribute('aria-describedby', columnsNote.id);
+  columnsRow.append(columnsLabel, columns);
+  layoutSection.append(layoutChoice, columnsRow, columnsNote);
+  columns.addEventListener('change', () => {
+    const value = columns.value;
+    editor.dispatch((state) =>
+      setColumns(state, value === 'auto' ? 'auto' : Number(value)),
+    );
+  });
+  /** The options' key: rebuilt only when it changes. */
+  let columnsKey = '';
+  function syncLayout(): void {
+    const state = editor.getState();
+    const grid = layoutOf(state) === 'grid';
+    layoutRadios.mosaic.checked = !grid;
+    layoutRadios.grid.checked = grid;
+    columnsRow.hidden = !grid;
+    columnsNote.hidden = !grid;
+    if (!grid) return;
+    const n = state.photos.length;
+    const setting = columnsOf(state);
+    const auto = gridColumnsFor(state.canvas, state.photos, 'auto');
+    // 1 to the photo count, and the user's own setting if it is beyond it
+    // (kept, and used once there are enough photos).
+    const max = Math.max(n, setting === 'auto' ? 0 : setting);
+    const key = `${String(n)}/${String(auto)}/${String(max)}`;
+    if (key !== columnsKey) {
+      columnsKey = key;
+      const options: HTMLOptionElement[] = [];
+      const autoOption = doc.createElement('option');
+      autoOption.value = 'auto';
+      autoOption.textContent = n > 0 ? `Auto (${String(auto)})` : 'Auto';
+      options.push(autoOption);
+      for (let c = 1; c <= max; c++) {
+        const option = doc.createElement('option');
+        option.value = String(c);
+        option.textContent =
+          c > n ? `${String(c)} (${String(n)} used)` : String(c);
+        options.push(option);
+      }
+      columns.replaceChildren(...options);
+    }
+    columns.value = String(setting);
+    columns.disabled = n === 0;
+    columnsNote.textContent =
+      n === 0
+        ? 'Add photos to choose columns.'
+        : setting === 'auto'
+          ? `Auto picks the columns that crop the photos least: ${String(auto)} for these photos.`
+          : setting > n
+            ? `${String(setting)} columns; ${String(n)} photos fill one row.`
+            : `${String(setting)} columns, set by hand.`;
+  }
 
   // --- Ratio presets ---------------------------------------------------
   const ratioSection = section('Ratio', 'settings-ratio');
@@ -675,6 +776,7 @@ export function createCanvasSettings(
         button.title = `${p.label}: ${formatSize(to.width, to.height)}`;
       }
     }
+    syncLayout();
     syncFields();
     syncBorder();
     syncBackground();
