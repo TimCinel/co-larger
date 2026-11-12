@@ -87,9 +87,10 @@ collage-project.colarger.zip
 ```
 
 - `format` is always `co-larger-project`. `version` is a positive integer.
-  This build writes version 1 and reads version 1; a higher version is refused
-  with "this project was saved by a newer version". A change that an older
-  build could not read must bump the version.
+  This build reads versions 1 and 2 and writes the lowest version that can
+  hold the project (see [Version 2](#version-2-hand-resized-tiles)); a higher
+  version is refused with "this project was saved by a newer version". A
+  change that an older build could not read must bump the version.
 - `state` is the editor snapshot (see `EditorState` in `src/editor/state.ts`):
   canvas size (and physical size), border, background, the dial value, the
   seed, the layout `plan` itself, the `assignment` (which photo is in which
@@ -123,6 +124,35 @@ That has been true since the first release (2026.11.0), so:
 Both directions are covered by `node scripts/browser-check.ts --feature-only
 --feature-compat <a 2026.11.0 checkout>`. Bump `version` instead if a later
 field must not be silently dropped by an older build.
+
+### Version 2: hand-resized tiles
+
+Dragging a divider (#16) changes the `fraction` of a split node in
+`state.plan`; no field is added. The plan is saved and restored exactly, so a
+hand-resized collage reopens as it was.
+
+2026.11.0 checks every tile of a plan against the planner's aspect limit
+(2.5:1 for the plan's own shape, border not counted) and refuses a plan with a
+tile beyond it as "squashed". Hand resizing may go past that limit (a tile
+only has to stay at least 4% of the canvas's shorter side in both directions),
+so:
+
+- A project whose tiles are all within the planner's aspect limit is written
+  as version 1, hand resized or not. 2026.11.0 opens it with exactly the same
+  collage.
+- A project with a tile beyond the limit is written as version 2. 2026.11.0
+  refuses it with its "saved by a newer version of co-larger (format version
+  2; this one reads up to 1)" message and leaves its current project as it
+  was, instead of opening something it would call damaged.
+- This build reads both. Version 1 and 2 files are checked the same way: a
+  tile may be beyond the aspect limit only if it is at least 4% of the
+  shorter side in both directions (`checkTileSizes` in
+  `src/layout/dividers.ts`); anything else is refused as squashed.
+
+Version 2 is decided per save (`versionFor` in `src/project/format.ts`), so
+dragging a stretched tile back within the limit and saving again writes
+version 1. Both directions are covered by `node scripts/browser-check.ts
+--divider-only --feature-compat <a 2026.11.0 checkout>`.
 
 - `photos` lists every photo in tray order. `included` says whether the
   collage uses it, and must agree with `state.photos`. `width`, `height` and

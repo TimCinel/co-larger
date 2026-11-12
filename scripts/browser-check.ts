@@ -16,10 +16,12 @@
  *   node scripts/browser-check.ts --resolution-only [--resolution-screenshot]  # just the #15 checks, and docs/screenshots/issue-15-*.png
  *   node scripts/browser-check.ts --feature-only [--feature-screenshot]  # just the #14 checks, and docs/screenshots/issue-14-*.png
  *   node scripts/browser-check.ts --feature-compat <2026.11.0 checkout>  # also open projects across the release (#14)
+ *   node scripts/browser-check.ts --divider-only [--divider-screenshot]  # just the #16 checks, and docs/screenshots/issue-16-*.png
+ *                                                  # (with --feature-compat: also across the release)
  *   node scripts/browser-check.ts --tray-screenshot  # and docs/screenshots/photo-tray.png
  *   node scripts/browser-check.ts --port 5301     # another dev server port (or BROWSER_CHECK_PORT)
  *   node scripts/browser-check.ts --only sharp,cap,drag  # the editor image checks (#27)
- *   node scripts/browser-check.ts --only resolution,feature  # the #15 and #14 checks
+ *   node scripts/browser-check.ts --only resolution,feature  # the #15 and #14 checks (divider: #16)
  *   node scripts/browser-check.ts --dir <folder>  # also import a folder of real
  *                                                  # photos and report timing
  *                                                  # (prints numbers only)
@@ -34,6 +36,7 @@ import { checkA2, checkExport, exportRealFolder } from './export-checks.ts';
 import { checkProject, projectRealFolder } from './project-checks.ts';
 import { checkResolution } from './resolution-checks.ts';
 import { checkFeature } from './feature-checks.ts';
+import { checkDividers } from './divider-checks.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtures = join(root, 'tests', 'fixtures');
@@ -5560,6 +5563,27 @@ if (process.argv.includes('--feature-only')) {
   process.exit(failures === 0 ? 0 : 1);
 }
 
+// `--divider-only`: just the divider checks (#16). Takes `--feature-compat`
+// too, for the checks against the released 2026.11.0.
+const dividerOptions = {
+  screenshots: process.argv.includes('--divider-screenshot')
+    ? join(root, 'docs', 'screenshots')
+    : undefined,
+  releaseOrigin: featureOptions.releaseOrigin,
+};
+if (process.argv.includes('--divider-only')) {
+  await checkDividers(browser, origin, check, dividerOptions);
+  await browser.close();
+  await releaseServer?.close();
+  await server.close();
+  console.log(
+    failures === 0
+      ? '\nAll checks passed'
+      : `\n${String(failures)} check(s) FAILED`,
+  );
+  process.exit(failures === 0 ? 0 : 1);
+}
+
 // `--resolution-only`: just the low-resolution warnings (#15).
 if (process.argv.includes('--resolution-only')) {
   await checkResolution(
@@ -5666,6 +5690,9 @@ if (onlyIndex >= 0) {
   }
   if (names.includes('feature')) {
     await checkFeature(browser, origin, check, featureOptions);
+  }
+  if (names.includes('divider')) {
+    await checkDividers(browser, origin, check, dividerOptions);
   }
   await browser.close();
   await releaseServer?.close();
@@ -6063,6 +6090,7 @@ await checkResolution(
     : undefined,
 );
 await checkFeature(browser, origin, check, featureOptions);
+await checkDividers(browser, origin, check, dividerOptions);
 await checkExport(browser, origin, check, {
   screenshots: process.argv.includes('--export-screenshot')
     ? join(root, 'docs', 'screenshots')

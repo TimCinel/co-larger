@@ -503,6 +503,13 @@ export function createTileDividers(options: TileDividersOptions): TileDividers {
   }
 
   function refresh(): void {
+    // Another control's drag (the dial, a crop): nothing here moves with
+    // the pointer, so the dividers are placed again once it is committed,
+    // rather than every frame.
+    if (editor.isDragging() && active === null) {
+      highlight.hidden = true;
+      return;
+    }
     const list = dividers();
     if (list.length === 0) {
       layer.hidden = true;

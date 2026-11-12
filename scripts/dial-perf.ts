@@ -4,6 +4,11 @@
  * has, so the same file can be run on `master` and on a branch to compare:
  *
  *   node scripts/dial-perf.ts --port 5392 [--runs 5] [--config sharp|all-low]
+ *   node scripts/dial-perf.ts --port 5392 --gesture divider  # #16 builds
+ *
+ * `--gesture divider` drags the root divider between tiles (#16) instead of
+ * the dial, a third of the canvas each way and back, with the same number of
+ * moves at the same pace, so the two can be compared directly.
  *
  * Two collages, both with 300 generated photos (nothing from disk):
  *
@@ -35,6 +40,8 @@ const runs = Number(arg('--runs', '5'));
 const only = arg('--config', 'both');
 /** `--off`: turn the resolution warnings off first (when the app has them). */
 const off = process.argv.includes('--off');
+/** `--gesture divider`: drag the root divider (#16) instead of the dial. */
+const gesture = arg('--gesture', 'dial');
 
 const server = await createServer({
   root,
@@ -45,7 +52,7 @@ await server.listen();
 const origin = `http://localhost:${String(port)}`;
 const browser = await chromium.launch({ channel: 'chrome' });
 console.log(
-  `Chrome ${browser.version()}, 300 photos, ${String(runs)} runs each`,
+  `Chrome ${browser.version()}, 300 photos, ${String(runs)} runs each, dragging the ${gesture === 'divider' ? 'root divider' : 'dial'}`,
 );
 
 const q = (a: number[], f: number): number =>
@@ -110,17 +117,54 @@ for (const [label, scale, canvas] of [
     });
     const box = (await p.locator('#size-variation').boundingBox())!;
     const y = box.y + box.height / 2;
+    // Where the pointer is at f (0 to 1 and back).
+    let at = (f: number): [number, number] => [
+      box.x + 1 + (box.width - 2) * f,
+      y,
+    ];
+    if (gesture === 'divider') {
+      const line = await p.evaluate(async (module) => {
+        const { dividersFor } = await import(/* @vite-ignore */ module);
+        const app = (window as any).__app;
+        const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+        const r = c.getBoundingClientRect();
+        const s = r.width / c.width;
+        const d = dividersFor(app.view.lastRender().state, c)[0];
+        const centre = (d.cut + d.border / 2) * s;
+        const mid = ((d.from + d.to) / 2) * s;
+        const x = d.axis === 'x';
+        return {
+          x: r.left + (x ? centre : mid),
+          y: r.top + (x ? mid : centre),
+          axis: d.axis as string,
+          reach: (x ? r.width : r.height) / 3,
+        };
+      }, '/src/editor/state.ts');
+      at = (f) => [
+        line.x + (line.axis === 'x' ? line.reach * (2 * f - 1) : 0),
+        line.y + (line.axis === 'y' ? line.reach * (2 * f - 1) : 0),
+      ];
+      await p.mouse.move(line.x, line.y);
+    }
     const task0 = await metric('TaskDuration');
     const script0 = await metric('ScriptDuration');
-    await p.mouse.move(box.x + 1, y);
+    if (gesture !== 'divider') await p.mouse.move(...at(0));
     await p.mouse.down();
     const moves = 180;
     for (let i = 0; i <= moves; i++) {
-      const f = i <= moves / 2 ? (2 * i) / moves : 2 - (2 * i) / moves;
-      await p.mouse.move(box.x + 1 + (box.width - 2) * f, y);
+      // The divider starts in the middle (f = 0.5): out, back and through.
+      const t = gesture === 'divider' ? (i / moves + 0.25) % 1 : i / moves;
+      const f = t <= 0.5 ? 2 * t : 2 - 2 * t;
+      await p.mouse.move(...at(f));
       await p.waitForTimeout(16);
     }
     await p.mouse.up();
+    if (gesture === 'divider') {
+      // Back to the arrangement as planned, for the next run.
+      await p.evaluate(() => {
+        (window as any).__app.undo.manager.undo();
+      });
+    }
     busy.push(((await metric('TaskDuration')) - task0) * 1000);
     script.push(((await metric('ScriptDuration')) - script0) * 1000);
     const d = await p.evaluate(() => {
