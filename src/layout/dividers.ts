@@ -33,6 +33,7 @@
  * least the minimum both ways. So a saved project can still be checked for
  * tiles squashed to nothing, and every layout the user can make passes.
  */
+import { shapeLimit } from './grid';
 import { planAspectLimit } from './plan';
 import { placeLayout, walkPlaced } from './place';
 import type {
@@ -76,10 +77,13 @@ export interface Divider {
   /**
    * The node's region along the axis before snapping. A gap centred at
    * position `p` along the axis is fraction
-   * `(p - border / 2 - start) / (end - start - border)`: see fractionAt.
+   * `(p - border / 2 - start) / (end - start - border)`, or in a grid
+   * `(p + border / 2 - start) / (end - start + border)`: see fractionAt.
    */
   readonly start: number;
   readonly end: number;
+  /** Present (true) for a divider of a grid plan (#20), whose cut rule differs. */
+  readonly grid?: true;
 }
 
 /**
@@ -92,6 +96,7 @@ export function listDividers(
   options: PlaceOptions,
 ): Divider[] {
   const out: Divider[] = [];
+  const grid = plan.kind === 'grid';
   walkPlaced(
     plan,
     options,
@@ -109,6 +114,7 @@ export function listDividers(
         to: x ? s.y1 : s.x1,
         start: s.start,
         end: s.end,
+        ...(grid ? { grid: true as const } : {}),
       });
     },
   );
@@ -120,6 +126,12 @@ export function listDividers(
  * axis (canvas units), unclamped. Pointer drags map through this.
  */
 export function fractionAt(divider: Divider, position: number): number {
+  if (divider.grid) {
+    // cut = start + f * (length + border) - border, centred at position.
+    const span = divider.end - divider.start + divider.border;
+    if (!(span > 0)) return divider.fraction;
+    return (position + divider.border / 2 - divider.start) / span;
+  }
   const length = divider.end - divider.start - divider.border;
   if (!(length > 0)) return divider.fraction;
   return (position - divider.border / 2 - divider.start) / length;
@@ -286,11 +298,15 @@ export type TileSizes =
  * Checks the size rule every plan the editor can make satisfies (see the
  * module comment), in the plan's own geometry: each tile is either within
  * planAspectLimit, or at least MIN_TILE_FRACTION of the shorter side both
- * ways (each with a little floating-point slack). Throws for a malformed plan.
+ * ways (each with a little floating-point slack). For a grid (#20) the limit
+ * is the larger of planAspectLimit and the grid's own cell shape
+ * (shapeLimit), since a grid's cells may be far more stretched than any
+ * mosaic tile (one column on a wide canvas); validatePlan has already
+ * checked that its tree is exactly a grid's. Throws for a malformed plan.
  */
 export function checkTileSizes(plan: LayoutPlan): TileSizes {
   if (withinPlannerShape(plan)) return 'planned';
-  const limit = planAspectLimit(plan.aspect, 1, plan.count) * (1 + SLACK);
+  const limit = shapeLimit(plan) * (1 + SLACK);
   const m = minTileSide(plan) * (1 - SLACK);
   let result: TileSizes = 'planned';
   walkPlaced(plan, { width: plan.aspect, height: 1 }, (tile) => {

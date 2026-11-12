@@ -57,6 +57,18 @@ export interface LayoutPlan {
   readonly count: number;
   readonly variation: number;
   readonly seed: number;
+  /**
+   * `'grid'` for a Grid layout (#20, see grid.ts); absent for a mosaic (the
+   * key is missing, so a mosaic plan is exactly what it was before grids
+   * existed). It changes how cuts are placed: in a mosaic a cut gives
+   * `first` the share `fraction` of its region's length minus one gap; in a
+   * grid it gives `first` the share `fraction` of the length plus one gap,
+   * minus that gap (`fraction * (length + gap) - gap`), so that cuts at
+   * a/n split n equal tiles into a and n - a equal tiles at any border.
+   * With no border the two rules agree. A grid plan's tree must be exactly
+   * the grid tree for its count and columns (validatePlan checks it).
+   */
+  readonly kind?: 'grid';
   /** `null` only when `count` is 0. */
   readonly root: LayoutNode | null;
 }

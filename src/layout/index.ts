@@ -1,5 +1,7 @@
 /**
- * The mosaic layout engine: pure functions with no DOM or UI dependencies.
+ * The layout engine: pure functions with no DOM or UI dependencies. Two
+ * planners make the same kind of plan: planLayout (the mosaic) and planGrid
+ * (the Grid layout, #20, see grid.ts).
  *
  * Typical use:
  *
@@ -59,6 +61,18 @@ export {
   type SlotShape,
 } from './assign';
 export { validatePlan } from './validate';
+export {
+  autoColumns,
+  checkGridTree,
+  clampColumns,
+  gridColumnsOf,
+  gridCost,
+  gridRows,
+  gridShapeLimit,
+  planGrid,
+  shapeLimit,
+  type GridOptions,
+} from './grid';
 export {
   checkTileSizes,
   dividerAt,

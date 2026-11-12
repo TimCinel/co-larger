@@ -1,3 +1,4 @@
+import { checkGridTree } from './grid';
 import type { LayoutPlan } from './types';
 
 /**
@@ -5,14 +6,18 @@ import type { LayoutPlan } from './types';
  * from a saved project, and returns it typed. Throws a TypeError for the
  * wrong shape (missing fields, wrong types, unknown node kinds) and a
  * RangeError for out-of-range values (a fraction outside (0, 1), a slot
- * outside 0..count-1, a missing or repeated slot, a non-positive aspect).
+ * outside 0..count-1, a missing or repeated slot, a non-positive aspect, a
+ * plan marked as a grid whose tree is not exactly a grid's).
  *
  * placeLayout and the border functions call this themselves, so a bad plan
  * never yields holes or empty tiles silently.
  */
 export function validatePlan(value: unknown): LayoutPlan {
   if (!isObject(value)) throw new TypeError('plan must be an object');
-  const { aspect, count, variation, seed, root } = value;
+  const { aspect, count, variation, seed, root, kind } = value;
+  if (kind !== undefined && kind !== 'grid') {
+    throw new TypeError("plan.kind must be 'grid' or absent");
+  }
   if (typeof aspect !== 'number' || !(aspect > 0) || !isFinite(aspect)) {
     throw new RangeError('plan.aspect must be a positive finite number');
   }
@@ -85,6 +90,8 @@ export function validatePlan(value: unknown): LayoutPlan {
       `plan has ${String(leaves)} slots but count is ${String(count)}`,
     );
   }
+  // A grid's cut rule applies only to a real grid (#20).
+  if (kind === 'grid') checkGridTree(value as unknown as LayoutPlan);
   return value as unknown as LayoutPlan;
 }
 
