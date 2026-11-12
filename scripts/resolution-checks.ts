@@ -524,6 +524,39 @@ export async function checkResolution(
     }
     await p.keyboard.press(directions[i % 4]!);
   }
+  // The walk above depends on the arrangement (a random seed): on some
+  // layouts Right/Down/Left/Up never reaches a tile. Focus any tile it
+  // missed directly, by clicking it and pressing Escape (which clears the
+  // selection and leaves keyboard focus on the tile), so the assertion below
+  // covers every tile whatever the arrangement.
+  const missed = await p.evaluate((seen) => {
+    const app = (window as any).__app;
+    const last = app.view.lastRender();
+    const canvas =
+      document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    const r = canvas.getBoundingClientRect();
+    const sc = r.width / canvas.width;
+    return last.tiles
+      .map((t: any) => ({
+        name: app.store.getPhoto(last.state.assignment[t.slot]).file
+          .name as string,
+        x: r.left + (t.x + t.width / 2) * sc,
+        y: r.top + (t.y + t.height / 2) * sc,
+      }))
+      .filter((t: { name: string }) => !seen.some((d) => d.includes(t.name)));
+  }, described);
+  for (const tile of missed as { name: string; x: number; y: number }[]) {
+    await p.mouse.click(tile.x, tile.y);
+    await p.keyboard.press('Escape');
+    described.push(
+      await p.evaluate(
+        () =>
+          document
+            .querySelector('.collage-canvas')!
+            .getAttribute('aria-label') ?? '',
+      ),
+    );
+  }
   check(
     'resolution: the canvas description of a flagged tile includes the warning, an unflagged one does not',
     described.some((d) => d.includes('resolution: this tile uses')) &&

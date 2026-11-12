@@ -71,6 +71,23 @@ major difference: tile sizes are configurable, from uniform to a few very large
   slot of a different shape, the crop is re-fitted around the same focal point.
 - Swaps do not survive a re-roll. The intended workflow is: set the dial,
   shuffle until the shape is right, then swap and crop.
+- Feature: mark a photo from its tile's menu ("Feature", or F on the selected
+  tile; "Unfeature" to clear it) so re-rolls keep it in a large slot. Any
+  number of photos can be featured, with no ranking among them. Featuring
+  moves the photo at once into the largest slot not held by another featured
+  photo (one swap; nothing moves if it is already among the largest), and
+  unfeaturing never moves anything. On every re-roll (Shuffle, the dial, the
+  canvas ratio, including or excluding photos, importing) the k featured
+  photos take the k largest slots, matched among them by shape with the usual
+  placement cost, and the other photos fill the rest as before. "Largest" is
+  measured on the tiles as drawn and exported (border and pixel snapping
+  included), at the moment of each re-roll or feature. A border change is not
+  a re-roll and moves no photo, so it can leave a featured tile slightly
+  smaller than another until the next re-roll. With nothing
+  featured the arrangement is exactly what it was without the feature. The
+  mark belongs to the photo: it survives exclusion and is saved in the
+  project. A star marks featured tiles and their tray thumbnails (editor
+  chrome only, never exported). Featuring or unfeaturing is one undo step.
 - Undo and redo, covering at least re-rolls, swaps, crops and removals, so an
   accidental Shuffle is recoverable.
 
@@ -98,14 +115,13 @@ major difference: tile sizes are configurable, from uniform to a few very large
 
 - Save project: downloads a single zip containing the original photos and a
   JSON file describing the canvas settings, layout seed and arrangement,
-  per-photo crops, and include/exclude state.
+  per-photo crops, featured photos, and include/exclude state.
 - Open project: loads that zip and restores the editor to the same state.
 - The JSON carries a format version number.
 - No automatic persistence in the browser. A reload starts empty.
 
 ## v2 (not in v1)
 
-- Lock a photo as a feature, so re-rolls keep it in a large slot.
 - Drag the dividers between tiles to resize them.
 - Touch and mobile support.
 - Text overlay.

@@ -110,9 +110,11 @@ export {
   createEditorState,
   cropOf,
   DEFAULT_CANVAS,
+  featuredOf,
   DEFAULT_VARIATION,
   forgetPhotos,
   isAssignmentCached,
+  isFeatured,
   MAX_BORDER_FRACTION,
   MAX_CANVAS_SIDE,
   MAX_TILE_ASPECT,
@@ -124,6 +126,7 @@ export {
   setBorder,
   setCanvasSize,
   setCrop,
+  setFeatured,
   setPhotos,
   setPhysicalSize,
   swapTiles,
@@ -151,6 +154,13 @@ export {
   type ImportActivity,
 } from './store';
 export { createCollageView, type CollageView } from './view';
+export {
+  createFeatureMarkers,
+  MIN_STAR_TILE,
+  starCorner,
+  type FeatureMarkers,
+  type StarCorner,
+} from './feature-markers';
 export {
   createTileSelection,
   SELECTION_DEFERRED,
