@@ -3538,7 +3538,7 @@ async function checkCrop(
   );
   await p.locator('.collage-canvas').focus();
   const order: string[] = [];
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 5; i++) {
     await p.keyboard.press('Tab');
     order.push(
       await p.evaluate(() => {
@@ -3548,8 +3548,8 @@ async function checkCrop(
     );
   }
   check(
-    'Tab from the canvas reaches Swap, Remove, the zoom slider and Reset',
-    order.join() === 'Swap,Remove,slider,Reset',
+    'Tab from the canvas reaches Swap, Remove, Feature (#14), the zoom slider and Reset',
+    order.join() === 'Swap,Remove,Feature,slider,Reset',
     order.join(),
   );
   // The slider by keyboard: one commit per key press.
