@@ -22,6 +22,7 @@
  *                                                  # (with --feature-compat: also across the release)
  *   node scripts/browser-check.ts --tray-screenshot  # and docs/screenshots/photo-tray.png
  *   node scripts/browser-check.ts --port 5301     # another dev server port (or BROWSER_CHECK_PORT)
+ *   node scripts/browser-check.ts --only crop,undo   # in the full run's order
  *   node scripts/browser-check.ts --only sharp,cap,drag  # the editor image checks (#27)
  *   node scripts/browser-check.ts --only resolution,feature  # the #15 and #14 checks (divider: #16)
  *   node scripts/browser-check.ts --dir <folder>  # also import a folder of real
@@ -3741,8 +3742,12 @@ async function checkCrop(
   const shapes = new Set<string>();
   let shuffleOk = true;
   let detail = '';
+  // Eight fixed seeds (the state's own shuffle, as the button calls it with a
+  // random one), so the arrangements, and with them the number of distinct
+  // tile shapes asserted below, are the same on every run (#56).
+  const shuffleSeed = checkSeed(56001);
   for (let i = 0; i < 8; i++) {
-    await p.getByRole('button', { name: 'Shuffle' }).click();
+    await editorAction(p, 'shuffle', shuffleSeed + i);
     await waitDrawn(p);
     const tile = await markerTile();
     shapes.add((tile.width / tile.height).toFixed(2));
@@ -3760,9 +3765,9 @@ async function checkCrop(
   }
   const cropAfterShuffle = await cropOfMarker();
   check(
-    'after Shuffle a cropped photo is still centred on the same subject (8 shuffles, marker visible in its new tile)',
+    'after Shuffle a cropped photo is still centred on the same subject (8 fixed-seed shuffles, marker visible in its new tile)',
     shuffleOk && shapes.size >= 3 && cropAfterShuffle?.zoom === 3,
-    `${String(shapes.size)} tile shapes;${detail}`,
+    `seeds ${String(shuffleSeed)}..${String(shuffleSeed + 7)}: ${String(shapes.size)} tile shapes;${detail}`,
   );
 
   // A press on the selected tile, then a jump straight out of the canvas.
@@ -4421,6 +4426,12 @@ async function checkUndo(
   });
   await p.goto(origin);
   await p.waitForSelector('.tray');
+  // A reload (a dev server restart, a crash) throws the app's state away
+  // and fails the checks in confusing ways: count them to say so (#56).
+  let navigations = 0;
+  p.on('framenavigated', (f) => {
+    if (f === p.mainFrame()) navigations++;
+  });
   await p.setInputFiles('input[type=file]', await makeSyntheticPhotos(p, 8));
   await p.waitForFunction(
     () => (window as any).__app.editor.getState().photos.length === 8,
@@ -4484,8 +4495,15 @@ async function checkUndo(
     // An empty collage draws nothing to wait for.
     if (JSON.parse(await snap()).photos.length > 0) await waitDrawn(p);
   };
-  const centre = (slot: number): Promise<{ x: number; y: number }> =>
-    p.evaluate((slot) => {
+  const centre = async (slot: number): Promise<{ x: number; y: number }> => {
+    if (
+      (await p.evaluate(() => (window as any).__app.view.lastRender())) === null
+    ) {
+      throw new Error(
+        `undo: nothing is drawn to click (the page has navigated ${String(navigations)} time(s) since it loaded)`,
+      );
+    }
+    return p.evaluate((slot) => {
       const { tiles } = (window as any).__app.view.lastRender();
       const t = tiles.find((t: any) => t.slot === slot);
       const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
@@ -4495,6 +4513,7 @@ async function checkUndo(
         y: r.top + ((t.y + t.height / 2) * r.height) / c.height,
       };
     }, slot);
+  };
   const clickTile = async (slot: number): Promise<void> => {
     const { x, y } = await centre(slot);
     await p.mouse.click(x, y);
@@ -5074,6 +5093,11 @@ async function checkUndo(
   await p.keyboard.press(`${mod}+Shift+z`);
   await settle();
   check(
+    'undo: the page was not reloaded during the checks',
+    navigations === 0,
+    `${String(navigations)} navigation(s) after the first load`,
+  );
+  check(
     'undo: no console or page errors',
     errors.length === 0,
     errors.join(' | '),
@@ -5594,7 +5618,10 @@ async function checkVersion(browser: Browser): Promise<void> {
 
 const server = await createServer({
   root,
-  server: { port, strictPort: true },
+  // No file watcher and no HMR socket: an edit to the sources (or Vite
+  // re-optimizing a dependency) while a run is in progress would otherwise
+  // reload every open page, in the middle of a gesture (#56).
+  server: { port, strictPort: true, watch: null, hmr: false },
   logLevel: 'error',
 });
 await server.listen();
@@ -5795,6 +5822,7 @@ const onlyIndex = process.argv.indexOf('--only');
 if (onlyIndex >= 0) {
   const names = (process.argv[onlyIndex + 1] ?? '').split(',');
   if (names.includes('selection')) await checkSelection(browser);
+  if (names.includes('crop')) await checkCrop(browser);
   if (names.includes('undo')) await checkUndo(browser);
   if (names.includes('import')) await checkImportOnce(browser);
   if (names.includes('deferred')) await checkDeferredSelection(browser);
