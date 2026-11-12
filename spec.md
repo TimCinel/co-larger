@@ -79,7 +79,11 @@ major difference: tile sizes are configurable, from uniform to a few very large
   unfeaturing never moves anything. On every re-roll (Shuffle, the dial, the
   canvas ratio, including or excluding photos, importing) the k featured
   photos take the k largest slots, matched among them by shape with the usual
-  placement cost, and the other photos fill the rest as before. With nothing
+  placement cost, and the other photos fill the rest as before. "Largest" is
+  measured on the tiles as drawn and exported (border and pixel snapping
+  included), at the moment of each re-roll or feature. A border change is not
+  a re-roll and moves no photo, so it can leave a featured tile slightly
+  smaller than another until the next re-roll. With nothing
   featured the arrangement is exactly what it was without the feature. The
   mark belongs to the photo: it survives exclusion and is saved in the
   project. A star marks featured tiles and their tray thumbnails (editor

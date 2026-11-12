@@ -34,14 +34,19 @@
  *   but survive every action that does not re-roll, including setting the
  *   dial to the value it already has.
  * - Featured photos (#14, `featured`): every re-roll puts the k featured
- *   photos in the collage in the k largest tiles (see arrange). The mark
- *   belongs to the photo, like a crop: it survives re-rolls and exclusion and
- *   is dropped only by forgetPhotos. setFeatured marks or unmarks one photo;
- *   marking moves it into a large tile with at most one swap.
+ *   photos in the collage in the k largest tiles as drawn (see arrange). The
+ *   mark belongs to the photo, like a crop: it survives re-rolls and
+ *   exclusion and is dropped only by forgetPhotos. setFeatured marks or
+ *   unmarks one photo; marking moves it into a large tile with at most one
+ *   swap. The guarantee holds at each re-roll and at the moment of
+ *   featuring. A change that alters tile sizes without re-rolling (the
+ *   border, or another pixel size at the same ratio) moves no photo, as for
+ *   swaps; the next re-roll ranks the tiles again.
  *
  * Determinism: after any re-roll the plan and the assignment are a function
- * of (canvas ratio, photos, variation, seed, featured) only, never of the
- * previous state. See {@link arrange}. With nothing featured they are exactly
+ * of (canvas, photos, variation, seed, featured) only, never of the previous
+ * state. Without featured photos only the canvas ratio matters; with them,
+ * the canvas's pixel size and border decide which drawn tiles are largest. See {@link arrange}. With nothing featured they are exactly
  * what they were before featuring existed.
  */
 import {
@@ -59,6 +64,7 @@ import {
   type LayoutNode,
   type LayoutPlan,
   type PhotoShape,
+  type Tile,
 } from '../layout';
 import { DEFAULT_CROP, isDefaultCrop, normaliseCrop, type Crop } from './crop';
 import {
@@ -414,7 +420,7 @@ export const MAX_TILE_ASPECT = 3;
  * `effective`; the border control shows all three.
  */
 export function borderAt(
-  state: EditorState,
+  state: Pick<EditorState, 'plan' | 'canvas'>,
   size: { readonly width: number; readonly height: number } = state.canvas,
 ): BorderAt {
   const width = Math.round(size.width);
@@ -430,6 +436,38 @@ export function borderAt(
           }),
         );
   return { requested, effective: Math.min(Math.round(requested), max), max };
+}
+
+/** Just inside placeLayout's 2% tolerance between canvas and plan ratio. */
+const MAX_RATIO_ERROR = Math.log(1.019);
+
+/**
+ * Where each tile goes when `state` is drawn at `size` pixels: the state's
+ * plan placed at that size, with the border (a fraction of the shorter
+ * side) in whole pixels at that size and every edge snapped to whole pixels (so neighbouring
+ * tiles share an edge exactly and no background shows through
+ * anti-aliasing seams). The border drawn is borderAt(...).effective: the
+ * requested border, clamped to what the arrangement allows (see borderAt).
+ */
+export function tilesFor(
+  state: Pick<EditorState, 'plan' | 'canvas'>,
+  size: { readonly width: number; readonly height: number },
+): Tile[] {
+  const width = Math.round(size.width);
+  const height = Math.round(size.height);
+  if (state.plan.root === null || width < 1 || height < 1) return [];
+  // Rounding a tiny size (a few pixels) can distort the ratio beyond what
+  // placeLayout accepts; there is nothing useful to draw at that size.
+  if (
+    Math.abs(Math.log(width / height / state.plan.aspect)) > MAX_RATIO_ERROR
+  ) {
+    return [];
+  }
+  const border =
+    state.canvas.borderFraction > 0
+      ? borderAt(state, { width, height }).effective
+      : 0;
+  return placeLayout(state.plan, { width, height, border, snap: true });
 }
 
 /** Sets the background colour (`#rrggbb`, any case). Never re-rolls. */
@@ -476,7 +514,8 @@ export function isFeatured(state: EditorState, photoId: string): boolean {
  * held by another featured photo, by swapping with that tile's photo, unless
  * it is already in one of the k largest tiles (k: the featured photos in the
  * collage, this one included), when nothing moves. Tiles are ranked as
- * arrange ranks them (the shown plan with no border, ties in slot order), so
+ * arrange ranks them (the shown plan as drawn and exported: tilesFor at the
+ * canvas's pixel size, border and snapping included; ties in slot order), so
  * the photo lands where the next re-roll would keep it. At most one swap, so
  * one dispatch is one undo step with the swap in it.
  *
@@ -555,8 +594,10 @@ export function randomSeed(): number {
  *
  * Featured photos (#14): with k of `featured` among `photos` (0 < k < the
  * photo count), they take the k largest tiles of the plan at `variation`
- * itself (the plan that is shown), ranked by area with no border, ties in
- * slot order. Within a tenth the step plan's tiles are a little larger or
+ * itself (the plan that is shown), ranked by the area of each tile as it is
+ * drawn and exported: tilesFor at the canvas's pixel size, with the
+ * effective border and snapped edges, which can reorder tiles of nearly
+ * equal area. Ties (common in whole pixels) go in slot order. Within a tenth the step plan's tiles are a little larger or
  * smaller than the shown ones and can rank differently (about 4% of cases
  * measured, between tiles within a few percent of each other in area), so
  * ranking the step plan could leave a featured photo in the (k+1)th largest
@@ -834,12 +875,24 @@ function replaceFeatured(
   return { ...rest, ...withFeatured(normaliseFeatured(featured)) };
 }
 
-/** Every slot of a plan, largest first, as arrange ranks them. */
+/**
+ * Every slot of a plan, largest first, as arrange and setFeatured rank them
+ * (#14): by the area of the tile as it is drawn and exported, at the canvas's
+ * own pixel size with its effective border and snapped edges (tilesFor, the
+ * function the renderer and the export use). Equal areas, common with whole
+ * pixels, are in slot order.
+ */
 function slotOrder(plan: LayoutPlan, canvas: CanvasSettings): number[] {
   if (plan.root === null) return [];
-  return slotsBySize(
-    placeLayout(plan, { width: canvas.width, height: canvas.height }),
-  );
+  let tiles = tilesFor({ plan, canvas }, canvas);
+  // tilesFor draws nothing only for a canvas a few pixels across whose
+  // rounding distorts the ratio; rank the exact geometry then.
+  if (tiles.length !== plan.count) {
+    tiles = placeLayout(plan, { width: canvas.width, height: canvas.height });
+  }
+  const bySlot: Tile[] = [];
+  for (const tile of tiles) bySlot[tile.slot] = tile;
+  return slotsBySize(bySlot);
 }
 
 /** Which featured photos go where (for canonicalAssignment). */

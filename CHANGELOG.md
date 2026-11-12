@@ -19,7 +19,8 @@ that starts at 0 each month. Tags have no `v` prefix. See
 - Feature a photo so it stays large: "Feature" in a tile's menu (or F on the
   selected tile) moves the photo into the largest tile, and from then on
   Shuffle, the dial, the canvas ratio and including or excluding photos keep
-  every featured photo in the largest tiles. A star marks featured tiles and
+  every featured photo in the largest tiles as drawn (a border change alone
+  moves nothing). A star marks featured tiles and
   their tray thumbnails; it is not exported. "Unfeature" clears the mark
   without moving anything. Featuring is one undo step, and the marks are saved
   in the project. With nothing featured, arrangements are unchanged.

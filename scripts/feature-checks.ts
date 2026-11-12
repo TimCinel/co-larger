@@ -14,16 +14,16 @@
  * here opens in the release, which ignores the mark.
  */
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { unzipSync } from 'fflate';
+import { unzipSync, zipSync } from 'fflate';
 import type { Browser, Page } from 'playwright-core';
 
 type Check = (name: string, ok: boolean, detail?: string) => void;
 
 const STATE_MODULE = '/src/editor/state.ts';
-const LAYOUT_MODULE = '/src/layout/index.ts';
+const RENDER_MODULE = '/src/editor/render.ts';
 const sha = (bytes: Buffer): string =>
   createHash('sha256').update(bytes).digest('hex');
 
@@ -143,35 +143,36 @@ async function act(p: Page, name: string, ...args: unknown[]): Promise<void> {
 }
 
 /**
- * For each featured photo in the collage: its tile's rank by area (0 is the
- * largest) on the shown plan with no border, and whether every featured tile
- * is at least as large as every other tile.
+ * For each featured photo in the collage: its tile's rank by drawn area (0 is
+ * the largest), and whether every featured tile is at least as large as every
+ * other tile.
  */
 function featuredRanks(
   p: Page,
 ): Promise<{ k: number; ok: boolean; ranks: number[] }> {
-  return p.evaluate(async (module) => {
-    const { placeLayout } = await import(/* @vite-ignore */ module);
-    const s = (window as any).__app.editor.getState();
-    const slots = placeLayout(s.plan, {
-      width: s.canvas.width,
-      height: s.canvas.height,
-    });
-    const area = (i: number) => slots[i].width * slots[i].height;
-    const marked = new Set<string>(s.featured ?? []);
-    let minF = Infinity;
-    let maxO = 0;
-    const ranks: number[] = [];
-    s.assignment.forEach((id: string, slot: number) => {
-      if (marked.has(id)) {
-        minF = Math.min(minF, area(slot));
-        ranks.push(
-          slots.filter((_: unknown, j: number) => area(j) > area(slot)).length,
-        );
-      } else maxO = Math.max(maxO, area(slot));
-    });
-    return { k: ranks.length, ok: minF >= maxO, ranks: ranks.sort() };
-  }, LAYOUT_MODULE);
+  return p.evaluate(
+    async ({ module }) => {
+      const { tilesFor } = await import(/* @vite-ignore */ module);
+      const s = (window as any).__app.editor.getState();
+      // Each slot's tile as drawn: the renderer's and export's own call, at
+      // the export pixel size with the effective border and snapped edges.
+      const areas: number[] = [];
+      for (const t of tilesFor(s, s.canvas)) areas[t.slot] = t.width * t.height;
+      const marked = new Set<string>(s.featured ?? []);
+      let minF = Infinity;
+      let maxO = 0;
+      const ranks: number[] = [];
+      s.assignment.forEach((id: string, slot: number) => {
+        const a = areas[slot]!;
+        if (marked.has(id)) {
+          minF = Math.min(minF, a);
+          ranks.push(areas.filter((b) => b > a).length);
+        } else maxO = Math.max(maxO, a);
+      });
+      return { k: ranks.length, ok: minF >= maxO, ranks: ranks.sort() };
+    },
+    { module: RENDER_MODULE },
+  );
 }
 
 /** The centre of a slot's tile, in page CSS px. */
@@ -635,6 +636,65 @@ export async function checkFeature(
   );
   await p.keyboard.press('Escape');
 
+  // F typed into a text field is text, even with a tile selected; and F on
+  // the canvas with no tile selected (only the keyboard focus ring) does
+  // nothing.
+  const snapshot = (): Promise<string> =>
+    p.evaluate(() => {
+      const w = window as any;
+      const s = w.__app.editor.getState();
+      return JSON.stringify([s.featured, s.assignment, w.__commits]);
+    });
+  {
+    const beforeKeys = await snapshot();
+    const c3 = await centre(p, await smallestPlainSlot(p));
+    await p.mouse.click(c3.x, c3.y);
+    const selectedFirst = await p.evaluate(
+      () => (window as any).__app.selection.getSelection().kind as string,
+    );
+    const field = p.locator('#size-width');
+    const original = await field.inputValue();
+    await field.focus();
+    await p.keyboard.press('End');
+    await p.keyboard.press('f');
+    await p.keyboard.press('Shift+F');
+    const typed = await field.inputValue();
+    await p.keyboard.press('Backspace');
+    await p.keyboard.press('Backspace');
+    await p.evaluate(() => {
+      (document.activeElement as HTMLElement).blur();
+    });
+    await drawn(p);
+    const afterField = await snapshot();
+    check(
+      'feature: F typed into the width field (with a tile selected) goes into the field and features nothing',
+      selectedFirst === 'selected' &&
+        typed === `${original}fF` &&
+        afterField === beforeKeys &&
+        (await field.inputValue()) === original,
+      `${selectedFirst}; typed ${JSON.stringify(typed)}`,
+    );
+    await p.keyboard.press('Escape');
+    await p.evaluate(() => {
+      document.querySelector<HTMLElement>('.collage-canvas')!.focus();
+    });
+    await p.keyboard.press('ArrowRight');
+    await p.keyboard.press('f');
+    await p.keyboard.press('F');
+    await drawn(p);
+    const idle = await p.evaluate(
+      () => (window as any).__app.selection.getSelection().kind as string,
+    );
+    check(
+      'feature: F on the canvas with no tile selected does nothing',
+      idle === 'idle' && (await snapshot()) === beforeKeys,
+      idle,
+    );
+    await p.evaluate(() => {
+      (document.activeElement as HTMLElement).blur();
+    });
+  }
+
   // --- 4. The menu still fits at 900 x 620 ----------------------------------
   await p.setViewportSize({ width: 900, height: 620 });
   await p.waitForTimeout(400);
@@ -670,12 +730,17 @@ export async function checkFeature(
   await p.waitForTimeout(400);
   await drawn(p);
 
-  // --- 5. Re-rolls: 1, 2, 5 featured of 30 -----------------------------------
+  // --- 5. Re-rolls: 1, 2, 5 featured of 30, borders 0, 1, 3 and 10% -------
+  // Areas are those of the tiles as drawn (tilesFor at the export size, with
+  // the effective border and snapped edges). A border change is not a re-roll
+  // and moves no photo, so each border is followed by a Shuffle before the
+  // guarantee is checked.
+  const BORDERS = [0, 0.01, 0.03, 0.1];
   for (const k of [1, 2, 5]) {
     const result = await p.evaluate(
-      async ({ k, stateModule, layoutModule }) => {
+      async ({ k, stateModule, renderModule, borders }) => {
         const actions = await import(/* @vite-ignore */ stateModule);
-        const { placeLayout } = await import(/* @vite-ignore */ layoutModule);
+        const { tilesFor } = await import(/* @vite-ignore */ renderModule);
         const app = (window as any).__app;
         const ed = app.editor;
         const ids: string[] = ed.getState().photos.map((x: any) => x.id);
@@ -691,11 +756,10 @@ export async function checkFeature(
         let checks = 0;
         const verify = (what: string) => {
           const s = ed.getState();
-          const slots = placeLayout(s.plan, {
-            width: s.canvas.width,
-            height: s.canvas.height,
-          });
-          const area = (i: number) => slots[i].width * slots[i].height;
+          const areas: number[] = [];
+          for (const t of tilesFor(s, s.canvas)) {
+            areas[t.slot] = t.width * t.height;
+          }
           const marked = new Set(s.featured ?? []);
           let minF = Infinity;
           let maxO = 0;
@@ -703,14 +767,17 @@ export async function checkFeature(
           s.assignment.forEach((id: string, slot: number) => {
             if (marked.has(id)) {
               n++;
-              minF = Math.min(minF, area(slot));
-            } else maxO = Math.max(maxO, area(slot));
+              minF = Math.min(minF, areas[slot]!);
+            } else maxO = Math.max(maxO, areas[slot]!);
           });
           const valid =
             new Set(s.assignment).size === s.photos.length &&
-            s.assignment.length === s.photos.length;
+            s.assignment.length === s.photos.length &&
+            areas.length === s.photos.length;
           checks++;
-          if (n !== k || minF < maxO || !valid) failures.push(what);
+          if (n !== k || minF < maxO || !valid) {
+            failures.push(`${what} (${String(minF)} < ${String(maxO)})`);
+          }
         };
         const sizes = [
           [1920, 1080],
@@ -719,30 +786,85 @@ export async function checkFeature(
           [2480, 3508],
           [3508, 2480],
         ];
-        for (const [w, h] of sizes) {
-          ed.dispatch((s: any) => actions.setCanvasSize(s, w, h));
-          verify(`ratio ${String(w)}x${String(h)}`);
-        }
-        for (let i = 0; i < 20; i++) {
-          ed.commitVariation(i / 19);
-          verify(`dial ${(i / 19).toFixed(3)}`);
-        }
-        for (let i = 0; i < 50; i++) {
+        for (const border of borders) {
+          ed.dispatch((s: any) => actions.setCanvasSize(s, 1920, 1080));
+          ed.dispatch((s: any) => actions.setBorder(s, border));
           ed.shuffle();
-          verify(`shuffle ${String(i)}`);
+          const at = `border ${String(border)}`;
+          verify(`${at} shuffle`);
+          for (const [w, h] of sizes) {
+            ed.dispatch((s: any) => actions.setCanvasSize(s, w, h));
+            verify(`${at} ratio ${String(w)}x${String(h)}`);
+          }
+          for (let i = 0; i < 20; i++) {
+            ed.commitVariation(i / 19);
+            verify(`${at} dial ${(i / 19).toFixed(3)}`);
+          }
+          for (let i = 0; i < 20; i++) {
+            ed.shuffle();
+            verify(`${at} shuffle ${String(i)}`);
+          }
         }
+        ed.dispatch((s: any) => actions.setBorder(s, 0));
         ed.dispatch((s: any) => actions.setCanvasSize(s, 1920, 1080));
         ed.commitVariation(0.5);
         return { checks, failures };
       },
-      { k, stateModule: STATE_MODULE, layoutModule: LAYOUT_MODULE },
+      {
+        k,
+        stateModule: STATE_MODULE,
+        renderModule: RENDER_MODULE,
+        borders: BORDERS,
+      },
     );
     await drawn(p);
     check(
-      `feature: with ${String(k)} featured of 30, every featured photo stays in the ${String(k)} largest tiles through 5 ratios, 20 dial positions and 50 Shuffles`,
-      result.checks === 75 && result.failures.length === 0,
+      `feature: with ${String(k)} featured of 30, every featured photo stays in the ${String(k)} largest drawn tiles at borders 0, 1, 3 and 10% through 5 ratios, 20 dial positions and 21 Shuffles each`,
+      result.checks === BORDERS.length * 46 && result.failures.length === 0,
       `${String(result.checks)} checks; ${result.failures.slice(0, 5).join(', ')}`,
     );
+  }
+
+  // The review's case: 30 images cycling 320 x 200, 200 x 320 and 200 x 200,
+  // photos 1 to 5 featured, 1920 x 1080, dial 0.5, 3% border, seed
+  // 3601405607. Ranked on borderless, unsnapped geometry, a featured tile
+  // there was drawn smaller than an unfeatured one.
+  {
+    const repro = await newPage(browser, origin);
+    await addSized(
+      repro.p,
+      Array.from(
+        { length: 30 },
+        (_, i) =>
+          (
+            [
+              [320, 200],
+              [200, 320],
+              [200, 200],
+            ] as const
+          )[i % 3]!,
+      ),
+    );
+    const order: string[] = await repro.p.evaluate(() =>
+      (window as any).__store.getPhotos().map((x: any) => x.id),
+    );
+    for (const id of order.slice(0, 5))
+      await act(repro.p, 'setFeatured', id, true);
+    await act(repro.p, 'setCanvasSize', 1920, 1080);
+    await act(repro.p, 'setVariation', 0.5);
+    await act(repro.p, 'setBorder', 0.03);
+    await act(repro.p, 'shuffle', 3601405607);
+    const r = await featuredRanks(repro.p);
+    const border = await repro.p.evaluate(async (module) => {
+      const { borderAt } = await import(/* @vite-ignore */ module);
+      return borderAt((window as any).__app.editor.getState()).effective;
+    }, STATE_MODULE);
+    check(
+      "feature: the review's case (30 photos, 5 featured, 1920 x 1080, dial 0.5, 3% border, seed 3601405607): the featured photos are in the 5 largest drawn tiles",
+      r.k === 5 && r.ok && border > 0 && r.ranks.every((x) => x < 5),
+      `${JSON.stringify(r)}; border ${String(border)} px`,
+    );
+    await repro.ctx.close();
   }
   // The Shuffle button itself, with screenshots before and after.
   await shot('issue-14-before-shuffle-1440x900.png');
@@ -938,6 +1060,72 @@ export async function checkFeature(
       )) === expected.featured.length,
     openError || JSON.stringify(reopened.featured),
   );
+
+  // Hostile `featured` values are refused, and the open project stays as it
+  // was (docs/project-format.md: anything but a list of distinct ids of
+  // photos in the project is refused).
+  {
+    const entries = unzipSync(new Uint8Array(readFileSync(saved)));
+    const ids: string[] = json.photos.map((x: any) => x.id);
+    const cases: [string, unknown][] = [
+      ['a string', 'x'],
+      ['null', null],
+      ['an object', { 0: ids[0] }],
+      ['numbers', [1, 2]],
+      ['a non-string entry beside a real id', [ids[0], { id: ids[1] }]],
+      ['an unknown id', ['nobody']],
+      ['a duplicate', [ids[0], ids[0]]],
+      [
+        '10,000 entries',
+        Array.from({ length: 10_000 }, (_, i) => `photo-${String(i + 1)}`),
+      ],
+      [
+        '10,000 copies of one real id',
+        Array.from({ length: 10_000 }, () => ids[0]),
+      ],
+    ];
+    const before = await fresh.p.evaluate(() =>
+      JSON.stringify((window as any).__app.editor.getState()),
+    );
+    const starsBefore = (await stars(fresh.p)).length;
+    for (const [what, value] of cases) {
+      const project = { ...json, state: { ...json.state, featured: value } };
+      const files: Record<string, Uint8Array | [Uint8Array, { level: 0 }]> = {};
+      for (const [name, bytes] of Object.entries(entries)) {
+        files[name] =
+          name === 'project.json'
+            ? [new TextEncoder().encode(JSON.stringify(project)), { level: 0 }]
+            : [bytes, { level: 0 }];
+      }
+      const path = join(
+        tmpdir(),
+        `feature-hostile-${String(Date.now())}-${String(Math.random()).slice(2)}.zip`,
+      );
+      writeFileSync(path, zipSync(files));
+      const error = await openProject(fresh.p, path);
+      if (error) {
+        await fresh.p.getByRole('button', { name: 'OK' }).click();
+        await fresh.p
+          .waitForSelector('.project-dialog[open]', {
+            state: 'detached',
+            timeout: 10_000,
+          })
+          .catch(() => undefined);
+      }
+      const after = await fresh.p.evaluate(() =>
+        JSON.stringify((window as any).__app.editor.getState()),
+      );
+      await drawn(fresh.p);
+      check(
+        `feature: a project file whose featured is ${what} is refused, and the open project is unchanged`,
+        error.includes('Could not open the project') &&
+          error.includes('featured') &&
+          after === before &&
+          (await stars(fresh.p)).length === starsBefore,
+        error.replace(/\s+/g, ' ').slice(0, 160),
+      );
+    }
+  }
   await fresh.ctx.close();
 
   // --- 10. Compatibility with the released 2026.11.0 -------------------------
@@ -986,4 +1174,81 @@ export async function checkFeature(
     await rel.ctx.close();
   }
   await ctx.close();
+
+  // --- 11. 200 photos: continuous dial drags ---------------------------------
+  // Above 150 photos a drag defers the assignment until the dial rests or the
+  // drag ends. Once each drag has ended and the deferred assignment settled,
+  // the featured photos are in the largest drawn tiles.
+  {
+    const big = await newPage(browser, origin);
+    await addSized(
+      big.p,
+      Array.from(
+        { length: 200 },
+        (_, i) =>
+          (
+            [
+              [400, 300],
+              [300, 400],
+              [360, 240],
+              [300, 300],
+            ] as const
+          )[i % 4]!,
+      ),
+    );
+    const order: string[] = await big.p.evaluate(() =>
+      (window as any).__store.getPhotos().map((x: any) => x.id),
+    );
+    for (const i of [7, 50, 111, 160, 199]) {
+      await act(big.p, 'setFeatured', order[i], true);
+    }
+    await act(big.p, 'setBorder', 0.01);
+    const failures: string[] = [];
+    let deferred = 0;
+    for (let run = 0; run < 10; run++) {
+      const box = (await big.p.locator('#size-variation').boundingBox())!;
+      const y = box.y + box.height / 2;
+      const x = (f: number): number => box.x + 1 + (box.width - 2) * f;
+      // Different paths: start and end anywhere, some resting mid-drag long
+      // enough for the deferred assignment to run, some not.
+      const from = ((run * 37) % 100) / 100;
+      const to = ((run * 61 + 13) % 100) / 100;
+      await big.p.mouse.move(x(from), y);
+      await big.p.mouse.down();
+      const moves = 40;
+      for (let i = 1; i <= moves; i++) {
+        const t = i / moves;
+        const wobble = Math.sin(t * Math.PI * (run + 1)) * 0.15;
+        const f = Math.min(1, Math.max(0, from + (to - from) * t + wobble));
+        await big.p.mouse.move(x(f), y);
+        await big.p.waitForTimeout(run % 3 === 0 && i === moves / 2 ? 300 : 16);
+      }
+      await big.p.mouse.move(x(to), y);
+      deferred += await big.p.evaluate(() =>
+        (window as any).__app.editor.isDragging() ? 1 : 0,
+      );
+      await big.p.mouse.up();
+      await big.p.waitForFunction(
+        () => !(window as any).__app.editor.isDragging(),
+        undefined,
+        { timeout: 60_000 },
+      );
+      await drawn(big.p);
+      const r = await featuredRanks(big.p);
+      const dial = await big.p.evaluate(
+        () => (window as any).__app.editor.getState().variation as number,
+      );
+      if (!(r.k === 5 && r.ok && r.ranks.every((rank) => rank < 5))) {
+        failures.push(
+          `drag ${String(run)} to ${dial.toFixed(3)}: ${JSON.stringify(r.ranks)}`,
+        );
+      }
+    }
+    check(
+      'feature: with 200 photos, after each of 10 continuous dial drags ends and settles, the 5 featured photos are in the 5 largest drawn tiles',
+      failures.length === 0 && deferred === 10,
+      `${String(deferred)} drags were mid-gesture at release; ${failures.join('; ')}`,
+    );
+    await big.ctx.close();
+  }
 }

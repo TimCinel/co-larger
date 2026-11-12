@@ -1,13 +1,15 @@
 // Featured photos in the editor state (#14).
 import { describe, expect, it } from 'vitest';
 import {
-  placeLayout,
   validateAssignment,
   type PhotoShape,
   type SlotShape,
+  type Tile,
 } from '../layout';
+import { tilesFor } from './render';
 import {
   arrange,
+  borderAt,
   createEditorState,
   featuredOf,
   forgetPhotos,
@@ -39,12 +41,21 @@ const RATIOS = [
   [3508, 2480],
 ] as const;
 
-/** The shown tiles, with no border (as arrange ranks them). */
-const slotsOf = (state: EditorState): SlotShape[] =>
-  placeLayout(state.plan, {
-    width: state.canvas.width,
-    height: state.canvas.height,
-  });
+/**
+ * The tiles as rendered and exported, by slot: the renderer's tilesFor at the
+ * canvas's pixel size, with the state's border and snapped edges. This is
+ * what "largest" means to the user; the tests measure it, not the ranking
+ * code.
+ */
+function slotsOf(state: EditorState): SlotShape[] {
+  const out: Tile[] = [];
+  for (const tile of tilesFor(state, state.canvas)) out[tile.slot] = tile;
+  expect(out.filter(Boolean)).toHaveLength(state.photos.length);
+  return out;
+}
+
+/** Borders the property tests run with: none, 1%, 3% and 10%. */
+const BORDERS = [0, 0.01, 0.03, 0.1];
 const area = (s: SlotShape): number => s.width * s.height;
 
 /** Ranks of slots by area, 0 for the largest. */
@@ -69,9 +80,14 @@ function expectFeaturedLargest(state: EditorState): void {
   expect(minFeatured).toBeGreaterThanOrEqual(maxOther);
 }
 
-function withFeatured(ids: readonly string[], seed = 1): EditorState {
+function withFeatured(
+  ids: readonly string[],
+  seed = 1,
+  borderFraction = 0,
+): EditorState {
   return createEditorState({
     seed,
+    canvas: { borderFraction },
     photos: photosOf(30),
     featured: ids,
   });
@@ -79,37 +95,62 @@ function withFeatured(ids: readonly string[], seed = 1): EditorState {
 
 describe('re-rolls keep featured photos in the largest tiles', () => {
   for (const k of [1, 2, 5]) {
-    it(`${String(k)} of 30: 50 Shuffles, 20 dial positions, 5 canvas ratios`, () => {
-      const ids = photosOf(30)
-        .filter((_, i) => i % 6 === 1)
-        .slice(0, k)
-        .map((p) => p.id);
-      let state = withFeatured(ids);
-      expect(featuredOf(state)).toHaveLength(k);
-      for (const [width, height] of RATIOS) {
-        state = setCanvasSize(state, width, height);
-        expectFeaturedLargest(state);
-        for (let d = 0; d < 20; d++) {
-          state = setVariation(state, d / 19);
+    for (const border of BORDERS) {
+      it(`${String(k)} of 30, border ${String(border * 100)}%: 50 Shuffles, 20 dial positions, 5 canvas ratios`, () => {
+        const ids = photosOf(30)
+          .filter((_, i) => i % 6 === 1)
+          .slice(0, k)
+          .map((p) => p.id);
+        // Created with the border: changing the border alone is not a
+        // re-roll and moves nothing (tested below).
+        let state = withFeatured(ids, 1, border);
+        expect(featuredOf(state)).toHaveLength(k);
+        for (const [width, height] of RATIOS) {
+          state = setCanvasSize(state, width, height);
           expectFeaturedLargest(state);
+          for (let d = 0; d < 20; d++) {
+            state = setVariation(state, d / 19);
+            expectFeaturedLargest(state);
+          }
+          for (let seed = 100; seed < 150; seed++) {
+            state = shuffle(state, seed);
+            expectFeaturedLargest(state);
+          }
         }
-        for (let seed = 100; seed < 150; seed++) {
-          state = shuffle(state, seed);
-          expectFeaturedLargest(state);
-        }
-      }
-      // Deterministic: the same inputs give the same arrangement.
-      const again = arrange(
-        state.canvas,
-        state.photos,
-        state.variation,
-        state.seed,
-        featuredOf(state),
-      );
-      expect(again.assignment).toEqual(state.assignment);
-      expect(again.plan).toEqual(state.plan);
-    });
+        // Deterministic: the same inputs give the same arrangement.
+        const again = arrange(
+          state.canvas,
+          state.photos,
+          state.variation,
+          state.seed,
+          featuredOf(state),
+        );
+        expect(again.assignment).toEqual(state.assignment);
+        expect(again.plan).toEqual(state.plan);
+      });
+    }
   }
+
+  it('the review repro: 3% border, 1920 x 1080, dial 0.5, seed 3601405607', () => {
+    // 30 photos cycling 320 x 200, 200 x 320 and 200 x 200, photos 1 to 5
+    // featured. Ranked without the border, slot 22 (66,744 px² drawn) held
+    // a feature while unfeatured slot 4 was 75,276 px² (in Chrome).
+    const shapes = [320 / 200, 200 / 320, 1];
+    const photos = Array.from({ length: 30 }, (_, i) => ({
+      id: `photo-${String(i + 1)}`,
+      aspect: shapes[i % 3] as number,
+    }));
+    let state = createEditorState({
+      seed: 1,
+      variation: 0.5,
+      canvas: { width: 1920, height: 1080, borderFraction: 0.03 },
+      photos,
+      featured: photos.slice(0, 5).map((p) => p.id),
+    });
+    state = shuffle(state, 3601405607);
+    expect(borderAt(state).effective).toBe(32);
+    expectFeaturedLargest(state);
+  });
 
   it('holds for dial values between the tenths, and is order-independent', () => {
     const ids = ['p3', 'p11', 'p20'];
@@ -154,13 +195,16 @@ describe('re-rolls keep featured photos in the largest tiles', () => {
     }
   });
 
-  it('a border never changes where featured photos go', () => {
-    const state = withFeatured(['p5', 'p7']);
-    const bordered = setBorder(state, 0.05);
-    expect(bordered.assignment).toBe(state.assignment);
-    expect(shuffle(bordered, 9).assignment).toEqual(
-      shuffle(state, 9).assignment,
-    );
+  it('a border change moves no photo; the next re-roll ranks the drawn tiles again', () => {
+    for (let seed = 1; seed <= 20; seed++) {
+      const state = withFeatured(['p5', 'p7', 'p9'], seed);
+      const bordered = setBorder(state, 0.1);
+      // Not a re-roll (spec.md): the arrangement stays, even if the border
+      // reorders tiles of nearly equal size.
+      expect(bordered.assignment).toBe(state.assignment);
+      expect(bordered.plan).toBe(state.plan);
+      expectFeaturedLargest(shuffle(bordered, seed + 1000));
+    }
   });
 });
 

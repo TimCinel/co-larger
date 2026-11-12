@@ -7,9 +7,9 @@
  * 2D context methods are used, so it works on an HTMLCanvasElement, an
  * OffscreenCanvas or a recording fake in tests.
  */
-import { placeLayout, type Tile } from '../layout';
+import type { Tile } from '../layout';
 import { coverSource } from './crop';
-import { borderAt, cropOf, type EditorState } from './state';
+import { cropOf, tilesFor, type EditorState } from './state';
 
 /** An image ready to draw, with its size in pixels. */
 export interface DrawableImage {
@@ -82,34 +82,12 @@ export const PLACEHOLDER_COLOUR = '#d4d6db';
 export const ERROR_COLOUR = '#6b2a33';
 const ERROR_MARK_COLOUR = '#e8a0a8';
 
-/** Just inside placeLayout's 2% tolerance between canvas and plan ratio. */
-const MAX_RATIO_ERROR = Math.log(1.019);
-
 /**
- * Where each tile goes when `state` is drawn at `size` pixels: the state's
- * plan placed at that size, with the border (a fraction of the shorter
- * side) in whole pixels at that size and every edge snapped to whole pixels (so neighbouring
- * tiles share an edge exactly and no background shows through
- * anti-aliasing seams). The border drawn is borderAt(...).effective: the
- * requested border, clamped to what the arrangement allows (see borderAt).
+ * Where each tile goes when a state is drawn at a size (see state.ts): the
+ * editor, the export and featured-photo ranking (#14) all use this one
+ * function, so they agree on the geometry, border and snapping included.
  */
-export function tilesFor(state: EditorState, size: RenderSize): Tile[] {
-  const width = Math.round(size.width);
-  const height = Math.round(size.height);
-  if (state.plan.root === null || width < 1 || height < 1) return [];
-  // Rounding a tiny size (a few pixels) can distort the ratio beyond what
-  // placeLayout accepts; there is nothing useful to draw at that size.
-  if (
-    Math.abs(Math.log(width / height / state.plan.aspect)) > MAX_RATIO_ERROR
-  ) {
-    return [];
-  }
-  const border =
-    state.canvas.borderFraction > 0
-      ? borderAt(state, { width, height }).effective
-      : 0;
-  return placeLayout(state.plan, { width, height, border, snap: true });
-}
+export { tilesFor };
 
 /** Fills the whole output with the state's background colour. */
 export function drawBackground(

@@ -103,7 +103,8 @@ collage-project.colarger.zip
   featured; it takes no tile until included again). It is left out when no
   photo is featured, so a project with nothing featured is written exactly as
   before. A missing field or an empty list means nothing is featured; any
-  other value is refused.
+  other value (not a list, a non-string or unknown id, a repeated id) is
+  refused: the project does not open and the open project is left as it was.
 
 ### Compatibility of `state.featured`
 

@@ -19,6 +19,7 @@
  *   node scripts/browser-check.ts --tray-screenshot  # and docs/screenshots/photo-tray.png
  *   node scripts/browser-check.ts --port 5301     # another dev server port (or BROWSER_CHECK_PORT)
  *   node scripts/browser-check.ts --only sharp,cap,drag  # the editor image checks (#27)
+ *   node scripts/browser-check.ts --only resolution,feature  # the #15 and #14 checks
  *   node scripts/browser-check.ts --dir <folder>  # also import a folder of real
  *                                                  # photos and report timing
  *                                                  # (prints numbers only)
@@ -5630,7 +5631,6 @@ if (process.argv.includes('--project-only')) {
 
 // `--export-only`: just the export checks (without A2), while working on them.
 if (process.argv.includes('--export-only')) {
-  await checkFeature(browser, origin, check, featureOptions);
   await checkExport(browser, origin, check, {
     screenshots: process.argv.includes('--export-screenshot')
       ? join(root, 'docs', 'screenshots')
@@ -5661,7 +5661,14 @@ if (onlyIndex >= 0) {
     await checkCacheCap(browser, 300);
   }
   if (names.includes('drag')) await checkDialDrag(browser);
+  if (names.includes('resolution')) {
+    await checkResolution(browser, origin, check);
+  }
+  if (names.includes('feature')) {
+    await checkFeature(browser, origin, check, featureOptions);
+  }
   await browser.close();
+  await releaseServer?.close();
   await server.close();
   process.exit(failures === 0 ? 0 : 1);
 }
@@ -6055,6 +6062,7 @@ await checkResolution(
     ? join(root, 'docs', 'screenshots')
     : undefined,
 );
+await checkFeature(browser, origin, check, featureOptions);
 await checkExport(browser, origin, check, {
   screenshots: process.argv.includes('--export-screenshot')
     ? join(root, 'docs', 'screenshots')

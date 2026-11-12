@@ -4,6 +4,7 @@ import {
   arrangementStep,
   assignPhotos,
   largestSlots,
+  maxBorder,
   placeLayout,
   planLayout,
   slotsBySize,
@@ -20,6 +21,7 @@ const RATIOS = [
   [7, 5],
 ] as const;
 const DIALS = Array.from({ length: 20 }, (_, i) => i / 19);
+const BORDERS = [0, 0.01, 0.03, 0.1];
 
 function mix(count: number): PhotoShape[] {
   const aspects = [4 / 3, 3 / 2, 3 / 4, 2 / 3, 1, 16 / 9, 9 / 16];
@@ -64,7 +66,7 @@ describe('largestSlots', () => {
 });
 
 describe('assignPhotos with featured photos', () => {
-  it('puts 1, 2 and 5 featured photos of 30 in the largest slots: many seeds, dials and ratios', () => {
+  it('puts 1, 2 and 5 featured photos of 30 in the largest slots: many seeds, dials, ratios and borders', () => {
     const photos = mix(30);
     let cases = 0;
     for (const [w, h] of RATIOS) {
@@ -77,7 +79,21 @@ describe('assignPhotos with featured photos', () => {
             variation: arrangementStep(dial),
             seed,
           });
-          const slots = placeLayout(plan, { width: w * 100, height: h * 100 });
+          // The slots as drawn: whole pixels, a border of 0, 1, 3 or 10% of
+          // the shorter side (clamped as the editor clamps it), snapped.
+          const W = w * 160;
+          const H = h * 160;
+          const fraction = BORDERS[seed % BORDERS.length] as number;
+          const border = Math.min(
+            Math.round(fraction * Math.min(W, H)),
+            maxBorder(plan, W, H, { snap: true }),
+          );
+          const slots = placeLayout(plan, {
+            width: W,
+            height: H,
+            border,
+            snap: true,
+          });
           for (const k of [1, 2, 5]) {
             // A different featured set for each seed.
             const featured = new Set(
