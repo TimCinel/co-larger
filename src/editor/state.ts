@@ -33,10 +33,16 @@
  * - Manual swaps (#8: `swapSlots` on `assignment`) do not survive a re-roll,
  *   but survive every action that does not re-roll, including setting the
  *   dial to the value it already has.
+ * - Featured photos (#14, `featured`): every re-roll puts the k featured
+ *   photos in the collage in the k largest tiles (see arrange). The mark
+ *   belongs to the photo, like a crop: it survives re-rolls and exclusion and
+ *   is dropped only by forgetPhotos. setFeatured marks or unmarks one photo;
+ *   marking moves it into a large tile with at most one swap.
  *
  * Determinism: after any re-roll the plan and the assignment are a function
- * of (canvas ratio, photos, variation, seed) only, never of the previous
- * state. See {@link arrange}.
+ * of (canvas ratio, photos, variation, seed, featured) only, never of the
+ * previous state. See {@link arrange}. With nothing featured they are exactly
+ * what they were before featuring existed.
  */
 import {
   arrangementStep,
@@ -46,6 +52,7 @@ import {
   placeLayout,
   planAspectLimit,
   planLayout,
+  slotsBySize,
   swapSlots,
   validateAssignment,
   validatePlan,
@@ -157,6 +164,15 @@ export interface EditorState {
    * again. Read it with cropOf.
    */
   readonly crops: CropMap;
+  /**
+   * Ids of the featured photos (#14), sorted, no repeats; the key is absent
+   * (not an empty array) when none is featured, so a state with nothing
+   * featured is exactly what it was before the feature existed. Like crops,
+   * entries stay for excluded photos (an excluded photo takes no tile, and is
+   * featured again when included) and are dropped by forgetPhotos. Read it
+   * with featuredOf or isFeatured.
+   */
+  readonly featured?: readonly string[];
 }
 
 export interface CreateOptions {
@@ -165,6 +181,8 @@ export interface CreateOptions {
   readonly canvas?: Partial<CanvasSettings>;
   readonly variation?: number;
   readonly photos?: readonly PhotoShape[];
+  /** Featured photo ids (#14). Defaults to none. */
+  readonly featured?: readonly string[];
 }
 
 /** A new state, arranged for `photos` (none by default). */
@@ -173,7 +191,8 @@ export function createEditorState(options: CreateOptions = {}): EditorState {
   const variation = clampVariation(options.variation ?? DEFAULT_VARIATION);
   const seed = checkSeed(options.seed ?? randomSeed());
   const photos = [...(options.photos ?? [])];
-  const arrangement = arrange(canvas, photos, variation, seed);
+  const featured = normaliseFeatured(options.featured ?? []);
+  const arrangement = arrange(canvas, photos, variation, seed, featured);
   return {
     canvas,
     variation,
@@ -181,6 +200,7 @@ export function createEditorState(options: CreateOptions = {}): EditorState {
     photos,
     ...arrangement,
     crops: emptyCrops(),
+    ...withFeatured(featured),
   };
 }
 
@@ -265,7 +285,14 @@ export function forgetPhotos(
       )
     : state.crops;
   const photos = state.photos.filter((photo) => !doomed.has(photo.id));
-  const next = crops === state.crops ? state : { ...state, crops };
+  let next = crops === state.crops ? state : { ...state, crops };
+  const featured = featuredOf(state);
+  if (featured.some((id) => doomed.has(id))) {
+    next = replaceFeatured(
+      next,
+      featured.filter((id) => !doomed.has(id)),
+    );
+  }
   return setPhotos(next, photos);
 }
 
@@ -431,6 +458,61 @@ export function swapTiles(
   return slotA === slotB ? state : { ...state, assignment };
 }
 
+/** The featured photo ids (#14), sorted; empty when none. */
+export function featuredOf(state: EditorState): readonly string[] {
+  return state.featured ?? NONE;
+}
+
+/** Whether a photo is featured (#14), whether or not it is in the collage. */
+export function isFeatured(state: EditorState, photoId: string): boolean {
+  return featuredOf(state).includes(photoId);
+}
+
+/**
+ * Features or unfeatures one photo (#14). Returns `state` itself if the mark
+ * is already as asked.
+ *
+ * Featuring a photo in the collage moves it at once into the largest tile not
+ * held by another featured photo, by swapping with that tile's photo, unless
+ * it is already in one of the k largest tiles (k: the featured photos in the
+ * collage, this one included), when nothing moves. Tiles are ranked as
+ * arrange ranks them (the shown plan with no border, ties in slot order), so
+ * the photo lands where the next re-roll would keep it. At most one swap, so
+ * one dispatch is one undo step with the swap in it.
+ *
+ * Unfeaturing never moves anything. Marking a photo that is not in the
+ * collage (excluded) only marks it. Throws a RangeError for an empty id.
+ */
+export function setFeatured(
+  state: EditorState,
+  photoId: string,
+  featured: boolean,
+): EditorState {
+  if (typeof photoId !== 'string' || photoId === '') {
+    throw new RangeError('photo id must be a non-empty string');
+  }
+  const current = featuredOf(state);
+  if (current.includes(photoId) === featured) return state;
+  if (!featured) {
+    return replaceFeatured(
+      state,
+      current.filter((id) => id !== photoId),
+    );
+  }
+  const next = replaceFeatured(state, [...current, photoId]);
+  const slot = state.assignment.indexOf(photoId);
+  if (slot < 0) return next;
+  const marked = new Set(featuredOf(next));
+  const k = state.assignment.filter((id) => marked.has(id)).length;
+  const order = slotOrder(state.plan, state.canvas);
+  if (order.slice(0, k).includes(slot)) return next;
+  const target = order.find((s) => {
+    const id = state.assignment[s] as string;
+    return id === photoId || !marked.has(id);
+  }) as number;
+  return { ...next, assignment: swapSlots(state.assignment, slot, target) };
+}
+
 /** Sets one photo's crop (normalised). Never re-rolls. */
 export function setCrop(
   state: EditorState,
@@ -471,6 +553,18 @@ export function randomSeed(): number {
  * dragged within a tenth, and it makes the result path-independent: it
  * depends only on the arguments, never on the state before.
  *
+ * Featured photos (#14): with k of `featured` among `photos` (0 < k < the
+ * photo count), they take the k largest tiles of the plan at `variation`
+ * itself (the plan that is shown), ranked by area with no border, ties in
+ * slot order. Within a tenth the step plan's tiles are a little larger or
+ * smaller than the shown ones and can rank differently (about 4% of cases
+ * measured, between tiles within a few percent of each other in area), so
+ * ranking the step plan could leave a featured photo in the (k+1)th largest
+ * tile; ranking the shown plan never does. The photos are then matched
+ * within those tiles, and the rest within the others, by the usual cost on
+ * the step plan's shapes. With nothing (or everything) featured this is the
+ * plain assignment.
+ *
  * Assignment costs O(n³), so the last few results are cached; the cache never
  * changes a result (see clearArrangementCache).
  */
@@ -479,12 +573,21 @@ export function arrange(
   photos: readonly PhotoShape[],
   variation: number,
   seed: number,
+  featured: readonly string[] = [],
 ): { plan: LayoutPlan; assignment: string[] } {
   const v = clampVariation(variation);
   const plan = planFor(canvas, photos.length, v, seed);
   return {
     plan,
-    assignment: [...canonicalAssignment(canvas, photos, v, seed)],
+    assignment: [
+      ...canonicalAssignment(
+        canvas,
+        photos,
+        v,
+        seed,
+        featuredSlotsFor(canvas, photos, plan, featured),
+      ),
+    ],
   };
 }
 
@@ -503,6 +606,18 @@ export function isAssignmentCached(
       state.photos,
       clampVariation(variation),
       state.seed,
+      featuredSlotsFor(
+        state.canvas,
+        state.photos,
+        () =>
+          planFor(
+            state.canvas,
+            state.photos.length,
+            clampVariation(variation),
+            state.seed,
+          ),
+        featuredOf(state),
+      ),
     ),
   );
 }
@@ -549,6 +664,7 @@ export function validateEditorState(
 ): EditorState {
   if (!isRecord(value)) throw new RangeError('state must be an object');
   const { canvas, variation, seed, photos, plan, assignment, crops } = value;
+  const { featured } = value;
   if (!isRecord(canvas)) throw new RangeError('canvas must be an object');
   const checkedCanvas = checkCanvas({
     width: canvas.width as number,
@@ -644,6 +760,25 @@ export function validateEditorState(
     }
     if (!isDefaultCrop(normal)) checkedCrops[id] = normal;
   }
+
+  // Optional: absent in projects saved before #14, and when none is featured.
+  let checkedFeatured: string[] = [];
+  if (featured !== undefined) {
+    if (!Array.isArray(featured)) {
+      throw new RangeError('featured must be an array');
+    }
+    for (const id of featured as unknown[]) {
+      if (typeof id !== 'string' || !known.has(id)) {
+        throw new RangeError(
+          `featured names an unknown photo ${JSON.stringify(id)}`,
+        );
+      }
+    }
+    checkedFeatured = normaliseFeatured(featured as string[]);
+    if (checkedFeatured.length !== featured.length) {
+      throw new RangeError('featured names a photo twice');
+    }
+  }
   return {
     canvas: checkedCanvas,
     variation,
@@ -652,6 +787,7 @@ export function validateEditorState(
     plan: checkedPlan,
     assignment: [...assignment],
     crops: checkedCrops,
+    ...withFeatured(checkedFeatured),
   };
 }
 
@@ -669,8 +805,74 @@ function reroll(
     next.photos,
     next.variation,
     next.seed,
+    featuredOf(next),
   );
   return { ...next, ...arrangement };
+}
+
+const NONE: readonly string[] = Object.freeze([]);
+
+/** Sorted (by code unit), without repeats. */
+function normaliseFeatured(ids: readonly string[]): string[] {
+  return [...new Set(ids)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/** `{ featured }`, or nothing for none: the key is absent when empty. */
+function withFeatured(featured: readonly string[]): {
+  featured?: readonly string[];
+} {
+  return featured.length === 0 ? {} : { featured: Object.freeze(featured) };
+}
+
+/** `state` with another featured list (normalised; absent when empty). */
+function replaceFeatured(
+  state: EditorState,
+  featured: readonly string[],
+): EditorState {
+  const rest: EditorState = { ...state };
+  delete (rest as { featured?: readonly string[] }).featured;
+  return { ...rest, ...withFeatured(normaliseFeatured(featured)) };
+}
+
+/** Every slot of a plan, largest first, as arrange ranks them. */
+function slotOrder(plan: LayoutPlan, canvas: CanvasSettings): number[] {
+  if (plan.root === null) return [];
+  return slotsBySize(
+    placeLayout(plan, { width: canvas.width, height: canvas.height }),
+  );
+}
+
+/** Which featured photos go where (for canonicalAssignment). */
+interface FeaturedSlots {
+  /** The featured photos in the collage, sorted. */
+  readonly ids: readonly string[];
+  /** The slots they take, in slot order. */
+  readonly slots: readonly number[];
+}
+
+/**
+ * The slots the featured photos among `photos` must take: the k largest of
+ * the shown plan (`plan`, or a function making it, so it is only made when
+ * needed). Null when there are none to place, or every photo is featured
+ * (then the plain assignment applies).
+ */
+function featuredSlotsFor(
+  canvas: CanvasSettings,
+  photos: readonly PhotoShape[],
+  plan: LayoutPlan | (() => LayoutPlan),
+  featured: readonly string[],
+): FeaturedSlots | null {
+  if (featured.length === 0) return null;
+  const marked = new Set(featured);
+  const ids = photos.filter((p) => marked.has(p.id)).map((p) => p.id);
+  if (ids.length === 0 || ids.length === photos.length) return null;
+  const shown = typeof plan === 'function' ? plan() : plan;
+  return {
+    ids: normaliseFeatured(ids),
+    slots: slotOrder(shown, canvas)
+      .slice(0, ids.length)
+      .sort((a, b) => a - b),
+  };
 }
 
 /** Floating-point slack on the plan aspect limit when validating. */
@@ -720,9 +922,14 @@ function assignmentKey(
   photos: readonly PhotoShape[],
   variation: number,
   seed: number,
+  featured: FeaturedSlots | null,
 ): string {
   const shapes = photos.map((p) => `${p.id}:${String(p.aspect)}`).join('|');
-  return `${String(canvas.width / canvas.height)}/${String(arrangementStep(variation))}/${String(seed)}/${shapes}`;
+  const key = `${String(canvas.width / canvas.height)}/${String(arrangementStep(variation))}/${String(seed)}/${shapes}`;
+  // Unchanged when nothing is featured. JSON keeps any id unambiguous.
+  return featured === null
+    ? key
+    : `${key}/featured:${JSON.stringify([featured.ids, featured.slots])}`;
 }
 
 function canonicalAssignment(
@@ -730,9 +937,10 @@ function canonicalAssignment(
   photos: readonly PhotoShape[],
   variation: number,
   seed: number,
+  featured: FeaturedSlots | null,
 ): readonly string[] {
   if (photos.length === 0) return [];
-  const key = assignmentKey(canvas, photos, variation, seed);
+  const key = assignmentKey(canvas, photos, variation, seed, featured);
   const cached = assignmentCache.get(key);
   if (cached) {
     // Refresh its place in the least-recently-used order.
@@ -751,7 +959,15 @@ function canonicalAssignment(
     width: canvas.width,
     height: canvas.height,
   });
-  const assignment = Object.freeze(assignPhotos(slots, photos, { seed }));
+  const assignment = Object.freeze(
+    assignPhotos(
+      slots,
+      photos,
+      featured === null
+        ? { seed }
+        : { seed, featured: featured.ids, featuredSlots: featured.slots },
+    ),
+  );
   assignmentCache.set(key, assignment);
   while (assignmentCache.size > ASSIGNMENT_CACHE_SIZE) {
     assignmentCache.delete(assignmentCache.keys().next().value as string);

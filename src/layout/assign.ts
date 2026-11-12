@@ -47,6 +47,13 @@
  * depends on floating-point results that could differ in the last bit
  * between JavaScript engines.
  *
+ * Featured photos (#14): with k featured photos (`AssignOptions.featured`),
+ * the problem splits in two. The featured photos are matched to the k
+ * largest slots ({@link largestSlots}: by area, ties in slot order) and every
+ * other photo to the remaining slots, each half solved exactly with the same
+ * costs and the same seeded surcharge. With nothing featured, or every photo
+ * featured, the result is exactly the plain assignment.
+ *
  * Pass slots from `placeLayout(plan, { width, height })` with no border, so
  * that changing the border never changes which photo goes where. The cost is
  * O(n³) in the worst case; 200 photos take a few milliseconds.
@@ -83,6 +90,21 @@ export interface AssignOptions {
    * by photo order). Mainly for tests and tuning.
    */
   readonly noise?: number;
+  /**
+   * Ids of featured photos (#14). With k of them among `photos`, they take
+   * the k largest slots ({@link largestSlots}), matched among those slots by
+   * the same cost; the other photos fill the other slots, also by the same
+   * cost. Ids not among `photos` (an excluded featured photo) are ignored.
+   * Empty, absent, or every photo featured: exactly the plain assignment.
+   */
+  readonly featured?: Iterable<string>;
+  /**
+   * The slots the featured photos take, one per featured photo among
+   * `photos`. Defaults to `largestSlots(slots, k)`. The editor passes the
+   * largest slots of the plan it shows, which can differ slightly in size
+   * from the slots it assigns on (see arrange in src/editor/state.ts).
+   */
+  readonly featuredSlots?: readonly number[];
 }
 
 /**
@@ -187,6 +209,23 @@ function weightedMean(
   return total > 0 ? sum / total : 0;
 }
 
+/**
+ * The `k` largest slots by area, largest first; equal areas in slot order.
+ * Featured photos take these slots (see AssignOptions.featured). Pure and
+ * deterministic: the order depends only on the areas and slot numbers.
+ */
+export function largestSlots(slots: readonly SlotShape[], k: number): number[] {
+  return slotsBySize(slots).slice(0, Math.max(0, Math.min(k, slots.length)));
+}
+
+/** Every slot number, largest area first; equal areas in slot order. */
+export function slotsBySize(slots: readonly SlotShape[]): number[] {
+  const areas = slots.map((s) => s.width * s.height);
+  return areas
+    .map((_, i) => i)
+    .sort((a, b) => (areas[b] as number) - (areas[a] as number) || a - b);
+}
+
 /** Returns a copy of `assignment` with the photos in slots `a` and `b` swapped. */
 export function swapSlots(
   assignment: readonly string[],
@@ -258,10 +297,49 @@ export function assignPhotos(
     }
   }
 
-  const slotOfPhoto = solveAssignment(cost, n);
   const assignment: Assignment = new Array<string>(n);
-  for (const [p, photo] of photos.entries()) {
-    assignment[slotOfPhoto[p] as number] = photo.id;
+  const featured = new Set(options.featured ?? []);
+  const rows = photos.map((_, p) => p);
+  const isFeatured = (p: number): boolean =>
+    featured.has((photos[p] as PhotoShape).id);
+  const k = rows.filter(isFeatured).length;
+  if (k === 0 || k === n) {
+    // Nothing (or everything) featured: the plain assignment, unchanged.
+    const slotOfPhoto = solveAssignment(cost, n);
+    for (const [p, photo] of photos.entries()) {
+      assignment[slotOfPhoto[p] as number] = photo.id;
+    }
+    return assignment;
+  }
+  // Featured photos among the k largest slots, the rest among the others:
+  // two independent problems with the same costs (and the same noise).
+  const large = new Set(options.featuredSlots ?? largestSlots(slots, k));
+  if (
+    large.size !== k ||
+    [...large].some((s) => !Number.isInteger(s) || s < 0 || s >= n)
+  ) {
+    throw new RangeError(
+      `featuredSlots must be ${String(k)} distinct slots, one per featured photo`,
+    );
+  }
+  const columns = rows.filter((s) => large.has(s));
+  const others = rows.filter((s) => !large.has(s));
+  for (const [subRows, subColumns] of [
+    [rows.filter(isFeatured), columns],
+    [rows.filter((p) => !isFeatured(p)), others],
+  ] as const) {
+    const m = subRows.length;
+    const sub = new Float64Array(m * m);
+    for (const [r, p] of subRows.entries()) {
+      for (const [c, s] of subColumns.entries()) {
+        sub[r * m + c] = cost[p * n + s] as number;
+      }
+    }
+    const columnOfRow = solveAssignment(sub, m);
+    for (const [r, p] of subRows.entries()) {
+      const slot = subColumns[columnOfRow[r] as number] as number;
+      assignment[slot] = (photos[p] as PhotoShape).id;
+    }
   }
   return assignment;
 }

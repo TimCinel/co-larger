@@ -44,8 +44,10 @@ export {
 export {
   assignPhotos,
   cropFraction,
+  largestSlots,
   PLACEMENT_NOISE,
   placementCost,
+  slotsBySize,
   swapSlots,
   validateAssignment,
   weightedCrop,
