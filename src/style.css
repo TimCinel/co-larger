@@ -590,6 +590,56 @@ button.primary:hover:not(:disabled) {
   margin-top: 0.6rem;
 }
 
+/* Layout (#20): the grid's Columns control under the layout choice. */
+.columns-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.columns-row[hidden],
+.columns-note[hidden] {
+  display: none;
+}
+
+.columns-select {
+  flex: 1;
+  min-width: 0;
+  max-width: 9rem;
+  font: inherit;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  padding: 0.25rem 0.4rem;
+}
+
+.columns-select:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px #000;
+}
+
+.columns-select:disabled {
+  opacity: 0.45;
+}
+
+.columns-note {
+  margin: 0.4rem 0 0;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--muted);
+}
+
+/* The dial in a grid (#20): disabled, its end labels dimmed with it. */
+.layout-controls.dial-off .dial-end,
+.layout-controls.dial-off label {
+  opacity: 0.45;
+}
+
 .field-message,
 .field-note {
   margin: 0.5rem 0 0;

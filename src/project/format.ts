@@ -21,14 +21,23 @@ export const FORMAT_ID = 'co-larger-project';
  *   limit (planAspectLimit: max(2.5, canvas aspect / tile count)), which
  *   2026.11.0 would refuse as "squashed". Written exactly when 2026.11.0
  *   would refuse the plan (see versionFor); everything else is still written
- *   as version 1, so that 2026.11.0 opens it.
+ *   as version 1, so that 2026.11.0 opens it. The same rule covers a Grid
+ *   (#20), whose cells can be beyond that limit (one column on a wide
+ *   canvas): such a grid is version 2, any other grid version 1.
+ *
+ * Grids (#20) added only optional fields (`layout`, `columns`, and `kind` in
+ * the plan), which 2026.11.0 ignores: it opens a version 1 grid project
+ * showing the saved cells (exactly at no border; with a border its older
+ * cut rule makes a row's cells differ by up to a gap's width), as a mosaic
+ * state, so its next re-roll makes a mosaic. See docs/project-format.md.
  */
 export const FORMAT_VERSION = 2;
 
 /**
  * The version written for `state`: 1 when release 2026.11.0 would accept
- * its plan (withinPlannerShape is its exact tile check), else 2. Only hand
- * resizing (#16) makes a plan it would refuse.
+ * its plan (withinPlannerShape is its exact tile check), else 2. Hand
+ * resizing (#16) and grids with stretched cells (#20) make plans it would
+ * refuse.
  */
 export function versionFor(state: EditorState): number {
   return withinPlannerShape(state.plan) ? 1 : 2;

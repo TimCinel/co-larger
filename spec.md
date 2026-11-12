@@ -42,9 +42,18 @@ major difference: tile sizes are configurable, from uniform to a few very large
 
 ### Layout
 
-- One layout: a mosaic that fills the canvas edge to edge with rectangular
-  tiles, one tile per included photo, with no empty space.
-- A size-variation dial:
+- Two layouts, chosen in the settings panel; both fill the canvas edge to
+  edge with rectangular tiles, one tile per included photo, with no empty
+  space:
+  - Mosaic (the default): tiles of varied sizes, set by the dial below.
+  - Grid: rows of equal height, every full row with the same number of
+    equal-width cells. When the photos do not fill the last row, its cells
+    are wider so that it still spans the canvas. Columns are "Auto" by
+    default (the column count whose cells crop the photos least) or set by
+    hand from 1 to the number of photos. The dial has no meaning in a grid:
+    it is disabled, and keeps its value for when the user returns to Mosaic.
+    Switching layout and changing columns re-roll the arrangement.
+- A size-variation dial (Mosaic):
   - At the minimum, all tiles have roughly equal area.
   - At the maximum, a few tiles are very large and many are very small.
   - In between, the spread of tile areas grows smoothly.
@@ -53,7 +62,7 @@ major difference: tile sizes are configurable, from uniform to a few very large
 - Photos are cropped to fill their tile (cover). They are never letterboxed
   or distorted.
 - Shuffle re-rolls the arrangement: both which slots exist and which photo
-  goes where.
+  goes where (in a grid: which photo goes in which cell).
 - Changing the dial, the ratio, or the set of included photos also re-rolls
   the arrangement.
 - Layout generation is deterministic for a given seed, so a saved project
@@ -137,7 +146,8 @@ major difference: tile sizes are configurable, from uniform to a few very large
 ### Save and load
 
 - Save project: downloads a single zip containing the original photos and a
-  JSON file describing the canvas settings, layout seed and arrangement,
+  JSON file describing the canvas settings, layout (Mosaic or Grid, and the
+  grid's columns), layout seed and arrangement,
   per-photo crops, featured photos, and include/exclude state.
 - Open project: loads that zip and restores the editor to the same state.
 - The JSON carries a format version number.
@@ -148,7 +158,6 @@ major difference: tile sizes are configurable, from uniform to a few very large
 - Touch and mobile support.
 - Text overlay.
 - PDF export.
-- Grid layout.
 
 ## Out of scope
 

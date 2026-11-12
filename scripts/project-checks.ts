@@ -322,10 +322,37 @@ function patchCentral(
 }
 
 /** The compression method of every entry, read from the central directory. */
+/**
+ * The compression method of every entry, read from the central directory:
+ * found through the end-of-central-directory record (searched for from the
+ * end, past at most a 64 KiB comment), then walked entry by entry. Scanning
+ * the whole file for the central-directory signature instead could match
+ * inside photo data.
+ */
 function methods(zip: Buffer): number[] {
+  let end = -1;
+  for (
+    let i = zip.length - 22;
+    i >= Math.max(0, zip.length - 22 - 65535);
+    i--
+  ) {
+    if (zip.readUInt32LE(i) === 0x06054b50) {
+      end = i;
+      break;
+    }
+  }
+  if (end < 0) return [];
+  const count = zip.readUInt16LE(end + 10);
+  let at = zip.readUInt32LE(end + 16);
   const out: number[] = [];
-  for (let i = 0; i < zip.length - 46; i++) {
-    if (zip.readUInt32LE(i) === 0x02014b50) out.push(zip.readUInt16LE(i + 10));
+  for (let n = 0; n < count; n++) {
+    if (zip.readUInt32LE(at) !== 0x02014b50) return [...out, -1];
+    out.push(zip.readUInt16LE(at + 10));
+    at +=
+      46 +
+      zip.readUInt16LE(at + 28) +
+      zip.readUInt16LE(at + 30) +
+      zip.readUInt16LE(at + 32);
   }
   return out;
 }

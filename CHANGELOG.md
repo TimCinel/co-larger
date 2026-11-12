@@ -33,6 +33,17 @@ that starts at 0 each month. Tags have no `v` prefix. See
   including or excluding photos lay the tiles out afresh, discarding hand
   resizing; border, background and same-ratio size changes keep it.
 
+- Grid layout: a Layout choice at the top of the settings panel, Mosaic (the
+  default) or Grid. A grid has rows of equal height and equal-width cells in
+  every full row; when the photos do not fill the last row, its cells are
+  wider so it still spans the canvas. Columns are Auto (the column count
+  whose cells crop the photos least) or set by hand from 1 to the number of
+  photos. The size-variation dial is disabled in a grid and keeps its value
+  for Mosaic. Shuffle moves photos between cells; swap, remove, crop,
+  feature, divider dragging, resolution warnings, export, undo and saving work
+  as in the mosaic. Switching layout, changing columns and Shuffle are one
+  undo step each. Mosaic arrangements are unchanged.
+
 ### Project files
 
 - Projects now record featured photos in an optional `state.featured` list.
@@ -45,6 +56,14 @@ that starts at 0 each month. Tags have no `v` prefix. See
   which 2026.11.0 would refuse; then it is written as version 2, which
   2026.11.0 refuses with its "saved by a newer version" message, leaving its
   open project unchanged. This build reads both.
+- Projects record the layout in optional `state.layout` (`"grid"`) and
+  `state.columns` fields, absent for Mosaic and Auto, so mosaic projects are
+  written exactly as before and 2026.11.0 projects open as Mosaic. A grid is
+  written as version 1 when 2026.11.0 would accept its cells: 2026.11.0 then
+  opens it with the saved cells (as a mosaic, so its next re-roll makes a
+  mosaic; with a border its cells in a row differ by up to a gap's width). A
+  grid with cells beyond 2.5:1 (one column on a wide canvas, say) is written
+  as version 2, which 2026.11.0 refuses as "saved by a newer version".
 
 ## 2026.11.0 - 2026-11-12
 

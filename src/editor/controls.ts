@@ -3,7 +3,15 @@
  */
 import { DialInput } from './dial';
 import type { FrameScheduler } from './frames';
+import { layoutOf } from './state';
 import type { EditorStore } from './store';
+
+/** Why the dial is disabled in a grid (#20): shown in the Layout section. */
+export const DIAL_GRID_NOTE =
+  'Size variation applies to Mosaic only; its value is kept.';
+
+/** The id of that visible note (canvas-controls.ts), which describes the dial. */
+export const DIAL_GRID_NOTE_ID = 'layout-dial-note';
 
 /** Steps of the dial (a range input from 0 to 1). */
 const DIAL_STEP = 0.01;
@@ -85,8 +93,21 @@ export function createLayoutControls(
   const sync = (): void => {
     const state = editor.getState();
     const disabled = state.photos.length === 0;
-    dial.disabled = disabled;
+    const grid = layoutOf(state) === 'grid';
+    dial.disabled = disabled || grid;
     shuffle.disabled = disabled;
+    // In a grid the dial is disabled (#20). Why is said in a visible note in
+    // the Layout section (the top bar gains nothing), which describes the
+    // dial for assistive technology, and on hover (the title).
+    if (grid) {
+      dial.setAttribute('aria-describedby', DIAL_GRID_NOTE_ID);
+      dial.title = DIAL_GRID_NOTE;
+      group.classList.add('dial-off');
+    } else {
+      dial.removeAttribute('aria-describedby');
+      dial.removeAttribute('title');
+      group.classList.remove('dial-off');
+    }
     // Follow the state when it changes from elsewhere (undo, loading a
     // project), but never fight the user's own drag.
     if (!gesture.isBusy() && dial.valueAsNumber !== state.variation) {

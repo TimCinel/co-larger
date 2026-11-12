@@ -68,7 +68,9 @@ collage-project.colarger.zip
     "plan": {},
     "assignment": [],
     "crops": {},
-    "featured": ["photo-1"]
+    "featured": ["photo-1"],
+    "layout": "grid",
+    "columns": 4
   },
   "photos": [
     {
@@ -106,6 +108,16 @@ collage-project.colarger.zip
   before. A missing field or an empty list means nothing is featured; any
   other value (not a list, a non-string or unknown id, a repeated id) is
   refused: the project does not open and the open project is left as it was.
+
+- `state.layout` (optional, since #20) is `"grid"` for the Grid layout and
+  left out for the mosaic (any other value is refused). `state.columns`
+  (optional, since #20) is the Columns setting, a whole number from 1 to
+  10 000, left out for Auto; it is kept in a mosaic too (it is the user's
+  setting for when they switch to Grid) and may exceed the photo count (the
+  grid then uses one column per photo). A grid's `plan` is marked
+  `"kind": "grid"`; the plan is a grid exactly when `state.layout` is, and
+  with a number of columns its first row has that many cells (clamped to the
+  photo count). See [Grids](#grids).
 
 ### Compatibility of `state.featured`
 
@@ -162,6 +174,43 @@ the limit and saving again writes version 1. Saving, opening and saving
 again gives a byte-identical `project.json` with the same version. Both
 directions are covered by `node scripts/browser-check.ts --divider-only
 --feature-compat <a 2026.11.0 checkout>`.
+
+### Grids
+
+A grid (#20) is stored as an ordinary plan, a tree of splits, with
+`"kind": "grid"`: a chain of horizontal splits, one per row (fractions 1/R,
+1/(R-1), ...), each row a chain of vertical splits over its cells (1/C,
+1/(C-1), ...), slots numbered row by row. `kind` changes one thing in
+placement: a grid's split gives its first child the share `fraction` of the
+region's length plus one gap, minus that gap, where a mosaic's gives the
+share `fraction` of the length minus one gap. That is what keeps a grid's
+cells exactly equal at every border (with the mosaic's rule they would differ
+by up to a gap's width). With no border the two rules are the same.
+
+This build checks a grid plan's tree exactly: it must be the grid tree for
+its photo count and the number of cells in its first row, slots included;
+only the fractions may differ (dividers moved by hand). Its tiles are checked
+like a mosaic's, except that the shape limit is the larger of the planner's
+and the grid's own cell shape, since a grid's cells can be far more
+stretched (one column of 30 photos on a 16:9 canvas has 53:1 cells).
+
+Compatibility, both directions checked by `node scripts/browser-check.ts
+--grid-only --feature-compat <a 2026.11.0 checkout>`:
+
+- A project from 2026.11.0 (or any mosaic) has no `layout`, `columns` or
+  `kind` and opens as Mosaic with exactly the saved collage.
+- The version follows the same rule as hand resizing: version 1 exactly when
+  2026.11.0's tile check accepts the plan. A grid whose cells are all within
+  its limit (2.5:1 on most canvases) is version 1, and 2026.11.0 opens it with
+  the saved plan, assignment and crops. It ignores `layout`, `columns` and
+  `kind`, so it shows the grid as a mosaic state: at no border exactly the
+  saved cells; with a border its older split rule makes the cells of a row
+  differ by up to a gap's width (measured in the preview: up to 7 px between 280 px cells at
+  a 1.2% border). Its next re-roll (Shuffle, the dial, ...) makes a mosaic,
+  and saving there drops the grid fields.
+- A grid with cells beyond that limit is version 2, which 2026.11.0 refuses
+  with its "saved by a newer version" message, leaving its open project as
+  it was.
 
 - `photos` lists every photo in tray order. `included` says whether the
   collage uses it, and must agree with `state.photos`. `width`, `height` and

@@ -18,6 +18,8 @@
  *   node scripts/browser-check.ts --feature-compat <2026.11.0 checkout>  # also open projects across the release (#14)
  *   node scripts/browser-check.ts --divider-only [--divider-screenshot]  # just the #16 checks, and docs/screenshots/issue-16-*.png
  *                                                  # (with --feature-compat: also across the release)
+ *   node scripts/browser-check.ts --grid-only [--grid-screenshot]  # just the #20 checks, and docs/screenshots/issue-20-*.png
+ *                                                  # (with --feature-compat: also across the release)
  *   node scripts/browser-check.ts --tray-screenshot  # and docs/screenshots/photo-tray.png
  *   node scripts/browser-check.ts --port 5301     # another dev server port (or BROWSER_CHECK_PORT)
  *   node scripts/browser-check.ts --only sharp,cap,drag  # the editor image checks (#27)
@@ -37,6 +39,8 @@ import { checkProject, projectRealFolder } from './project-checks.ts';
 import { checkResolution } from './resolution-checks.ts';
 import { checkFeature } from './feature-checks.ts';
 import { checkDividers } from './divider-checks.ts';
+import { checkGrid } from './grid-checks.ts';
+import { checkSeed } from './check-seed.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtures = join(root, 'tests', 'fixtures');
@@ -287,11 +291,6 @@ function editorAction(
  * (#54). `BROWSER_CHECK_SEED` tries another seed everywhere a check uses
  * this; the seed used is printed.
  */
-function checkSeed(fallback: number): number {
-  const fromEnv = process.env.BROWSER_CHECK_SEED;
-  return fromEnv === undefined ? fallback : Number(fromEnv);
-}
-
 async function fixArrangement(p: Page, fallback: number): Promise<number> {
   const seed = checkSeed(fallback);
   await editorAction(p, 'shuffle', seed);
@@ -1918,8 +1917,11 @@ async function checkPhysicalSizes(p: Page): Promise<void> {
       ['size-width-mm', 'size-height-mm', 'size-dpi'].every(
         (id) => document.querySelector(`label[for=${id}]`) !== null,
       ) &&
+      // The group holding the units radios (the Layout group, #20, is
+      // another radio group in the same panel).
       document
-        .querySelector('[role=radiogroup]')
+        .querySelector('input[name=size-units]')
+        ?.closest('[role=radiogroup]')
         ?.getAttribute('aria-label') === 'Size units',
   );
   check(
@@ -5687,6 +5689,27 @@ if (process.argv.includes('--divider-only')) {
   process.exit(failures === 0 ? 0 : 1);
 }
 
+// `--grid-only`: just the Grid layout checks (#20). Takes `--feature-compat`
+// too, for the checks against the released 2026.11.0.
+const gridOptions = {
+  screenshots: process.argv.includes('--grid-screenshot')
+    ? join(root, 'docs', 'screenshots')
+    : undefined,
+  releaseOrigin: featureOptions.releaseOrigin,
+};
+if (process.argv.includes('--grid-only')) {
+  await checkGrid(browser, origin, check, gridOptions);
+  await browser.close();
+  await releaseServer?.close();
+  await server.close();
+  console.log(
+    failures === 0
+      ? '\nAll checks passed'
+      : `\n${String(failures)} check(s) FAILED`,
+  );
+  process.exit(failures === 0 ? 0 : 1);
+}
+
 // `--resolution-only`: just the low-resolution warnings (#15).
 if (process.argv.includes('--resolution-only')) {
   await checkResolution(
@@ -5796,6 +5819,9 @@ if (onlyIndex >= 0) {
   }
   if (names.includes('divider')) {
     await checkDividers(browser, origin, check, dividerOptions);
+  }
+  if (names.includes('grid')) {
+    await checkGrid(browser, origin, check, gridOptions);
   }
   await browser.close();
   await releaseServer?.close();
@@ -6194,6 +6220,7 @@ await checkResolution(
 );
 await checkFeature(browser, origin, check, featureOptions);
 await checkDividers(browser, origin, check, dividerOptions);
+await checkGrid(browser, origin, check, gridOptions);
 await checkExport(browser, origin, check, {
   screenshots: process.argv.includes('--export-screenshot')
     ? join(root, 'docs', 'screenshots')

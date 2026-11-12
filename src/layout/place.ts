@@ -67,7 +67,8 @@ export interface PlacedSplit {
   readonly y1: number;
   /**
    * The node's region along its axis before snapping: the cut's unsnapped
-   * position is `start + (end - start - border) * fraction`.
+   * position is `start + (end - start - border) * fraction`, or in a grid
+   * plan (#20) `start + (end - start + border) * fraction - border`.
    */
   readonly start: number;
   readonly end: number;
@@ -110,8 +111,8 @@ export function walkPlaced(
   }
   if (border > 0) {
     const limit = snap
-      ? Math.floor(borderLimit(plan.root, width, height, 1))
-      : borderLimit(plan.root, width, height, 0);
+      ? Math.floor(borderLimit(plan, width, height, 1))
+      : borderLimit(plan, width, height, 0);
     if (snap ? border > limit : border >= limit) {
       throw new RangeError(
         `border ${String(border)} is too large for ${String(plan.count)} tiles on a ` +
@@ -121,6 +122,12 @@ export function walkPlaced(
   }
 
   const round = snap ? Math.round : (v: number) => v;
+  // Where a cut falls in a region from `a` to `b` (unsnapped): a mosaic
+  // shares the region minus the gap; a grid (#20) shares the region plus
+  // one gap, so that cuts at a/n give equal tiles at any border.
+  const grid = plan.kind === 'grid';
+  const cutAt = (a: number, b: number, f: number): number =>
+    grid ? a + (b - a + border) * f - border : a + (b - a - border) * f;
   // Each rectangle is carried as its unsnapped edges plus its actual (possibly
   // snapped) edges. Cuts are rounded from the unsnapped position, so rounding
   // errors never accumulate down the tree; children inherit the parent's
@@ -150,7 +157,7 @@ export function walkPlaced(
     const f = node.fraction;
     const depth = path.length;
     if (node.axis === 'x') {
-      const cut = fx0 + (fx1 - fx0 - border) * f;
+      const cut = cutAt(fx0, fx1, f);
       const c = Math.min(x1 - border, Math.max(x0, round(cut)));
       split?.({
         node,
@@ -179,7 +186,7 @@ export function walkPlaced(
         y1,
       );
     } else {
-      const cut = fy0 + (fy1 - fy0 - border) * f;
+      const cut = cutAt(fy0, fy1, f);
       const c = Math.min(y1 - border, Math.max(y0, round(cut)));
       split?.({
         node,
@@ -266,12 +273,12 @@ export function maxBorder(
   if (plan.root === null) return Infinity;
   const snap = options.snap ?? false;
   const min = Math.max(0, options.minTileSize ?? 1);
-  if (!snap) return Math.max(0, borderLimit(plan.root, width, height, min));
+  if (!snap) return Math.max(0, borderLimit(plan, width, height, min));
   // A snapped edge is within half a unit of its unsnapped position, and
   // rounding preserves whole-number distances, so an unsnapped tile at least
   // k units across (k whole) is also at least k units across once snapped.
   const limit = borderLimit(
-    plan.root,
+    plan,
     Math.round(width),
     Math.round(height),
     Math.ceil(min),
@@ -314,7 +321,7 @@ export function maxBorderForAspect(
   // maxAspect * (short - 1): the unsnapped condition with this much slack.
   const stretched = options.stretched;
   let limit = Infinity;
-  forEachLeafLength(plan.root, w, h, (wa, wb, ha, hb) => {
+  forEachLeafLength(plan, w, h, (wa, wb, ha, hb) => {
     // A tile stretched by hand beyond `stretched.above` (measured in the
     // plan's own geometry, so the same at every size) has its own limit.
     let tileMax = maxAspect;
@@ -358,13 +365,13 @@ function checkCanvas(width: number, height: number): void {
  * (unsnapped). May be negative when no border achieves it.
  */
 function borderLimit(
-  root: LayoutNode,
+  plan: LayoutPlan,
   width: number,
   height: number,
   min: number,
 ): number {
   let limit = Infinity;
-  forEachLeafLength(root, width, height, (wa, wb, ha, hb) => {
+  forEachLeafLength(plan, width, height, (wa, wb, ha, hb) => {
     limit = Math.min(limit, (wa - min) / wb, (ha - min) / hb);
   });
   return limit;
@@ -376,7 +383,7 @@ function borderLimit(
  * ha, hb).
  */
 function forEachLeafLength(
-  root: LayoutNode,
+  plan: LayoutPlan,
   width: number,
   height: number,
   leaf: (wa: number, wb: number, ha: number, hb: number) => void,
@@ -393,7 +400,16 @@ function forEachLeafLength(
       return;
     }
     const f = node.fraction;
-    if (node.axis === 'x') {
+    if (grid) {
+      // A grid cut (#20): first = f * (L + g) - g, second = L - g - first.
+      if (node.axis === 'x') {
+        visit(node.first, wa * f, wb * f + (1 - f), ha, hb);
+        visit(node.second, wa * (1 - f), wb * (1 - f) + f, ha, hb);
+      } else {
+        visit(node.first, wa, wb, ha * f, hb * f + (1 - f));
+        visit(node.second, wa, wb, ha * (1 - f), hb * (1 - f) + f);
+      }
+    } else if (node.axis === 'x') {
       visit(node.first, wa * f, (wb + 1) * f, ha, hb);
       visit(node.second, wa * (1 - f), (wb + 1) * (1 - f), ha, hb);
     } else {
@@ -401,6 +417,8 @@ function forEachLeafLength(
       visit(node.second, wa, wb, ha * (1 - f), (hb + 1) * (1 - f));
     }
   };
+  if (plan.root === null) return;
+  const grid = plan.kind === 'grid';
   // The outer border takes 2g off each side of the canvas.
-  visit(root, width, 2, height, 2);
+  visit(plan.root, width, 2, height, 2);
 }

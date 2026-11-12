@@ -50,22 +50,40 @@
  *   border, or another pixel size at the same ratio) moves no photo, as for
  *   swaps; the next re-roll ranks the tiles again.
  *
+ * - Layout (#20, `layout` and `columns`): Mosaic (the default) or Grid. Every
+ *   re-roll above runs the planner the layout asks for (see arrange), so a
+ *   grid stays a grid through Shuffle, the photos changing and the canvas
+ *   ratio changing. setLayout re-rolls whenever the layout changes;
+ *   setColumns re-rolls in a grid whenever the setting changes (even to a
+ *   setting giving the same column count) and only records the setting in
+ *   a mosaic. In a grid the dial has no effect
+ *   (the plan does not depend on it) but its value stays in the state, for
+ *   when the user returns to Mosaic. Shuffle changes which photo is in which
+ *   cell. A column setting above the photo count is kept as the user set it
+ *   and clamped only for planning.
+ *
  * Determinism: after any re-roll the plan and the assignment are a function
- * of (canvas, photos, variation, seed, featured) only, never of the previous
+ * of (canvas, photos, variation, seed, featured, layout, columns) only,
+ * never of the previous
  * state. Without featured photos only the canvas ratio matters; with them,
  * the canvas's pixel size and border decide which drawn tiles are largest. See {@link arrange}. With nothing featured they are exactly
- * what they were before featuring existed.
+ * what they were before featuring existed, and in a mosaic (no `layout`
+ * key) exactly what they were before grids existed.
  */
 import {
   arrangementStep,
   assignPhotos,
+  autoColumns,
   checkTileSizes,
+  clampColumns,
+  gridColumnsOf,
   listDividers,
   maxBorder,
   maxBorderForAspect,
   MAX_PLAN_ASPECT,
   placeLayout,
   planAspectLimit,
+  planGrid,
   planLayout,
   setDividerFraction,
   slotsBySize,
@@ -156,6 +174,18 @@ export const DEFAULT_CANVAS: CanvasSettings = Object.freeze({
 /** The dial's starting position: halfway between uniform and varied. */
 export const DEFAULT_VARIATION = 0.5;
 
+/** The two layouts (#20). */
+export type LayoutKind = 'mosaic' | 'grid';
+
+/** The Columns control (#20): Auto, or a whole number of columns. */
+export type ColumnSetting = 'auto' | number;
+
+/**
+ * The largest column count accepted (#20). The control offers 1 to the
+ * photo count; this only bounds what a saved project may contain.
+ */
+export const MAX_COLUMNS = 10000;
+
 /** Crops by photo id: an object with no prototype (see cropOf). */
 export type CropMap = Readonly<Record<string, Crop>>;
 
@@ -191,6 +221,20 @@ export interface EditorState {
    * with featuredOf or isFeatured.
    */
   readonly featured?: readonly string[];
+  /**
+   * The layout (#20): `'grid'`, or absent for the mosaic (the key is missing,
+   * not undefined, so a mosaic state is exactly what it was before grids
+   * existed). The plan is a grid plan exactly when this is `'grid'`. Read it
+   * with layoutOf.
+   */
+  readonly layout?: 'grid';
+  /**
+   * The Columns setting (#20): a whole number from 1 to MAX_COLUMNS, or
+   * absent for Auto. Kept whatever the layout, so it survives switching to
+   * Mosaic and back, and kept when it exceeds the photo count (the grid
+   * then uses one column per photo). Read it with columnsOf.
+   */
+  readonly columns?: number;
 }
 
 export interface CreateOptions {
@@ -201,6 +245,10 @@ export interface CreateOptions {
   readonly photos?: readonly PhotoShape[];
   /** Featured photo ids (#14). Defaults to none. */
   readonly featured?: readonly string[];
+  /** The layout (#20). Defaults to the mosaic. */
+  readonly layout?: LayoutKind;
+  /** The Columns setting (#20). Defaults to Auto. */
+  readonly columns?: ColumnSetting;
 }
 
 /** A new state, arranged for `photos` (none by default). */
@@ -210,7 +258,18 @@ export function createEditorState(options: CreateOptions = {}): EditorState {
   const seed = checkSeed(options.seed ?? randomSeed());
   const photos = [...(options.photos ?? [])];
   const featured = normaliseFeatured(options.featured ?? []);
-  const arrangement = arrange(canvas, photos, variation, seed, featured);
+  const setting = checkSetting(
+    options.layout ?? 'mosaic',
+    options.columns ?? 'auto',
+  );
+  const arrangement = arrange(
+    canvas,
+    photos,
+    variation,
+    seed,
+    featured,
+    setting,
+  );
   return {
     canvas,
     variation,
@@ -219,7 +278,92 @@ export function createEditorState(options: CreateOptions = {}): EditorState {
     ...arrangement,
     crops: emptyCrops(),
     ...withFeatured(featured),
+    ...withSetting(setting),
   };
+}
+
+/** The layout and Columns setting that decide which planner runs (#20). */
+export interface LayoutSetting {
+  readonly layout: LayoutKind;
+  readonly columns: ColumnSetting;
+}
+
+const LAYOUTS: readonly string[] = ['mosaic', 'grid'];
+
+/** The mosaic with Auto columns: what every state had before #20. */
+export const MOSAIC: LayoutSetting = Object.freeze({
+  layout: 'mosaic',
+  columns: 'auto',
+});
+
+/** The state's layout (#20): `'grid'` or `'mosaic'`. */
+export function layoutOf(state: Pick<EditorState, 'layout'>): LayoutKind {
+  return state.layout === 'grid' ? 'grid' : 'mosaic';
+}
+
+/** The state's Columns setting (#20): a number, or `'auto'`. */
+export function columnsOf(state: Pick<EditorState, 'columns'>): ColumnSetting {
+  return state.columns ?? 'auto';
+}
+
+/** The state's layout and Columns setting together. */
+export function settingOf(
+  state: Pick<EditorState, 'layout' | 'columns'>,
+): LayoutSetting {
+  return { layout: layoutOf(state), columns: columnsOf(state) };
+}
+
+/**
+ * The number of columns a grid of these photos has (#20): the setting
+ * clamped to 1..the photo count, or for Auto the column count autoColumns
+ * picks. 0 for no photos. For the Columns control ("Auto (4)").
+ */
+export function gridColumnsFor(
+  canvas: Pick<CanvasSettings, 'width' | 'height'>,
+  photos: readonly PhotoShape[],
+  columns: ColumnSetting,
+): number {
+  if (photos.length === 0) return 0;
+  return columns === 'auto'
+    ? autoColumns(
+        canvas.width / canvas.height,
+        photos.map((photo) => photo.aspect),
+      )
+    : clampColumns(columns, photos.length);
+}
+
+/**
+ * Switches between Mosaic and Grid (#20). Re-rolls (one undo step); returns
+ * `state` itself if it is already in that layout. The dial's value and the
+ * Columns setting are kept, so returning to Mosaic restores the dial's
+ * arrangement for the seed.
+ */
+export function setLayout(state: EditorState, layout: LayoutKind): EditorState {
+  // Checked at run time too: the value may come from untyped code.
+  if (!LAYOUTS.includes(layout)) {
+    throw new RangeError("layout must be 'mosaic' or 'grid'");
+  }
+  if (layout === layoutOf(state)) return state;
+  return reroll(replaceSetting(state, { ...settingOf(state), layout }), {});
+}
+
+/**
+ * Sets the Columns setting (#20): `'auto'` or a whole number from 1 to
+ * MAX_COLUMNS. In a grid every change of setting re-rolls (one undo step),
+ * even when the column count it gives is the one shown (Auto already
+ * picking that count, or two settings both beyond the photo count): like
+ * every re-roll it lays out a fresh, equal grid, discarding hand-moved
+ * dividers and swaps. In a mosaic only the setting changes. Returns `state`
+ * itself if the setting is unchanged. Throws a RangeError for anything else.
+ */
+export function setColumns(
+  state: EditorState,
+  columns: ColumnSetting,
+): EditorState {
+  const setting = checkSetting(layoutOf(state), columns);
+  if (setting.columns === columnsOf(state)) return state;
+  const next = replaceSetting(state, setting);
+  return layoutOf(state) === 'grid' ? reroll(next, {}) : next;
 }
 
 /** Re-rolls with a new seed (the Shuffle button). No-op for the same seed. */
@@ -258,7 +402,8 @@ export function setVariation(
 ): EditorState {
   const v = clampVariation(variation);
   if (v === state.variation) return state;
-  if (options.keepAssignment) {
+  // A grid's plan does not depend on the dial, so nothing is deferred.
+  if (options.keepAssignment && layoutOf(state) === 'mosaic') {
     const plan = planFor(state.canvas, state.photos.length, v, state.seed);
     return { ...state, variation: v, plan };
   }
@@ -584,6 +729,8 @@ export function sameButPlan(a: EditorState, b: EditorState): boolean {
     a.assignment === b.assignment &&
     a.crops === b.crops &&
     a.featured === b.featured &&
+    a.layout === b.layout &&
+    a.columns === b.columns &&
     onlyResized(a.plan, b.plan)
   );
 }
@@ -597,6 +744,7 @@ export function onlyResized(a: LayoutPlan, b: LayoutPlan): boolean {
   return (
     a === b ||
     (a.aspect === b.aspect &&
+      a.kind === b.kind &&
       a.count === b.count &&
       a.variation === b.variation &&
       a.seed === b.seed &&
@@ -665,6 +813,15 @@ export function setFeatured(
   const k = state.assignment.filter((id) => marked.has(id)).length;
   const order = slotOrder(state.plan, state.canvas);
   if (order.slice(0, k).includes(slot)) return next;
+  // In a grid (#20) many cells are the same size: a photo already in a cell
+  // as large as the kth largest is in one of the k largest, and moving it
+  // to another cell of the same size would be a pointless swap.
+  if (state.plan.kind === 'grid') {
+    const sizes = gridSizes(state.plan, state.canvas);
+    if ((sizes[slot] as number) >= (sizes[order[k - 1] as number] as number)) {
+      return next;
+    }
+  }
   const target = order.find((s) => {
     const id = state.assignment[s] as string;
     return id === photoId || !marked.has(id);
@@ -712,6 +869,13 @@ export function randomSeed(): number {
  * dragged within a tenth, and it makes the result path-independent: it
  * depends only on the arguments, never on the state before.
  *
+ * Grid (#20, `setting`): the plan is planGrid's for the setting's column
+ * count (gridColumnsFor), the same for every variation and seed, and the
+ * assignment is made on that plan itself; the seed still decides which of
+ * the photos that fit a cell equally well goes where, so Shuffle moves
+ * photos between cells. With the default setting (the mosaic) this is
+ * exactly the arrangement from before grids existed.
+ *
  * Featured photos (#14): with k of `featured` among `photos` (0 < k < the
  * photo count), they take the k largest tiles of the plan at `variation`
  * itself (the plan that is shown), ranked by the area of each tile as it is
@@ -735,9 +899,10 @@ export function arrange(
   variation: number,
   seed: number,
   featured: readonly string[] = [],
+  setting: LayoutSetting = MOSAIC,
 ): { plan: LayoutPlan; assignment: string[] } {
   const v = clampVariation(variation);
-  const plan = planFor(canvas, photos.length, v, seed);
+  const plan = shownPlan(canvas, photos, v, seed, setting);
   return {
     plan,
     assignment: [
@@ -747,6 +912,7 @@ export function arrange(
         v,
         seed,
         featuredSlotsFor(canvas, photos, plan, featured),
+        setting,
       ),
     ],
   };
@@ -761,6 +927,7 @@ export function isAssignmentCached(
   state: EditorState,
   variation: number,
 ): boolean {
+  const setting = settingOf(state);
   return assignmentCache.has(
     assignmentKey(
       state.canvas,
@@ -771,14 +938,16 @@ export function isAssignmentCached(
         state.canvas,
         state.photos,
         () =>
-          planFor(
+          shownPlan(
             state.canvas,
-            state.photos.length,
+            state.photos,
             clampVariation(variation),
             state.seed,
+            setting,
           ),
         featuredOf(state),
       ),
+      setting,
     ),
   );
 }
@@ -819,7 +988,13 @@ export interface ValidateOptions {
  *   rule depends only on the plan, so any state the actions produce
  *   validates, however small the canvas;
  * - the assignment places every photo exactly once;
- * - every crop is in range and names a known photo (see ValidateOptions).
+ * - every crop is in range and names a known photo (see ValidateOptions);
+ * - `layout`, if present, is `'grid'`, and the plan is a grid exactly when it
+ *   is (validatePlan has checked a grid's tree, and checkTileSizes allows
+ *   its cells their own shape); `columns`, if present, is a whole number
+ *   from 1 to MAX_COLUMNS and, in a grid, matches the plan's column count
+ *   (clamped to the photo count). With Auto any column count is accepted:
+ *   it was chosen for the photos, and the plan is stored, not re-derived.
  */
 export function validateEditorState(
   value: unknown,
@@ -827,7 +1002,7 @@ export function validateEditorState(
 ): EditorState {
   if (!isRecord(value)) throw new RangeError('state must be an object');
   const { canvas, variation, seed, photos, plan, assignment, crops } = value;
-  const { featured } = value;
+  const { featured, layout, columns } = value;
   if (!isRecord(canvas)) throw new RangeError('canvas must be an object');
   const checkedCanvas = checkCanvas({
     width: canvas.width as number,
@@ -880,6 +1055,37 @@ export function validateEditorState(
   // MIN_TILE_FRACTION both ways (see checkTileSizes).
   if (checkTileSizes(checkedPlan) === 'invalid') {
     throw new RangeError('plan has tiles squashed beyond the aspect limit');
+  }
+
+  // Optional (#20): absent in projects saved before grids, and for the
+  // mosaic and Auto. The plan is a grid exactly when the layout is, and a
+  // grid with a number of columns has that many (clamped to the count).
+  if (layout !== undefined && layout !== 'grid') {
+    throw new RangeError("layout must be 'grid' or absent");
+  }
+  if (
+    columns !== undefined &&
+    !(
+      typeof columns === 'number' &&
+      Number.isInteger(columns) &&
+      columns >= 1 &&
+      columns <= MAX_COLUMNS
+    )
+  ) {
+    throw new RangeError(
+      `columns must be a whole number from 1 to ${String(MAX_COLUMNS)}`,
+    );
+  }
+  if ((checkedPlan.kind === 'grid') !== (layout === 'grid')) {
+    throw new RangeError('plan and layout disagree');
+  }
+  if (
+    layout === 'grid' &&
+    typeof columns === 'number' &&
+    checkedPlan.count > 0 &&
+    gridColumnsOf(checkedPlan) !== clampColumns(columns, checkedPlan.count)
+  ) {
+    throw new RangeError('grid plan and columns disagree');
   }
 
   if (!Array.isArray(assignment)) {
@@ -940,6 +1146,10 @@ export function validateEditorState(
     assignment: [...assignment],
     crops: checkedCrops,
     ...withFeatured(checkedFeatured),
+    ...withSetting({
+      layout: layout === 'grid' ? 'grid' : 'mosaic',
+      columns: typeof columns === 'number' ? columns : 'auto',
+    }),
   };
 }
 
@@ -958,8 +1168,72 @@ function reroll(
     next.variation,
     next.seed,
     featuredOf(next),
+    settingOf(next),
   );
   return { ...next, ...arrangement };
+}
+
+/** Checks a layout and Columns setting (#20); returns it normalised. */
+function checkSetting(
+  layout: LayoutKind,
+  columns: ColumnSetting,
+): LayoutSetting {
+  // Checked at run time too: the value may come from untyped code.
+  if (!LAYOUTS.includes(layout)) {
+    throw new RangeError("layout must be 'mosaic' or 'grid'");
+  }
+  if (
+    columns !== 'auto' &&
+    !(Number.isInteger(columns) && columns >= 1 && columns <= MAX_COLUMNS)
+  ) {
+    throw new RangeError(
+      `columns must be 'auto' or a whole number from 1 to ${String(MAX_COLUMNS)}`,
+    );
+  }
+  return { layout, columns };
+}
+
+/** `{ layout, columns }` with the defaults left out (absent keys). */
+function withSetting(setting: LayoutSetting): {
+  layout?: 'grid';
+  columns?: number;
+} {
+  return {
+    ...(setting.layout === 'grid' ? { layout: 'grid' as const } : {}),
+    ...(setting.columns === 'auto' ? {} : { columns: setting.columns }),
+  };
+}
+
+/** `state` with another layout setting (defaults as absent keys). */
+function replaceSetting(
+  state: EditorState,
+  setting: LayoutSetting,
+): EditorState {
+  const rest: EditorState = { ...state };
+  delete (rest as { layout?: 'grid' }).layout;
+  delete (rest as { columns?: number }).columns;
+  return { ...rest, ...withSetting(setting) };
+}
+
+/** The plan arrange shows for these inputs: a mosaic or a grid. */
+function shownPlan(
+  canvas: CanvasSettings,
+  photos: readonly PhotoShape[],
+  variation: number,
+  seed: number,
+  setting: LayoutSetting,
+): LayoutPlan {
+  if (setting.layout === 'mosaic') {
+    return planFor(canvas, photos.length, variation, seed);
+  }
+  return planGrid({
+    width: canvas.width,
+    height: canvas.height,
+    count: photos.length,
+    columns: Math.max(1, gridColumnsFor(canvas, photos, setting.columns)),
+    variation,
+    seed,
+  });
 }
 
 const NONE: readonly string[] = Object.freeze([]);
@@ -995,6 +1269,12 @@ function replaceFeatured(
  */
 function slotOrder(plan: LayoutPlan, canvas: CanvasSettings): number[] {
   if (plan.root === null) return [];
+  if (plan.kind === 'grid') {
+    const sizes = gridSizes(plan, canvas);
+    return sizes
+      .map((_, i) => i)
+      .sort((a, b) => (sizes[b] as number) - (sizes[a] as number) || a - b);
+  }
   let tiles = tilesFor({ plan, canvas }, canvas);
   // tilesFor draws nothing only for a canvas a few pixels across whose
   // rounding distorts the ratio; rank the exact geometry then.
@@ -1004,6 +1284,34 @@ function slotOrder(plan: LayoutPlan, canvas: CanvasSettings): number[] {
   const bySlot: Tile[] = [];
   for (const tile of tiles) bySlot[tile.slot] = tile;
   return slotsBySize(bySlot);
+}
+
+/**
+ * Each slot's tile area in a grid plan (#20), for ranking: the exact tiles
+ * at the canvas's pixel size with its effective border, before snapping,
+ * rounded to 9 significant digits of the largest. Rounding to whole pixels
+ * makes cells of one row differ by a pixel, so ranking drawn pixels would
+ * pick featured cells by rounding; in exact geometry a full row's cells are
+ * equal (ties go in slot order) and a partial last row's are larger.
+ */
+function gridSizes(plan: LayoutPlan, canvas: CanvasSettings): number[] {
+  const border =
+    canvas.borderFraction > 0
+      ? borderAt({ plan, canvas }, canvas).effective
+      : 0;
+  let tiles: Tile[];
+  try {
+    tiles = placeLayout(plan, {
+      width: canvas.width,
+      height: canvas.height,
+      border,
+    });
+  } catch {
+    tiles = placeLayout(plan, { width: canvas.width, height: canvas.height });
+  }
+  const areas = tiles.map((t) => t.width * t.height);
+  const largest = Math.max(...areas);
+  return areas.map((a) => Math.round((a / largest) * 1e9));
 }
 
 /** Which featured photos go where (for canonicalAssignment). */
@@ -1074,6 +1382,7 @@ function clonePlan(plan: LayoutPlan): LayoutPlan {
     count: plan.count,
     variation: plan.variation,
     seed: plan.seed,
+    ...(plan.kind === 'grid' ? { kind: 'grid' as const } : {}),
     root: plan.root === null ? null : node(plan.root),
   };
 }
@@ -1087,9 +1396,16 @@ function assignmentKey(
   variation: number,
   seed: number,
   featured: FeaturedSlots | null,
+  setting: LayoutSetting,
 ): string {
   const shapes = photos.map((p) => `${p.id}:${String(p.aspect)}`).join('|');
-  const key = `${String(canvas.width / canvas.height)}/${String(arrangementStep(variation))}/${String(seed)}/${shapes}`;
+  // A grid's assignment does not depend on the dial: its key names the
+  // columns instead. A mosaic's key is unchanged.
+  const step =
+    setting.layout === 'grid'
+      ? `grid:${String(gridColumnsFor(canvas, photos, setting.columns))}`
+      : String(arrangementStep(variation));
+  const key = `${String(canvas.width / canvas.height)}/${step}/${String(seed)}/${shapes}`;
   // Unchanged when nothing is featured. JSON keeps any id unambiguous.
   return featured === null
     ? key
@@ -1102,9 +1418,10 @@ function canonicalAssignment(
   variation: number,
   seed: number,
   featured: FeaturedSlots | null,
+  setting: LayoutSetting,
 ): readonly string[] {
   if (photos.length === 0) return [];
-  const key = assignmentKey(canvas, photos, variation, seed, featured);
+  const key = assignmentKey(canvas, photos, variation, seed, featured, setting);
   const cached = assignmentCache.get(key);
   if (cached) {
     // Refresh its place in the least-recently-used order.
@@ -1112,12 +1429,10 @@ function canonicalAssignment(
     assignmentCache.set(key, cached);
     return cached;
   }
-  const stepPlan = planFor(
-    canvas,
-    photos.length,
-    arrangementStep(variation),
-    seed,
-  );
+  const stepPlan =
+    setting.layout === 'grid'
+      ? shownPlan(canvas, photos, variation, seed, setting)
+      : planFor(canvas, photos.length, arrangementStep(variation), seed);
   // No border: the border must never change which photo goes where.
   const slots = placeLayout(stepPlan, {
     width: canvas.width,
