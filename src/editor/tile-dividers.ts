@@ -14,12 +14,29 @@
  * (dividerAt): the gap between tiles, widened to HIT_TOLERANCE CSS pixels
  * either side of its centre line, so a divider can be grabbed with no border.
  * Inside that band the divider takes priority: the press never reaches the
- * tile gestures (selection, swap, crop pan). Outside it nothing changes. The
- * listeners sit on the collage element in the capture phase, so they run
+ * tile gestures (selection, swap, crop pan). Outside it nothing changes. Only
+ * presses and hovers on the canvas itself count: where something is drawn
+ * over the band (the selected tile's menu), what the user sees wins, so the
+ * press goes to it and the divider shows no highlight or cursor there. The
+ * rest of the line stays draggable, Escape or a click away removes the menu,
+ * and the keyboard separators reach every divider whatever covers it.
+ *
+ * The listeners sit on the collage element in the capture phase, so they run
  * before the canvas's own. Hovering shows a resize cursor and highlights the
  * whole line; dragging redraws live through the store's transient path (so
  * sharper image decodes wait, as for the dial); releasing commits once;
  * Escape cancels. The click that ends a drag is swallowed.
+ *
+ * A drag is bound to the divider it started on until it ends, and holds
+ * pointer capture on the canvas, which is never replaced. Only `pointerup`
+ * of that pointer commits (also when released outside the window, at the
+ * clamped position). `pointercancel`, a capture lost before the release, a
+ * move with the button up but no release, and the window losing focus
+ * cancel it: the layout goes back to where it was, with no commit. (Chrome
+ * drops the capture when it sees the button up without a release: a real
+ * mouse moving over a headed test window while the script holds the button
+ * does that, which is how a check once saw a drag commit early.) Other
+ * presses during a drag (a second finger or pen) are ignored.
  *
  * ## Keyboard
  *
@@ -229,14 +246,21 @@ export function createTileDividers(options: TileDividersOptions): TileDividers {
   let drag: Drag | null = null;
   let swallowClick = false;
 
-  function endDrag(): void {
+  /** Ends the drag: commits at the last position, or cancels it. */
+  function endDrag(commit: boolean): void {
     const ended = drag;
     drag = null;
     if (!ended) return;
     canvas.classList.remove('divider-dragging');
-    if (!ended.cancelled && requested !== null) gesture.end(requested);
+    if (!ended.cancelled) {
+      if (commit && requested !== null) gesture.end(requested);
+      else gesture.cancel();
+    }
     active = null;
     requested = null;
+    if (canvas.hasPointerCapture(ended.pointerId)) {
+      canvas.releasePointerCapture(ended.pointerId);
+    }
     refreshHighlight();
   }
 
@@ -245,6 +269,15 @@ export function createTileDividers(options: TileDividersOptions): TileDividers {
   view.element.addEventListener(
     'pointerdown',
     (event) => {
+      if (drag) {
+        // Another pointer (a second finger, a pen) while a drag runs: it
+        // neither starts anything nor reaches the tile gestures.
+        if (event.pointerId !== drag.pointerId) {
+          event.stopPropagation();
+          event.preventDefault();
+        }
+        return;
+      }
       swallowClick = false;
       if (event.button !== 0 || !event.isPrimary || !fromCanvas(event)) {
         return;
@@ -292,6 +325,12 @@ export function createTileDividers(options: TileDividersOptions): TileDividers {
       }
       event.stopPropagation();
       if (event.pointerId !== current.pointerId || current.cancelled) return;
+      if (event.buttons === 0) {
+        // The button is up but no release came: cancelled, as when Chrome
+        // drops the capture for the same reason.
+        endDrag(false);
+        return;
+      }
       const d = find(current.path);
       if (!d) return;
       const [x, y] = toCanvas(event.clientX, event.clientY);
@@ -307,12 +346,17 @@ export function createTileDividers(options: TileDividersOptions): TileDividers {
       (event) => {
         if ((event as PointerEvent).pointerId === drag?.pointerId) {
           event.stopPropagation();
-          endDrag();
+          // Capture is lost after every release too, but by then the drag
+          // has ended: a loss seen here came first, so it cancels.
+          endDrag(type === 'pointerup');
         }
       },
       true,
     );
   }
+  win.addEventListener('blur', () => {
+    endDrag(false);
+  });
   view.element.addEventListener(
     'click',
     (event) => {

@@ -41,9 +41,10 @@ that starts at 0 each month. Tags have no `v` prefix. See
   there drops them).
 - Hand-resized layouts are saved exactly. A project is still written as
   version 1 (which 2026.11.0 opens with the same collage) unless a tile has
-  been stretched beyond the planner's 2.5:1 limit; then it is written as
-  version 2, which 2026.11.0 refuses with its "saved by a newer version"
-  message and leaves its open project unchanged. This build reads both.
+  been stretched beyond the planner's shape limit (2.5:1 on most canvases),
+  which 2026.11.0 would refuse; then it is written as version 2, which
+  2026.11.0 refuses with its "saved by a newer version" message, leaving its
+  open project unchanged. This build reads both.
 
 ## 2026.11.0 - 2026-11-12
 

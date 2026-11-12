@@ -14,9 +14,10 @@
  * Every measurement is of drawn tiles: the editor's last render, or tilesFor
  * and dividersFor at the size drawn, which the renderer and export use.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { unzipSync } from 'fflate';
+import { unzipSync, zipSync } from 'fflate';
 import type { Browser, Page } from 'playwright-core';
 import { addPhotos, INIT_SCRIPT, LOAD_EXPORT } from './export-checks.ts';
 import {
@@ -210,6 +211,84 @@ async function glide(
   }
 }
 
+/** Waits for the next animation frame. */
+function nextFrame(p: Page): Promise<unknown> {
+  return p.evaluate(
+    () =>
+      new Promise((r) =>
+        requestAnimationFrame(() => {
+          r(null);
+        }),
+      ),
+  );
+}
+
+/**
+ * Records the events that can end a drag (and blur), for the detail of a
+ * check that fails: which one ended a drag early, and when.
+ */
+async function logEnds(p: Page): Promise<void> {
+  await p.evaluate(() => {
+    const w = window as any;
+    w.__ends = [];
+    if (w.__endsInstalled) return;
+    w.__endsInstalled = true;
+    for (const type of [
+      'pointerdown',
+      'pointerup',
+      'pointercancel',
+      'lostpointercapture',
+      'gotpointercapture',
+      'blur',
+    ]) {
+      window.addEventListener(
+        type,
+        (e) => {
+          const t = e.target as Partial<HTMLElement> | null;
+          const id = e instanceof PointerEvent ? String(e.pointerId) : '';
+          const name = t?.className ?? (t === window ? 'window' : 'document');
+          w.__ends.push(
+            `${type}#${id}@${String(Math.round(e.timeStamp))}:${name}`,
+          );
+        },
+        true,
+      );
+    }
+  });
+}
+const ends = (p: Page): Promise<string> =>
+  p.evaluate(() => ((window as any).__ends as string[]).join(' '));
+
+/**
+ * A point on the line `l` with nothing drawn over it (the selected tile's
+ * menu can be: there the press is the menu's), nearest its middle, and the
+ * line moved there. `under` is what covers the line's middle, if anything.
+ */
+async function uncovered(
+  p: Page,
+  l: Line,
+): Promise<{ line: Line; under: string | null }> {
+  return p.evaluate((l) => {
+    const c = document.querySelector('.collage-canvas');
+    const at = (t: number): [number, number] => {
+      const along = l.from + (l.to - l.from) * t;
+      return l.axis === 'x' ? [l.x, along] : [along, l.y];
+    };
+    const [mx, my] = at(0.5);
+    const mid = document.elementFromPoint(mx, my);
+    const under = mid === c ? null : mid ? mid.className : 'nothing';
+    for (let i = 0; i <= 40; i++) {
+      // 0.5, then outwards: 0.5 ± 0.0225, ± 0.045, ... up to 0.05 and 0.95.
+      const t = 0.5 + (i % 2 === 0 ? 1 : -1) * Math.ceil(i / 2) * 0.0225;
+      const [x, y] = at(t);
+      if (document.elementFromPoint(x, y) === c) {
+        return { line: { ...l, x, y }, under };
+      }
+    }
+    return { line: l, under };
+  }, l);
+}
+
 /** Drags the divider `l` by `delta` CSS px across its line. */
 async function dragBy(p: Page, l: Line, delta: number): Promise<void> {
   const dx = l.axis === 'x' ? delta : 0;
@@ -324,6 +403,7 @@ export async function checkDividers(
     });
   }
   const c0 = await commits(p);
+  await logEnds(p);
   const delta = 90;
   const dx = r0.axis === 'x' ? delta : 0;
   const dy = r0.axis === 'y' ? delta : 0;
@@ -396,7 +476,8 @@ export async function checkDividers(
   check(
     'divider drag: releasing commits exactly once, and the line is where the pointer left it',
     (await commits(p)) === c0 + 1 && Math.abs(moved - delta) <= 1.5,
-    `${String((await commits(p)) - c0)} commits; moved ${moved.toFixed(2)} of ${String(delta)} CSS px`,
+    `${String((await commits(p)) - c0)} commits; moved ${moved.toFixed(2)} of ${String(delta)} CSS px` +
+      (Math.abs(moved - delta) <= 1.5 ? '' : `; events: ${await ends(p)}`),
   );
   check(
     "divider drag: tiles on both sides resize, keeping each side's proportions; no photo changes tile",
@@ -455,6 +536,197 @@ export async function checkDividers(
       (await planJson(p)) === afterPlan &&
       (await commits(p)) === c1,
   );
+
+  // Losing pointer capture, or a pointercancel, before the release cancels
+  // the drag: the layout goes back, nothing is committed, and the release
+  // that follows does nothing.
+  for (const how of ['capture lost', 'pointercancel'] as const) {
+    const cBefore = await commits(p);
+    const planBefore = await planJson(p);
+    const l = await root(p);
+    await p.mouse.move(l.x, l.y);
+    await p.mouse.down();
+    await glide(p, l.x, l.y, l.x + dx / 2, l.y + dy / 2, 4);
+    await nextFrame(p);
+    const changed = (await planJson(p)) !== planBefore;
+    await p.evaluate((how) => {
+      const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+      // The mouse is pointer 1 in Chrome.
+      if (how === 'capture lost') c.releasePointerCapture(1);
+      else {
+        c.dispatchEvent(
+          new PointerEvent('pointercancel', {
+            pointerId: 1,
+            isPrimary: true,
+            bubbles: true,
+          }),
+        );
+      }
+    }, how);
+    // A capture released by script is lost at the next pointer event.
+    await p.mouse.move(l.x + dx / 2 + 1, l.y + dy / 2 + 1);
+    await drawn(p);
+    const back = (await planJson(p)) === planBefore;
+    await glide(p, l.x + dx / 2, l.y + dy / 2, l.x + dx, l.y + dy, 4);
+    await p.mouse.up();
+    await drawn(p);
+    const state = await p.evaluate(() => ({
+      dragging: (window as any).__app.editor.isDragging(),
+      busy: (window as any).__app.dividers.isBusy(),
+      cls: document
+        .querySelector('.collage-canvas')!
+        .classList.contains('divider-dragging'),
+    }));
+    check(
+      `divider drag: ${how} mid-drag cancels it: the layout goes back, nothing is committed, and the release does nothing`,
+      changed &&
+        back &&
+        (await planJson(p)) === planBefore &&
+        (await commits(p)) === cBefore &&
+        !state.dragging &&
+        !state.busy &&
+        !state.cls,
+      JSON.stringify({ changed, back, ...state }),
+    );
+  }
+
+  // A second pointer pressed during a drag (a finger, a pen) is ignored: no
+  // selection, no pan, no second divider; the drag carries on and commits
+  // once, moving only its own divider.
+  {
+    const cBefore = await commits(p);
+    const before = await p.evaluate(() => {
+      const s = (window as any).__app.editor.getState();
+      return JSON.stringify({ crops: s.crops, assignment: s.assignment });
+    });
+    const l = await root(p);
+    const other = (await lines(p)).find((d) => d.path !== '')!;
+    const t = await tileCentre(p, 0);
+    await p.mouse.move(l.x, l.y);
+    await p.mouse.down();
+    await glide(p, l.x, l.y, l.x + dx / 2, l.y + dy / 2, 4);
+    await p.evaluate(
+      (points) => {
+        const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+        for (const [x, y] of points) {
+          for (const type of ['pointerdown', 'pointermove', 'pointerup']) {
+            c.dispatchEvent(
+              new PointerEvent(type, {
+                pointerId: 7,
+                pointerType: 'touch',
+                isPrimary: false,
+                bubbles: true,
+                cancelable: true,
+                clientX: x + (type === 'pointermove' ? 30 : 0),
+                clientY: y + (type === 'pointermove' ? 30 : 0),
+                button: type === 'pointermove' ? -1 : 0,
+                buttons: type === 'pointerup' ? 0 : 1,
+              }),
+            );
+          }
+        }
+      },
+      [
+        [t.x, t.y],
+        [other.x, other.y],
+      ] as [number, number][],
+    );
+    await glide(p, l.x + dx / 2, l.y + dy / 2, l.x + dx, l.y + dy, 4);
+    await p.mouse.up();
+    await drawn(p);
+    const after = await p.evaluate(() => {
+      const s = (window as any).__app.editor.getState();
+      return JSON.stringify({ crops: s.crops, assignment: s.assignment });
+    });
+    const l2 = await root(p);
+    const o2 = (await lines(p)).find((d) => d.path === other.path)!;
+    const selection = await p.evaluate(
+      () => (window as any).__app.selection.getSelection().kind,
+    );
+    const movedBy = l.axis === 'x' ? l2.x - l.x : l2.y - l.y;
+    check(
+      'divider drag: a second pointer pressed during the drag is ignored; the drag commits once',
+      (await commits(p)) === cBefore + 1 &&
+        movedBy > 20 &&
+        o2.fraction === other.fraction &&
+        after === before &&
+        selection === 'idle',
+      `${String((await commits(p)) - cBefore)} commits, moved ${movedBy.toFixed(1)}, selection ${String(selection)}`,
+    );
+    await p.getByRole('button', { name: 'Undo' }).click();
+    await drawn(p);
+  }
+
+  // A mouse move reported with no button down while the script holds the
+  // button: what a real mouse moving over a headed test window sends. Chrome
+  // then drops the pointer capture (lostpointercapture, no pointerup), which
+  // once made a check's drag commit early. It cancels the drag: the layout
+  // goes back, nothing is committed, and the later moves and release do
+  // nothing.
+  {
+    const cBefore = await commits(p);
+    const planBefore = await planJson(p);
+    const l = await root(p);
+    await logEnds(p);
+    await p.mouse.move(l.x, l.y);
+    await p.mouse.down();
+    await glide(p, l.x, l.y, l.x + dx / 4, l.y + dy / 4, 2);
+    await nextFrame(p);
+    const changed = (await planJson(p)) !== planBefore;
+    const cdp = await p.context().newCDPSession(p);
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: l.x + dx / 4 + 1,
+      y: l.y + dy / 4 + 1,
+      button: 'none',
+      buttons: 0,
+    });
+    await drawn(p);
+    const back = (await planJson(p)) === planBefore;
+    await glide(p, l.x + dx / 4, l.y + dy / 4, l.x + dx, l.y + dy, 4);
+    await p.mouse.up();
+    await drawn(p);
+    const log = await ends(p);
+    const cAfter = (await commits(p)) - cBefore;
+    const same = (await planJson(p)) === planBefore;
+    check(
+      'divider drag: a move with the button up but no release (Chrome drops the capture) cancels the drag; later moves and the release do nothing',
+      changed &&
+        back &&
+        log.includes('lostpointercapture') &&
+        cAfter === 0 &&
+        same,
+      `${JSON.stringify({ changed, back, commits: cAfter, same })} ${log}`,
+    );
+    await cdp.detach();
+  }
+
+  // Released outside the window: commits once, at the clamped position.
+  {
+    const cBefore = await commits(p);
+    const l = await root(p);
+    const range = await p.evaluate(async (module) => {
+      const { dividerRange } = await import(/* @vite-ignore */ module);
+      return dividerRange((window as any).__app.editor.getState().plan, '');
+    }, LAYOUT_MODULE);
+    await p.mouse.move(l.x, l.y);
+    await p.mouse.down();
+    const outX = l.axis === 'x' ? -200 : l.x;
+    const outY = l.axis === 'y' ? -200 : l.y;
+    await glide(p, l.x, l.y, outX, outY, 10);
+    await p.mouse.up();
+    await drawn(p);
+    const f = await p.evaluate(
+      () => (window as any).__app.editor.getState().plan.root.fraction,
+    );
+    check(
+      'divider drag: released outside the window, it commits once at the clamped position',
+      (await commits(p)) === cBefore + 1 && Math.abs(f - range.min) < 1e-9,
+      `${String((await commits(p)) - cBefore)} commits, fraction ${String(f)} (min ${String(range.min)})`,
+    );
+    await p.getByRole('button', { name: 'Undo' }).click();
+    await drawn(p);
+  }
 
   // --- 3. Limits ---------------------------------------------------------------
   await act(p, 'setBorder', 0);
@@ -624,9 +896,11 @@ export async function checkDividers(
       (await planJson(p)) === planBeforePan,
     JSON.stringify({ selected, crop0, crop1, crop2 }),
   );
-  // A press in the band on the selected tile's edge drags the divider, not
-  // the photo, and the tile stays selected.
-  const r4c = await root(p);
+  // A press in the band drags the divider, not the selected photo, and the
+  // tile stays selected. The press is where nothing covers the line: the
+  // selected tile's menu may cover part of it, and there the menu gets the
+  // press (checked below).
+  const { line: r4c, under: r4under } = await uncovered(p, await root(p));
   const crop3 = await p.evaluate(
     (id) => (window as any).__app.editor.getState().crops[id] ?? null,
     id,
@@ -656,7 +930,7 @@ export async function checkDividers(
     (await planJson(p)) !== planBeforePan &&
       JSON.stringify(after4.crop) === JSON.stringify(crop3) &&
       after4.selection.kind === 'selected',
-    JSON.stringify({ ...after4, crop3, pressed }),
+    JSON.stringify({ ...after4, crop3, pressed, middleCoveredBy: r4under }),
   );
   // Swap still works by pointer.
   const assignmentBefore = await p.evaluate(
@@ -676,6 +950,131 @@ export async function checkDividers(
       assignmentAfter[other] === assignmentBefore[slot],
   );
   await p.keyboard.press('Escape');
+
+  // The selected tile's menu drawn over a divider: what the user sees wins.
+  // The menu is moved (as placement might put it) so that the root divider
+  // runs through its Reset button.
+  {
+    await act(p, 'setCrop', id, { x: 0.3, y: 0.6, zoom: 1.4 });
+    const idSlot = await p.evaluate(
+      (id) => (window as any).__app.editor.getState().assignment.indexOf(id),
+      id,
+    );
+    const ic = await tileCentre(p, idSlot);
+    await p.mouse.click(ic.x, ic.y);
+    const l = await root(p);
+    const target = await p.evaluate((l) => {
+      const menu = document.querySelector<HTMLElement>('.tile-menu')!;
+      const reset = [...menu.querySelectorAll('button')].find(
+        (b) => b.textContent.trim() === 'Reset',
+      )!;
+      const r = reset.getBoundingClientRect();
+      // The Reset button's centre onto the line, at a third of its length.
+      const along = l.from + (l.to - l.from) / 3;
+      const [x, y] = l.axis === 'x' ? [l.x, along] : [along, l.y];
+      // As a translation: the menu keeps its own placement (it is placed
+      // again on focus and on every render), and moves with it.
+      menu.style.translate = `${String(x - (r.left + r.width / 2))}px ${String(y - (r.top + r.height / 2))}px`;
+      const z = menu.querySelector<HTMLElement>('.tile-menu-zoom span')!;
+      const zr = z.getBoundingClientRect();
+      return {
+        x,
+        y,
+        zoomX: zr.left + zr.width / 2,
+        zoomY: zr.top + zr.height / 2,
+      };
+    }, l);
+    const planBefore = await planJson(p);
+    const cBefore = await commits(p);
+    await p.mouse.move(target.x, target.y);
+    await p.waitForTimeout(50);
+    const hoverMenu = await p.evaluate(({ x, y }) => {
+      const el = document.elementFromPoint(x, y) as HTMLElement;
+      return {
+        inMenu: el.closest('.tile-menu') !== null,
+        cursor: getComputedStyle(el).cursor,
+        highlight:
+          !document.querySelector<HTMLElement>('.divider-highlight')!.hidden,
+        hit:
+          (window as any).__app.dividers.dividerAtClientPoint(x, y)?.path ??
+          null,
+      };
+    }, target);
+    check(
+      'menu over a divider: hovering the menu there shows no divider highlight or resize cursor',
+      hoverMenu.inMenu &&
+        hoverMenu.hit === '' &&
+        !hoverMenu.highlight &&
+        !hoverMenu.cursor.includes('resize'),
+      JSON.stringify(hoverMenu),
+    );
+    await p.mouse.down();
+    await glide(p, target.x, target.y, target.x + 2, target.y + 2, 2);
+    await p.mouse.up();
+    await drawn(p);
+    const afterReset = await p.evaluate(
+      (id) => ({
+        crop: (window as any).__app.editor.getState().crops[id] ?? null,
+        selection: (window as any).__app.selection.getSelection(),
+      }),
+      id,
+    );
+    check(
+      'menu over a divider: a press there operates the menu (Reset), moves no divider, and keeps the selection',
+      (await planJson(p)) === planBefore &&
+        (await commits(p)) === cBefore + 1 &&
+        (afterReset.crop === null ||
+          (afterReset.crop.zoom === 1 &&
+            afterReset.crop.x === 0.5 &&
+            afterReset.crop.y === 0.5)) &&
+        afterReset.selection.kind === 'selected' &&
+        afterReset.selection.photoId === id,
+      JSON.stringify(afterReset),
+    );
+    // A press on the menu's Zoom label, dragged off onto another tile and
+    // released there, is not a click away: the selection stays (the click
+    // goes to an element holding both, which used to read as one).
+    const away = await tileCentre(p, idSlot === 0 ? 1 : 0);
+    const zoom = await p.evaluate(() => {
+      const z = document.querySelector<HTMLElement>('.tile-menu-zoom span')!;
+      const r = z.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    });
+    const cLabel = await commits(p);
+    await p.mouse.move(zoom.x, zoom.y);
+    await p.mouse.down();
+    await glide(p, zoom.x, zoom.y, away.x, away.y, 6);
+    await p.mouse.up();
+    await drawn(p);
+    const afterLabel = await p.evaluate(() =>
+      (window as any).__app.selection.getSelection(),
+    );
+    check(
+      "menu: a press on the menu's Zoom label released over another tile keeps the selection and changes nothing",
+      afterLabel.kind === 'selected' &&
+        afterLabel.photoId === id &&
+        (await planJson(p)) === planBefore &&
+        (await commits(p)) === cLabel,
+      JSON.stringify(afterLabel),
+    );
+    // The way out: Escape removes the menu, and the divider is draggable
+    // where the menu was.
+    await p.keyboard.press('Escape');
+    await p.evaluate(() => {
+      document.querySelector<HTMLElement>('.tile-menu')!.style.translate = '';
+    });
+    const menuGone = await p.evaluate(
+      () => document.querySelector<HTMLElement>('.tile-menu')!.hidden,
+    );
+    await dragBy(p, { ...l, x: target.x, y: target.y }, 20);
+    const l2 = await root(p);
+    check(
+      'menu over a divider: Escape removes the menu, and the divider is then draggable where it was',
+      menuGone &&
+        Math.abs((l.axis === 'x' ? l2.x - l.x : l2.y - l.y) - 20) <= 1.5,
+      `menu hidden ${String(menuGone)}`,
+    );
+  }
 
   // --- 5. Crops keep their focal point; nothing letterboxed or distorted -----
   await act(p, 'setBackground', '#ff00ff');
@@ -995,6 +1394,89 @@ export async function checkDividers(
     e1 === '' && reopened === stretchedState,
     e1,
   );
+  // Save, open, save: project.json is byte for byte the same, and so is its
+  // version, for a gently resized and a stretched layout.
+  {
+    const raw = (path: string): Buffer =>
+      Buffer.from(
+        unzipSync(new Uint8Array(readFileSync(path)))['project.json']!,
+      );
+    const results: string[] = [];
+    let ok = true;
+    for (const [name, zip] of [
+      ['stretched', stretchedZip],
+      ['gentle', gentleZip],
+    ] as const) {
+      const e = name === 'stretched' ? '' : await openProject(fresh.p, zip);
+      const again = await saveProject(fresh.p, `divider-again-${name}`);
+      const same = e === '' && raw(again).equals(raw(zip));
+      const v = projectJson(again).version;
+      ok &&= same && v === projectJson(zip).version;
+      results.push(`${name}: ${same ? 'identical' : 'differs'}, v${String(v)}`);
+    }
+    check(
+      'save, open, save: project.json is byte-identical with the same version (gentle and stretched)',
+      ok,
+      results.join('; '),
+    );
+  }
+  // Hostile split values are refused, and the open project stays as it was.
+  {
+    const entries = unzipSync(new Uint8Array(readFileSync(gentleZip)));
+    const json = projectJson(gentleZip);
+    const cases: [string, unknown][] = [
+      ['0', 0],
+      ['1', 1],
+      ['negative', -0.25],
+      ['above 1', 1.5],
+      ['null (NaN in JSON)', null],
+      ['a string', '0.5'],
+      ['so small a tile has no size', 1e-12],
+    ];
+    const before = await fresh.p.evaluate(() =>
+      JSON.stringify((window as any).__app.editor.getState()),
+    );
+    const failures: string[] = [];
+    for (const [what, value] of cases) {
+      const project = structuredClone(json);
+      project.state.plan.root.fraction = value;
+      const files: Record<string, [Uint8Array, { level: 0 }]> = {};
+      for (const [name, bytes] of Object.entries(entries)) {
+        files[name] = [
+          name === 'project.json'
+            ? new TextEncoder().encode(JSON.stringify(project))
+            : bytes,
+          { level: 0 },
+        ];
+      }
+      const path = join(
+        tmpdir(),
+        `divider-hostile-${String(Date.now())}-${String(Math.random()).slice(2)}.zip`,
+      );
+      writeFileSync(path, zipSync(files));
+      const error = await openProject(fresh.p, path);
+      if (error) {
+        await fresh.p.getByRole('button', { name: 'OK' }).click();
+        await fresh.p
+          .waitForSelector('.project-dialog[open]', {
+            state: 'detached',
+            timeout: 10_000,
+          })
+          .catch(() => undefined);
+      }
+      const after = await fresh.p.evaluate(() =>
+        JSON.stringify((window as any).__app.editor.getState()),
+      );
+      if (!error.includes('Could not open the project') || after !== before) {
+        failures.push(`${what}: ${error.replace(/\s+/g, ' ').slice(0, 80)}`);
+      }
+    }
+    check(
+      `a project whose split fraction is 0, 1, negative, above 1, null, a string or tiny is refused, and the open project is unchanged`,
+      failures.length === 0,
+      failures.join(' | '),
+    );
+  }
   await fresh.ctx.close();
 
   if (options.releaseOrigin) {
@@ -1248,6 +1730,43 @@ export async function checkDividers(
       () => !document.activeElement?.classList.contains('divider-sep'),
     );
     check('keyboard: Tab leaves the dividers in one step', left);
+    // Whatever the menu covers, the keyboard reaches every divider: with a
+    // tile selected (its menu showing), Tab to the dividers and walk along.
+    {
+      await kp.locator('.collage-canvas').focus();
+      await kp.keyboard.press('Enter');
+      for (let i = 0; i < 8; i++) {
+        await kp.keyboard.press('Tab');
+        if ((await sepInfo()).sep) break;
+      }
+      const menuShown = await kp.evaluate(
+        () => !document.querySelector<HTMLElement>('.tile-menu')!.hidden,
+      );
+      // Back to the first divider, then along every one.
+      for (let i = 0; i < 40; i++) {
+        const s = await sepInfo();
+        await kp.keyboard.press(
+          s.orientation === 'vertical' ? 'ArrowUp' : 'ArrowLeft',
+        );
+        if ((await sepInfo()).path === s.path) break;
+      }
+      const seen = new Set<string>();
+      for (let i = 0; i < 40; i++) {
+        const s = await sepInfo();
+        if (!s.sep || s.path === null) break;
+        seen.add(s.path);
+        if (seen.size === s.seps) break;
+        await kp.keyboard.press(
+          s.orientation === 'vertical' ? 'ArrowDown' : 'ArrowRight',
+        );
+      }
+      const total = (await sepInfo()).seps;
+      check(
+        "keyboard: with a tile's menu showing, every divider is reached from the keyboard",
+        menuShown && seen.size === total && total === 11,
+        `${String(seen.size)} of ${String(total)}`,
+      );
+    }
     if (k.errors.length > 0) {
       check(
         'dividers: no console errors (keyboard page)',
@@ -1258,8 +1777,80 @@ export async function checkDividers(
     await k.ctx.close();
   }
 
-  // --- 11. 300 photos: dragging a divider stays smooth -----------------------
+  // Sharper decodes wait for the drag, then start once it has ended: three
+  // large photos, so the tiles need more than their 1024 px previews.
   {
+    const d = await newPage(browser, origin, { width: 1440, height: 900 }, 2);
+    await addSized(d.p, [
+      [6000, 4000],
+      [4000, 6000],
+      [6000, 4000],
+    ]);
+    const settle = () =>
+      d.p.waitForFunction(
+        () => {
+          const last = (window as any).__app.view.lastRender();
+          return last && (last.upgrading ?? 0) === 0;
+        },
+        undefined,
+        { timeout: 60_000 },
+      );
+    await drawn(d.p);
+    await settle();
+    const decodes = (): Promise<number> =>
+      d.p.evaluate(
+        () => (window as any).__app.view.imageCacheStats().detailDecodes,
+      );
+    // Each side in turn grows as far as it may, until a drag needs sharper
+    // images (one side may already be as sharp as it can get).
+    const runs: string[] = [];
+    let ok = true;
+    let started = false;
+    for (const grow of [2000, -2000]) {
+      const n0 = await decodes();
+      const l = await root(d.p);
+      await d.p.mouse.move(l.x, l.y);
+      await d.p.mouse.down();
+      await glide(
+        d.p,
+        l.x,
+        l.y,
+        l.x + (l.axis === 'x' ? grow : 0),
+        l.y + (l.axis === 'y' ? grow : 0),
+        12,
+      );
+      await d.p.waitForTimeout(600);
+      const n1 = await decodes();
+      await d.p.mouse.up();
+      await drawn(d.p);
+      // The cache waits a moment after the last change before decoding.
+      await d.p
+        .waitForFunction(
+          (n) => (window as any).__app.view.imageCacheStats().detailDecodes > n,
+          n1,
+          { timeout: 10_000 },
+        )
+        .catch(() => undefined);
+      await settle();
+      const n2 = await decodes();
+      runs.push(`${String(n1 - n0)} during, ${String(n2 - n1)} after`);
+      ok &&= n1 === n0;
+      if (n2 > n1) {
+        started = true;
+        break;
+      }
+    }
+    check(
+      'divider drag: no decode of an original starts while the pointer is down, and they start once it is released',
+      ok && started,
+      runs.join('; '),
+    );
+    await d.ctx.close();
+  }
+
+  // --- 11. 300 photos: dragging a divider stays smooth -----------------------
+  // (DIVIDER_SKIP_PERF=1 leaves it out, for quick sweeps over seeds.)
+  if (process.env.DIVIDER_SKIP_PERF !== '1') {
     const big = await newPage(
       browser,
       origin,

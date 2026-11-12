@@ -71,6 +71,7 @@ export {
   tilesBeside,
   type Divider,
   type DividerRange,
+  withinPlannerShape,
   type TileSizes,
 } from './dividers';
 export type {

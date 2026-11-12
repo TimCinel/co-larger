@@ -5522,7 +5522,12 @@ if (process.argv.includes('--a2-only')) {
   process.exit(failures === 0 ? 0 : 1);
 }
 
-const browser = await chromium.launch({ channel: 'chrome' });
+// HEADED=1 shows the window (for watching a check; a real mouse moving over
+// it then mixes its own events with the script's).
+const browser = await chromium.launch({
+  channel: 'chrome',
+  headless: process.env.HEADED !== '1',
+});
 console.log(`Browser: Chrome ${browser.version()}`);
 
 // `--feature-compat <dir>`: serve a checkout of the release beside this one.

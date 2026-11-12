@@ -7,7 +7,7 @@
  * and returns freshly built values, never the parsed objects themselves.
  */
 import { validateEditorState, type EditorState } from '../editor/state';
-import { checkTileSizes } from '../layout';
+import { withinPlannerShape } from '../layout';
 
 /** Marks a project.json as ours. */
 export const FORMAT_ID = 'co-larger-project';
@@ -18,18 +18,20 @@ export const FORMAT_ID = 'co-larger-project';
  *
  * - 1: since the first release (2026.11.0).
  * - 2 (#16): a plan resized by hand with a tile beyond the planner's aspect
- *   limit, which 2026.11.0 would refuse as "squashed". Written only for such
- *   a plan (see versionFor); everything else is still written as version 1,
- *   so that 2026.11.0 opens it.
+ *   limit (planAspectLimit: max(2.5, canvas aspect / tile count)), which
+ *   2026.11.0 would refuse as "squashed". Written exactly when 2026.11.0
+ *   would refuse the plan (see versionFor); everything else is still written
+ *   as version 1, so that 2026.11.0 opens it.
  */
 export const FORMAT_VERSION = 2;
 
 /**
- * The version written for `state`: 2 only when its plan has a tile that
- * only hand resizing makes (checkTileSizes is 'resized'), else 1.
+ * The version written for `state`: 1 when release 2026.11.0 would accept
+ * its plan (withinPlannerShape is its exact tile check), else 2. Only hand
+ * resizing (#16) makes a plan it would refuse.
  */
 export function versionFor(state: EditorState): number {
-  return checkTileSizes(state.plan) === 'resized' ? 2 : 1;
+  return withinPlannerShape(state.plan) ? 1 : 2;
 }
 
 /** The manifest's path inside the zip. */

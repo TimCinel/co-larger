@@ -34,7 +34,7 @@
  * tiles squashed to nothing, and every layout the user can make passes.
  */
 import { planAspectLimit } from './plan';
-import { walkPlaced } from './place';
+import { placeLayout, walkPlaced } from './place';
 import type {
   Axis,
   LayoutNode,
@@ -247,6 +247,29 @@ export function setDividerFraction(
   return { ...plan, root: replace(plan.root as LayoutNode, 0) };
 }
 
+/**
+ * Whether every tile of `plan`, placed in its own geometry (`aspect` × 1, no
+ * border), is within planAspectLimit (max(MAX_PLAN_ASPECT, canvas aspect /
+ * tile count)), with 1e-6 of floating-point slack. This is exactly the tile
+ * check of release 2026.11.0's validateEditorState, which refuses any other
+ * plan as "squashed": every plan the planner makes passes, and so does a
+ * hand-resized one that stayed within the limit. A project is written as
+ * format version 1 exactly when its plan passes (see versionFor), so
+ * 2026.11.0 opens every version 1 file this build writes. Throws for a
+ * malformed plan.
+ */
+export function withinPlannerShape(plan: LayoutPlan): boolean {
+  validatePlan(plan);
+  if (plan.root === null) return true;
+  const limit = planAspectLimit(plan.aspect, 1, plan.count) * (1 + SLACK);
+  for (const tile of placeLayout(plan, { width: plan.aspect, height: 1 })) {
+    const long = Math.max(tile.width, tile.height);
+    const short = Math.min(tile.width, tile.height);
+    if (!(short > 0) || long / short > limit) return false;
+  }
+  return true;
+}
+
 /** What checkTileSizes found. */
 export type TileSizes =
   /** Every tile is within the planner's aspect limit, as planned. */
@@ -266,8 +289,7 @@ export type TileSizes =
  * ways (each with a little floating-point slack). Throws for a malformed plan.
  */
 export function checkTileSizes(plan: LayoutPlan): TileSizes {
-  validatePlan(plan);
-  if (plan.root === null) return 'planned';
+  if (withinPlannerShape(plan)) return 'planned';
   const limit = planAspectLimit(plan.aspect, 1, plan.count) * (1 + SLACK);
   const m = minTileSide(plan) * (1 - SLACK);
   let result: TileSizes = 'planned';

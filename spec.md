@@ -77,8 +77,17 @@ major difference: tile sizes are configurable, from uniform to a few very large
   commits on release, and Escape cancels the drag. No tile gets smaller than
   4% of the canvas's shorter side in either direction; a tile already
   smaller than that (from the planner, with many photos) can grow but not
-  shrink. Crops are re-fitted around the same focal point as tiles change
-  shape, and no photo moves, featured or not. Each divider can also be
+  shrink, and while it is thinner than 4% one way it cannot be stretched the
+  other way beyond the planner's own shape limit (2.5:1, more on a very long
+  canvas): otherwise a drag could pull a hairline sliver out of it, which a
+  saved project could not tell apart from a damaged one. Tiles of at least
+  4% both ways have no shape limit. Where the selected tile's menu is drawn
+  over a divider, the menu gets the press there and the divider shows no
+  highlight; the rest of the line can be dragged, Escape removes the menu,
+  and the keyboard reaches every divider. Crops are re-fitted around the
+  same focal point as tiles change shape, and no photo moves, featured or
+  not. A drag that the system cancels (lost pointer capture, a cancelled
+  pointer, the window losing focus) puts the layout back. Each divider can also be
   focused with Tab and moved with the arrow keys (Shift for bigger steps);
   one key sequence or one drag is one undo step.
 - Hand resizing does not survive a re-roll: Shuffle, the dial, the canvas

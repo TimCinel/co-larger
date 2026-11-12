@@ -131,28 +131,37 @@ Dragging a divider (#16) changes the `fraction` of a split node in
 `state.plan`; no field is added. The plan is saved and restored exactly, so a
 hand-resized collage reopens as it was.
 
-2026.11.0 checks every tile of a plan against the planner's aspect limit
-(2.5:1 for the plan's own shape, border not counted) and refuses a plan with a
-tile beyond it as "squashed". Hand resizing may go past that limit (a tile
-only has to stay at least 4% of the canvas's shorter side in both directions),
-so:
+2026.11.0 places the plan in its own shape (the canvas ratio, no border) and
+refuses it as "squashed" if any tile is longer than the planner's aspect
+limit allows: `max(2.5, canvas aspect / number of tiles)`, where the canvas
+aspect is its long side over its short side. So the limit is 2.5:1, except on
+a canvas so long and thin for its photo count that even a row of equal tiles
+is more stretched (20 000 × 1 000 px with two photos: 10:1). Every plan the
+planner makes passes. Hand resizing may go past the limit (a tile only has to
+stay at least 4% of the canvas's shorter side in both directions), so:
 
-- A project whose tiles are all within the planner's aspect limit is written
-  as version 1, hand resized or not. 2026.11.0 opens it with exactly the same
-  collage.
-- A project with a tile beyond the limit is written as version 2. 2026.11.0
-  refuses it with its "saved by a newer version of co-larger (format version
-  2; this one reads up to 1)" message and leaves its current project as it
-  was, instead of opening something it would call damaged.
+- Version 2 is written exactly when 2026.11.0 would refuse the plan.
+  `versionFor` (`src/project/format.ts`) decides it with
+  `withinPlannerShape` (`src/layout/dividers.ts`), which is that release's
+  tile check (same placement, same limit, same 1e-6 slack); a unit test
+  compares it against a copy of the release's code.
+- Every other project, hand resized or not, is written as version 1, and
+  2026.11.0 opens it with exactly the same collage.
+- 2026.11.0 refuses a version 2 file with its "saved by a newer version of
+  co-larger (format version 2; this one reads up to 1)" message and leaves
+  its current project as it was, instead of opening something it would call
+  damaged.
 - This build reads both. Version 1 and 2 files are checked the same way: a
-  tile may be beyond the aspect limit only if it is at least 4% of the
-  shorter side in both directions (`checkTileSizes` in
-  `src/layout/dividers.ts`); anything else is refused as squashed.
+  tile may be beyond the planner's limit only if it is at least 4% of the
+  shorter side in both directions (`checkTileSizes`); anything else (a split
+  `fraction` of 0, 1, below 0, above 1, not a number, or so close to 0 or 1
+  that a tile has no size) is refused, and the open project is unchanged.
 
-Version 2 is decided per save (`versionFor` in `src/project/format.ts`), so
-dragging a stretched tile back within the limit and saving again writes
-version 1. Both directions are covered by `node scripts/browser-check.ts
---divider-only --feature-compat <a 2026.11.0 checkout>`.
+The version is decided per save, so dragging a stretched tile back within
+the limit and saving again writes version 1. Saving, opening and saving
+again gives a byte-identical `project.json` with the same version. Both
+directions are covered by `node scripts/browser-check.ts --divider-only
+--feature-compat <a 2026.11.0 checkout>`.
 
 - `photos` lists every photo in tray order. `included` says whether the
   collage uses it, and must agree with `state.photos`. `width`, `height` and

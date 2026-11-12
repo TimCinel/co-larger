@@ -3,6 +3,8 @@ import {
   checkTileSizes,
   dividerRange,
   listDividers,
+  placeLayout,
+  planAspectLimit,
   planLayout,
   type LayoutNode,
   type PhotoShape,
@@ -263,6 +265,23 @@ describe('saving and validating a hand-resized layout', () => {
     expect(() => validateEditorState(copy)).toThrow(/squashed/);
   });
 
+  const hostile: [string, unknown][] = [
+    ['0', 0],
+    ['1', 1],
+    ['negative', -0.2],
+    ['above 1', 1.5],
+    ['null (NaN in JSON)', null],
+    ['a string', '0.5'],
+    ['a zero-size tile', 1e-12],
+  ];
+  it.each(hostile)('a split fraction of %s is refused', (_name, value) => {
+    const copy = JSON.parse(JSON.stringify(base())) as {
+      plan: { root: { fraction: unknown } };
+    };
+    copy.plan.root.fraction = value;
+    expect(() => validateEditorState(copy)).toThrow(RangeError);
+  });
+
   it('keeps a border: a hand-stretched tile does not force it to zero', () => {
     const state = setBorder(stretched(), 0.01);
     const at = borderAt(state);
@@ -293,6 +312,73 @@ describe('saving and validating a hand-resized layout', () => {
     aspect: p.aspect,
     lastModified: 1,
   }));
+
+  /**
+   * Release 2026.11.0's tile check in validateEditorState, copied as it was
+   * (src/editor/state.ts at cfa559d): the plan is refused unless this holds.
+   */
+  function releaseAccepts(plan: EditorState['plan']): boolean {
+    if (plan.root === null) return true;
+    const limit = planAspectLimit(plan.aspect, 1, plan.count) * (1 + 1e-6);
+    const tiles = placeLayout(plan, { width: plan.aspect, height: 1 });
+    for (const tile of tiles) {
+      const long = Math.max(tile.width, tile.height);
+      const short = Math.min(tile.width, tile.height);
+      if (!(short > 0) || long / short > limit) return false;
+    }
+    return true;
+  }
+
+  it('writes version 1 exactly when 2026.11.0 would accept the plan', () => {
+    let accepted = 0;
+    let refused = 0;
+    for (let seed = 1; seed <= 40; seed++) {
+      let state = createEditorState({
+        seed,
+        variation: (seed % 5) / 4,
+        photos: PHOTOS.slice(0, 2 + (seed % 10)),
+        canvas: { width: 1600, height: 1000 },
+      });
+      const all = listDividers(state.plan, {
+        width: state.plan.aspect,
+        height: 1,
+      });
+      // Move a few dividers to random spots in their range.
+      let r = seed * 7919;
+      for (const d of all.slice(0, 3)) {
+        r = (r * 48271) % 2147483647;
+        state = moveDivider(state, d.path, (r % 1000) / 999);
+      }
+      const v = buildProject(state, sources).version;
+      expect(v).toBe(releaseAccepts(state.plan) ? 1 : 2);
+      if (v === 1) accepted++;
+      else refused++;
+    }
+    // Both kinds were tried.
+    expect(accepted).toBeGreaterThan(0);
+    expect(refused).toBeGreaterThan(0);
+  });
+
+  it('a long thin canvas: the limit is the canvas aspect / count, not 2.5', () => {
+    // 20000 x 1000 with two photos: the planner limit is 10:1.
+    let state = createEditorState({
+      seed: 3,
+      photos: PHOTOS.slice(0, 2),
+      canvas: { width: 20000, height: 1000 },
+    });
+    expect(planAspectLimit(20, 1, 2)).toBe(10);
+    // The planner's own tiles are 10:1, far beyond 2.5:1: still version 1.
+    const tiles = placeLayout(state.plan, { width: 20, height: 1 });
+    const widest = Math.max(...tiles.map((t) => t.width / t.height));
+    expect(widest).toBeGreaterThan(2.5);
+    expect(releaseAccepts(state.plan)).toBe(true);
+    expect(checkTileSizes(state.plan)).toBe('planned');
+    expect(buildProject(state, sources).version).toBe(1);
+    // Any move from that even row goes beyond 10:1, which 2026.11.0 refuses.
+    state = moveDivider(state, '', 0.6);
+    expect(releaseAccepts(state.plan)).toBe(false);
+    expect(buildProject(state, sources).version).toBe(2);
+  });
 
   it('writes version 1 unless a tile is beyond the planner limit', () => {
     const plain = base();
