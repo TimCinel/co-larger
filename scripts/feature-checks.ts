@@ -27,7 +27,12 @@ const RENDER_MODULE = '/src/editor/render.ts';
 const sha = (bytes: Buffer): string =>
   createHash('sha256').update(bytes).digest('hex');
 
-async function newPage(browser: Browser, origin: string, w = 1440, h = 900) {
+export async function newPage(
+  browser: Browser,
+  origin: string,
+  w = 1440,
+  h = 900,
+) {
   const ctx = await browser.newContext({
     viewport: { width: w, height: h },
     acceptDownloads: true,
@@ -47,7 +52,7 @@ async function newPage(browser: Browser, origin: string, w = 1440, h = 900) {
 }
 
 /** Adds one generated photo per `[width, height]`, named `f<i>-<w>x<h>.jpg`. */
-async function addSized(
+export async function addSized(
   p: Page,
   sizes: readonly (readonly [number, number])[],
 ): Promise<void> {
@@ -102,7 +107,7 @@ async function addSized(
 }
 
 /** The latest state is drawn, and the overlays have been updated for it. */
-async function drawn(p: Page): Promise<void> {
+export async function drawn(p: Page): Promise<void> {
   await p.waitForFunction(
     () => {
       const app = (window as any).__app;
@@ -129,7 +134,11 @@ async function drawn(p: Page): Promise<void> {
   );
 }
 
-async function act(p: Page, name: string, ...args: unknown[]): Promise<void> {
+export async function act(
+  p: Page,
+  name: string,
+  ...args: unknown[]
+): Promise<void> {
   await p.evaluate(
     async ({ name, args, module }) => {
       const actions = await import(/* @vite-ignore */ module);
@@ -176,7 +185,10 @@ function featuredRanks(
 }
 
 /** The centre of a slot's tile, in page CSS px. */
-function centre(p: Page, slot: number): Promise<{ x: number; y: number }> {
+export function centre(
+  p: Page,
+  slot: number,
+): Promise<{ x: number; y: number }> {
   return p.evaluate((slot) => {
     const app = (window as any).__app;
     const canvas =
@@ -252,7 +264,7 @@ function stars(p: Page): Promise<Star[]> {
 }
 
 /** Waits until the canvas's box has stopped moving (after a resize). */
-async function settled(p: Page): Promise<void> {
+export async function settled(p: Page): Promise<void> {
   await p.waitForFunction(
     () => {
       const w = window as any;
@@ -296,7 +308,7 @@ const nameOf = (p: Page, id: string): Promise<string> =>
     id,
   );
 
-async function exportPng(p: Page): Promise<string> {
+export async function exportPng(p: Page): Promise<string> {
   const [download] = await Promise.all([
     p.waitForEvent('download', { timeout: 120_000 }),
     p.locator('.export-download').click(),
@@ -311,7 +323,7 @@ async function exportPng(p: Page): Promise<string> {
   return hash;
 }
 
-async function saveProject(p: Page, tag: string): Promise<string> {
+export async function saveProject(p: Page, tag: string): Promise<string> {
   const path = join(tmpdir(), `feature-${tag}-${String(Date.now())}.zip`);
   const [download] = await Promise.all([
     p.waitForEvent('download', { timeout: 120_000 }),
@@ -326,7 +338,7 @@ async function saveProject(p: Page, tag: string): Promise<string> {
   return path;
 }
 
-async function openProject(p: Page, path: string): Promise<string> {
+export async function openProject(p: Page, path: string): Promise<string> {
   await p.evaluate(() => {
     const w = window as any;
     w.__beforeOpen = w.__app.editor.getState();

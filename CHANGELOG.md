@@ -24,6 +24,14 @@ that starts at 0 each month. Tags have no `v` prefix. See
   their tray thumbnails; it is not exported. "Unfeature" clears the mark
   without moving anything. Featuring is one undo step, and the marks are saved
   in the project. With nothing featured, arrangements are unchanged.
+- Drag the dividers between tiles to resize them. Hovering a divider shows a
+  resize cursor and highlights the whole line; the collage redraws as you
+  drag, Escape cancels, and each drag is one undo step. No tile gets smaller
+  than 4% of the canvas's shorter side. Dividers can also be focused with Tab
+  and moved with the arrow keys (Shift for bigger steps). Crops keep their
+  focal point and no photo moves. Shuffle, the dial, the canvas ratio and
+  including or excluding photos lay the tiles out afresh, discarding hand
+  resizing; border, background and same-ratio size changes keep it.
 
 ### Project files
 
@@ -31,6 +39,12 @@ that starts at 0 each month. Tags have no `v` prefix. See
   The format version stays 1: projects saved by 2026.11.0 open with nothing
   featured, and 2026.11.0 opens newer projects, ignoring the marks (saving
   there drops them).
+- Hand-resized layouts are saved exactly. A project is still written as
+  version 1 (which 2026.11.0 opens with the same collage) unless a tile has
+  been stretched beyond the planner's shape limit (2.5:1 on most canvases),
+  which 2026.11.0 would refuse; then it is written as version 2, which
+  2026.11.0 refuses with its "saved by a newer version" message, leaving its
+  open project unchanged. This build reads both.
 
 ## 2026.11.0 - 2026-11-12
 

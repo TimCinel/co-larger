@@ -7,15 +7,32 @@
  * and returns freshly built values, never the parsed objects themselves.
  */
 import { validateEditorState, type EditorState } from '../editor/state';
+import { withinPlannerShape } from '../layout';
 
 /** Marks a project.json as ours. */
 export const FORMAT_ID = 'co-larger-project';
 
 /**
- * The format version this build writes and reads. Bump it for a change an
+ * The highest format version this build reads. Bump it for a change an
  * older build could not read; a build refuses any higher version.
+ *
+ * - 1: since the first release (2026.11.0).
+ * - 2 (#16): a plan resized by hand with a tile beyond the planner's aspect
+ *   limit (planAspectLimit: max(2.5, canvas aspect / tile count)), which
+ *   2026.11.0 would refuse as "squashed". Written exactly when 2026.11.0
+ *   would refuse the plan (see versionFor); everything else is still written
+ *   as version 1, so that 2026.11.0 opens it.
  */
-export const FORMAT_VERSION = 1;
+export const FORMAT_VERSION = 2;
+
+/**
+ * The version written for `state`: 1 when release 2026.11.0 would accept
+ * its plan (withinPlannerShape is its exact tile check), else 2. Only hand
+ * resizing (#16) makes a plan it would refuse.
+ */
+export function versionFor(state: EditorState): number {
+  return withinPlannerShape(state.plan) ? 1 : 2;
+}
 
 /** The manifest's path inside the zip. */
 export const PROJECT_FILE = 'project.json';
@@ -172,7 +189,7 @@ export function buildProject(
   const paths = photoPaths(photos);
   return {
     format: FORMAT_ID,
-    version: FORMAT_VERSION,
+    version: versionFor(state),
     state,
     photos: photos.map((photo, index) => ({
       id: photo.id,

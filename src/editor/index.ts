@@ -109,6 +109,10 @@ export {
   clearArrangementCache,
   createEditorState,
   cropOf,
+  dividersFor,
+  moveDivider,
+  onlyResized,
+  sameButPlan,
   DEFAULT_CANVAS,
   featuredOf,
   DEFAULT_VARIATION,
@@ -167,6 +171,14 @@ export {
   type TileSelection,
   type TileSelectionOptions,
 } from './tile-selection';
+export {
+  createTileDividers,
+  HIT_TOLERANCE,
+  KEY_STEP,
+  KEY_STEP_BIG,
+  type TileDividers,
+  type TileDividersOptions,
+} from './tile-dividers';
 export {
   initialSelection,
   moveFocus,

@@ -28,10 +28,17 @@ import {
   type SelectionEvent,
   type SelectionState,
 } from './selection';
-import { isFeatured, setFeatured, swapTiles, type EditorState } from './state';
+import {
+  isFeatured,
+  onlyResized,
+  setFeatured,
+  swapTiles,
+  type EditorState,
+} from './state';
 import type { EditorStore, ImportActivity } from './store';
 import type { FrameScheduler } from './frames';
 import { createTileCrop } from './tile-crop';
+import { HIT_TOLERANCE } from './tile-dividers';
 import type { CollageView } from './view';
 
 /** Said (toast and screen reader) when an include change waits for an import. */
@@ -213,9 +220,18 @@ export function createTileSelection(
     const viewportW = win.innerWidth;
     const viewportH = win.innerHeight;
     const gap = 6;
+    // Below (or above) the tile, clear of the grab band of the divider along
+    // that edge (#16): the gap between tiles, at least HIT_TOLERANCE either
+    // side of its centre line. The border is the margin round the tiles.
+    let border = Infinity;
+    for (const t of view.lastRender()?.tiles ?? []) {
+      border = Math.min(border, t.x, t.y);
+    }
+    border = Number.isFinite(border) ? border * sy : 0;
+    const off = Math.max(gap, Math.max(border, border / 2 + HIT_TOLERANCE) + 2);
     const m = menu.getBoundingClientRect();
-    let y = top + height + gap;
-    if (y + m.height > viewportH - gap) y = top - m.height - gap;
+    let y = top + height + off;
+    if (y + m.height > viewportH - gap) y = top - m.height - off;
     if (y < gap) {
       // No room above or below: overlap the tile, as low as fits.
       y = Math.min(top + height - m.height - gap, viewportH - m.height - gap);
@@ -387,13 +403,32 @@ export function createTileSelection(
     keyboardMode = false;
   });
   // A click anywhere else (not the canvas, not the menu) is a click away.
+  // A press that started on the canvas or the menu and was released
+  // elsewhere is not: the browser sends its click to an element containing
+  // both, which would otherwise read as a click away (#16 review).
+  let pressedInside = false;
+  const inside = (target: EventTarget | null): boolean =>
+    target instanceof Node &&
+    (canvas.contains(target) || menu.contains(target));
+  doc.addEventListener(
+    'pointerdown',
+    (event) => {
+      pressedInside = inside(event.target);
+    },
+    true,
+  );
+  // A click from the keyboard has no press of its own.
+  doc.addEventListener(
+    'keydown',
+    () => {
+      pressedInside = false;
+    },
+    true,
+  );
   doc.addEventListener('click', (event) => {
-    const target = event.target;
-    if (
-      selection.kind === 'idle' ||
-      (target instanceof Node &&
-        (canvas.contains(target) || menu.contains(target)))
-    ) {
+    const fromInside = pressedInside;
+    pressedInside = false;
+    if (selection.kind === 'idle' || inside(event.target) || fromInside) {
       return;
     }
     send({ type: 'dismiss' });
@@ -530,7 +565,13 @@ export function createTileSelection(
       state.plan !== arrangement.plan ||
       state.assignment !== arrangement.assignment
     ) {
+      // A divider move (#16) only resizes tiles: every photo keeps its
+      // tile, so the selection stays (and follows the tile).
+      const resized =
+        state.assignment === arrangement.assignment &&
+        onlyResized(state.plan, arrangement.plan);
       arrangement = state;
+      if (resized) return;
       // Featuring moves the photo it acts on, which stays selected.
       if (selection.kind !== 'idle' && !keepSelection)
         send({ type: 'dismiss' });

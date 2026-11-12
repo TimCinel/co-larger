@@ -365,6 +365,19 @@ export class EditorStore {
     this.set(this.state, false);
   }
 
+  /**
+   * Abandons whatever is mid-gesture (Escape during a divider drag, #16):
+   * puts back the last committed state, notified as transient, so nothing
+   * is recorded and the next commit compares with what was there before.
+   * Does nothing if the store is not mid-gesture.
+   */
+  cancelDrag(): void {
+    this.cancelSettle?.();
+    this.cancelSettle = null;
+    this.provisional = false;
+    this.set(this.committed, true);
+  }
+
   /** True while a dial drag has not been committed. */
   isDragging(): boolean {
     return this.state !== this.committed;

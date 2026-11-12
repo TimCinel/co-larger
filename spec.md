@@ -71,6 +71,29 @@ major difference: tile sizes are configurable, from uniform to a few very large
   slot of a different shape, the crop is re-fitted around the same focal point.
 - Swaps do not survive a re-roll. The intended workflow is: set the dial,
   shuffle until the shape is right, then swap and crop.
+- Resize: drag the divider between tiles to move it. The pointer shows a
+  resize cursor over a divider and the whole divider line (every tile it
+  borders) is highlighted; the collage redraws live while dragging and
+  commits on release, and Escape cancels the drag. No tile gets smaller than
+  4% of the canvas's shorter side in either direction; a tile already
+  smaller than that (from the planner, with many photos) can grow but not
+  shrink, and while it is thinner than 4% one way it cannot be stretched the
+  other way beyond the planner's own shape limit (2.5:1, more on a very long
+  canvas): otherwise a drag could pull a hairline sliver out of it, which a
+  saved project could not tell apart from a damaged one. Tiles of at least
+  4% both ways have no shape limit. Where the selected tile's menu is drawn
+  over a divider, the menu gets the press there and the divider shows no
+  highlight; the rest of the line can be dragged, Escape removes the menu,
+  and the keyboard reaches every divider. Crops are re-fitted around the
+  same focal point as tiles change shape, and no photo moves, featured or
+  not. A drag that the system cancels (lost pointer capture, a cancelled
+  pointer, the window losing focus) puts the layout back. Each divider can also be
+  focused with Tab and moved with the arrow keys (Shift for bigger steps);
+  one key sequence or one drag is one undo step.
+- Hand resizing does not survive a re-roll: Shuffle, the dial, the canvas
+  ratio and including or excluding photos all lay the tiles out afresh. A
+  border, background or same-ratio size change, a swap, a crop or a feature
+  keeps it. Saving and opening restore it exactly.
 - Feature: mark a photo from its tile's menu ("Feature", or F on the selected
   tile; "Unfeature" to clear it) so re-rolls keep it in a large slot. Any
   number of photos can be featured, with no ranking among them. Featuring
@@ -88,8 +111,8 @@ major difference: tile sizes are configurable, from uniform to a few very large
   mark belongs to the photo: it survives exclusion and is saved in the
   project. A star marks featured tiles and their tray thumbnails (editor
   chrome only, never exported). Featuring or unfeaturing is one undo step.
-- Undo and redo, covering at least re-rolls, swaps, crops and removals, so an
-  accidental Shuffle is recoverable.
+- Undo and redo, covering at least re-rolls, swaps, crops, removals and
+  divider moves, so an accidental Shuffle is recoverable.
 
 ### Export
 
@@ -122,7 +145,6 @@ major difference: tile sizes are configurable, from uniform to a few very large
 
 ## v2 (not in v1)
 
-- Drag the dividers between tiles to resize them.
 - Touch and mobile support.
 - Text overlay.
 - PDF export.

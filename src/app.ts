@@ -14,12 +14,14 @@ import {
   createTileSelection,
   createResolutionWarnings,
   createFeatureMarkers,
+  createTileDividers,
   isFeatured,
   SELECTION_DEFERRED,
   EditorStore,
   FrameScheduler,
   type CollageView,
   type ResolutionWarnings,
+  type TileDividers,
   type TileSelection,
   type UndoControls,
 } from './editor';
@@ -53,6 +55,8 @@ export interface App {
   readonly selection: TileSelection;
   /** Low-resolution warnings: badges, summary and the session toggle. */
   readonly resolution: ResolutionWarnings;
+  /** Dragging the dividers between tiles (#16). */
+  readonly dividers: TileDividers;
   /** Undo and redo: the history of committed changes. */
   readonly undo: UndoControls;
   /** Save and open project (#12). */
@@ -185,6 +189,10 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   // After the selection's menu in the DOM: Tab from the canvas reaches the
   // menu first, then the badges.
   view.element.append(...resolution.overlay);
+  // Dividers (#16): after the badges, so the Tab order is canvas, tile menu,
+  // badges, then the dividers (one tab stop).
+  const dividers = createTileDividers({ doc, view, editor, frames });
+  view.element.append(...dividers.overlay);
   // Opening a project resets the undo history on purpose: no toast for it.
   let installing = false;
   const undo = createUndoControls({
@@ -350,5 +358,14 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   importer.subscribe(showProgress);
 
   // The drop overlay is shown through the `dragging` class on the shell.
-  return { store, editor, view, selection, resolution, undo, project };
+  return {
+    store,
+    editor,
+    view,
+    selection,
+    resolution,
+    dividers,
+    undo,
+    project,
+  };
 }

@@ -30,6 +30,8 @@ export interface GestureTarget<T> {
   commit(value: T): void;
   /** True while a drag has not been committed. */
   isDragging(): boolean;
+  /** Puts back the committed state, for `GestureInput.cancel`. Optional. */
+  cancel?(): void;
 }
 
 export class GestureInput<T> {
@@ -62,6 +64,17 @@ export class GestureInput<T> {
     this.pending = null;
     if (!hadPending && !this.target.isDragging()) return;
     this.target.commit(value);
+  }
+
+  /**
+   * Abandons the gesture (Escape during a divider drag, #16): drops a step
+   * still waiting for its frame and lets the target put back what was
+   * committed. Nothing is committed.
+   */
+  cancel(): void {
+    this.frames.cancel(this.kind);
+    this.pending = null;
+    this.target.cancel?.();
   }
 
   /** True while a move is waiting for its frame or a drag is uncommitted. */

@@ -18,7 +18,7 @@ const STATE_MODULE = '/src/editor/state.ts';
 const RENDER_MODULE = '/src/editor/render.ts';
 
 /** Recorded in every page: exported blobs, bitmap use and revoked URLs. */
-const INIT_SCRIPT = `(() => {
+export const INIT_SCRIPT = `(() => {
   const w = window;
   w.__exports = [];
   w.__revoked = [];
@@ -270,7 +270,7 @@ async function idle(p: Page, timeout = 120_000): Promise<void> {
 }
 
 /** The last exported blob, decoded and drawn on an offscreen canvas. */
-const LOAD_EXPORT = `async () => {
+export const LOAD_EXPORT = `async () => {
   const blob = window.__exports.at(-1);
   const bitmap = await createImageBitmap(blob);
   const c = new OffscreenCanvas(bitmap.width, bitmap.height);
