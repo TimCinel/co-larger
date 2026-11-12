@@ -732,7 +732,8 @@ async function checkSmall(
     ],
     [
       'a newer version',
-      withProject((j) => (j.version = 2)),
+      // One past the newest version this build reads (2 since #16).
+      withProject((j) => (j.version = 3)),
       /saved by a newer version/,
     ],
     [
