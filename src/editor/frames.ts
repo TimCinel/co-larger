@@ -10,7 +10,14 @@
  * other's queued step.
  */
 export type FrameTask =
-  'photos' | 'dial' | 'border' | 'background' | 'crop' | 'zoom' | 'render';
+  | 'photos'
+  | 'dial'
+  | 'border'
+  | 'background'
+  | 'crop'
+  | 'zoom'
+  | 'divider'
+  | 'render';
 const ORDER: readonly FrameTask[] = [
   'photos',
   'dial',
@@ -18,6 +25,7 @@ const ORDER: readonly FrameTask[] = [
   'background',
   'crop',
   'zoom',
+  'divider',
   'render',
 ];
 

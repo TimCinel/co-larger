@@ -33,6 +33,13 @@
  * - Manual swaps (#8: `swapSlots` on `assignment`) do not survive a re-roll,
  *   but survive every action that does not re-roll, including setting the
  *   dial to the value it already has.
+ * - Hand resizing (#16: moveDivider, which changes one split's fraction in
+ *   `plan`) is like a manual swap: every re-roll replaces the plan with a
+ *   fresh one and discards it (the dial too: setVariation plans from the
+ *   seed and never reads the current plan, so no hand-set fraction is
+ *   carried into or interpolated by a dial move), and every action that
+ *   does not re-roll keeps it, including setting the dial to the value it
+ *   already has. moveDivider moves no photo, featured or not.
  * - Featured photos (#14, `featured`): every re-roll puts the k featured
  *   photos in the collage in the k largest tiles as drawn (see arrange). The
  *   mark belongs to the photo, like a crop: it survives re-rolls and
@@ -52,15 +59,20 @@
 import {
   arrangementStep,
   assignPhotos,
+  checkTileSizes,
+  listDividers,
   maxBorder,
   maxBorderForAspect,
+  MAX_PLAN_ASPECT,
   placeLayout,
   planAspectLimit,
   planLayout,
+  setDividerFraction,
   slotsBySize,
   swapSlots,
   validateAssignment,
   validatePlan,
+  type Divider,
   type LayoutNode,
   type LayoutPlan,
   type PhotoShape,
@@ -401,7 +413,11 @@ export interface BorderAt {
    * The largest border the current arrangement allows (whole pixels):
    * every tile keeps at least one pixel (`maxBorder`) and none is more
    * stretched than MAX_TILE_ASPECT (`maxBorderForAspect`), both with
-   * snapping. Infinity when empty. The border control's range ends here, so
+   * snapping. A tile stretched by hand (#16) beyond the planner's aspect
+   * limit may instead be stretched by the border to 1.2 times its own
+   * aspect (MAX_TILE_ASPECT / MAX_PLAN_ASPECT, the same headroom planned
+   * tiles get), so a hand-resized layout keeps its border; planned tiles
+   * are clamped exactly as before. Infinity when empty. The border control's range ends here, so
    * what it offers is what is drawn.
    */
   readonly max: number;
@@ -433,6 +449,12 @@ export function borderAt(
           maxBorder(state.plan, width, height, { snap: true }),
           maxBorderForAspect(state.plan, width, height, MAX_TILE_ASPECT, {
             snap: true,
+            stretched: {
+              above:
+                planAspectLimit(state.plan.aspect, 1, state.plan.count) *
+                (1 + PLAN_ASPECT_SLACK),
+              factor: MAX_TILE_ASPECT / MAX_PLAN_ASPECT,
+            },
           }),
         );
   return { requested, effective: Math.min(Math.round(requested), max), max };
@@ -470,6 +492,30 @@ export function tilesFor(
   return placeLayout(state.plan, { width, height, border, snap: true });
 }
 
+/**
+ * The dividers (#16) of `state` drawn at `size`: exactly where tilesFor puts
+ * the gaps (same border, same snapping), so hit-testing and highlights match
+ * the drawn tiles. Empty whenever tilesFor draws nothing.
+ */
+export function dividersFor(
+  state: Pick<EditorState, 'plan' | 'canvas'>,
+  size: { readonly width: number; readonly height: number },
+): Divider[] {
+  const width = Math.round(size.width);
+  const height = Math.round(size.height);
+  if (state.plan.root === null || width < 1 || height < 1) return [];
+  if (
+    Math.abs(Math.log(width / height / state.plan.aspect)) > MAX_RATIO_ERROR
+  ) {
+    return [];
+  }
+  const border =
+    state.canvas.borderFraction > 0
+      ? borderAt(state, { width, height }).effective
+      : 0;
+  return listDividers(state.plan, { width, height, border, snap: true });
+}
+
 /** Sets the background colour (`#rrggbb`, any case). Never re-rolls. */
 export function setBackground(
   state: EditorState,
@@ -494,6 +540,80 @@ export function swapTiles(
 ): EditorState {
   const assignment = swapSlots(state.assignment, slotA, slotB);
   return slotA === slotB ? state : { ...state, assignment };
+}
+
+/**
+ * Moves the divider at `path` (#16; see listDividers in the layout library)
+ * to `fraction` of its region, clamped so that no tile on either side, at
+ * any depth, becomes smaller than the minimum (see dividerRange). Only the
+ * plan changes, and only that one node's fraction, so the tiles on each side
+ * keep their proportions and every photo keeps its slot; crops are re-fitted
+ * around their focal points when drawn, as for any change of tile shape.
+ * Never re-rolls, and nothing moves for featured photos. Returns `state`
+ * itself if the clamped fraction is the current one. Throws a RangeError for
+ * a path with no divider or a fraction that is not finite.
+ *
+ * The range depends on the tile sizes in `state` (a tile already below the
+ * minimum may not shrink further, but may grow back to where it was), so a
+ * gesture applies every step to the state it started from (see
+ * sameButPlan): then the commit is one call at the final value, and a drag
+ * can always return to where it began.
+ */
+export function moveDivider(
+  state: EditorState,
+  path: string,
+  fraction: number,
+): EditorState {
+  const plan = setDividerFraction(state.plan, path, fraction);
+  return plan === state.plan ? state : { ...state, plan };
+}
+
+/**
+ * True when `a` and `b` differ at most in their plan's fractions: the same
+ * objects for everything else (as moveDivider leaves them) and the same tree.
+ * A divider gesture uses it to tell its own steps from a change made
+ * elsewhere meanwhile.
+ */
+export function sameButPlan(a: EditorState, b: EditorState): boolean {
+  if (a === b) return true;
+  return (
+    a.canvas === b.canvas &&
+    a.variation === b.variation &&
+    a.seed === b.seed &&
+    a.photos === b.photos &&
+    a.assignment === b.assignment &&
+    a.crops === b.crops &&
+    a.featured === b.featured &&
+    onlyResized(a.plan, b.plan)
+  );
+}
+
+/**
+ * True when two plans are the same arrangement apart from hand resizing:
+ * the same inputs and the same tree, with any fractions. Tile selection
+ * uses it to keep the selection across a divider move (#16).
+ */
+export function onlyResized(a: LayoutPlan, b: LayoutPlan): boolean {
+  return (
+    a === b ||
+    (a.aspect === b.aspect &&
+      a.count === b.count &&
+      a.variation === b.variation &&
+      a.seed === b.seed &&
+      sameTree(a.root, b.root))
+  );
+}
+
+function sameTree(a: LayoutNode | null, b: LayoutNode | null): boolean {
+  if (a === b) return true;
+  if (a?.kind !== b?.kind || a === null || b === null) return false;
+  if (a.kind === 'leaf') return a.slot === (b as typeof a).slot;
+  const s = b as typeof a;
+  return (
+    a.axis === s.axis &&
+    sameTree(a.first, s.first) &&
+    sameTree(a.second, s.second)
+  );
 }
 
 /** The featured photo ids (#14), sorted; empty when none. */
@@ -693,9 +813,11 @@ export interface ValidateOptions {
  * - the plan is well-formed, matches the photo count, variation and seed and
  *   (within RATIO_TOLERANCE) the canvas ratio, and keeps every tile within
  *   the planner's own aspect limit (planAspectLimit), which every plan
- *   planLayout makes satisfies, so a tampered plan cannot hide tiles by
- *   squashing them to nothing. The rule depends only on the plan, so any
- *   state the actions produce validates, however small the canvas;
+ *   planLayout makes satisfies, or, for a tile resized by hand (#16), at
+ *   least MIN_TILE_FRACTION of the shorter side both ways (checkTileSizes),
+ *   so a tampered plan cannot hide tiles by squashing them to nothing. The
+ *   rule depends only on the plan, so any state the actions produce
+ *   validates, however small the canvas;
  * - the assignment places every photo exactly once;
  * - every crop is in range and names a known photo (see ValidateOptions).
  */
@@ -752,23 +874,12 @@ export function validateEditorState(
   if (checkedPlan.variation !== variation || checkedPlan.seed !== seed) {
     throw new RangeError('plan does not match the variation and seed');
   }
-  if (checkedPlan.root !== null) {
-    // Placed in its own ratio with no border, every tile of a plan from
-    // planLayout is within planAspectLimit (measured to float precision).
-    const limit =
-      planAspectLimit(checkedPlan.aspect, 1, checkedPlan.count) *
-      (1 + PLAN_ASPECT_SLACK);
-    const tiles = placeLayout(checkedPlan, {
-      width: checkedPlan.aspect,
-      height: 1,
-    });
-    for (const tile of tiles) {
-      const long = Math.max(tile.width, tile.height);
-      const short = Math.min(tile.width, tile.height);
-      if (!(short > 0) || long / short > limit) {
-        throw new RangeError('plan has tiles squashed beyond the aspect limit');
-      }
-    }
+  // Placed in its own ratio with no border, every tile of a plan from
+  // planLayout is within planAspectLimit (measured to float precision), and
+  // every tile resized by hand (#16) that is beyond it is at least
+  // MIN_TILE_FRACTION both ways (see checkTileSizes).
+  if (checkTileSizes(checkedPlan) === 'invalid') {
+    throw new RangeError('plan has tiles squashed beyond the aspect limit');
   }
 
   if (!Array.isArray(assignment)) {

@@ -39,7 +39,9 @@ export {
   maxBorder,
   maxBorderForAspect,
   placeLayout,
+  walkPlaced,
   type BorderLimitOptions,
+  type PlacedSplit,
 } from './place';
 export {
   assignPhotos,
@@ -57,6 +59,20 @@ export {
   type SlotShape,
 } from './assign';
 export { validatePlan } from './validate';
+export {
+  checkTileSizes,
+  dividerAt,
+  dividerRange,
+  fractionAt,
+  listDividers,
+  MIN_TILE_FRACTION,
+  minTileSide,
+  setDividerFraction,
+  tilesBeside,
+  type Divider,
+  type DividerRange,
+  type TileSizes,
+} from './dividers';
 export type {
   Axis,
   LayoutNode,

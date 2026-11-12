@@ -28,7 +28,13 @@ import {
   type SelectionEvent,
   type SelectionState,
 } from './selection';
-import { isFeatured, setFeatured, swapTiles, type EditorState } from './state';
+import {
+  isFeatured,
+  onlyResized,
+  setFeatured,
+  swapTiles,
+  type EditorState,
+} from './state';
 import type { EditorStore, ImportActivity } from './store';
 import type { FrameScheduler } from './frames';
 import { createTileCrop } from './tile-crop';
@@ -530,7 +536,13 @@ export function createTileSelection(
       state.plan !== arrangement.plan ||
       state.assignment !== arrangement.assignment
     ) {
+      // A divider move (#16) only resizes tiles: every photo keeps its
+      // tile, so the selection stays (and follows the tile).
+      const resized =
+        state.assignment === arrangement.assignment &&
+        onlyResized(state.plan, arrangement.plan);
       arrangement = state;
+      if (resized) return;
       // Featuring moves the photo it acts on, which stays selected.
       if (selection.kind !== 'idle' && !keepSelection)
         send({ type: 'dismiss' });

@@ -915,6 +915,63 @@ button.primary:hover:not(:disabled) {
   cursor: grabbing;
 }
 
+/* Dividers (#16): over a divider's band the resize cursor wins over the
+   pan cursor of a selected tile. Editor chrome only. */
+.collage-canvas.divider-x,
+.collage-canvas.divider-x.pannable {
+  cursor: col-resize;
+}
+
+.collage-canvas.divider-y,
+.collage-canvas.divider-y.pannable {
+  cursor: row-resize;
+}
+
+.divider-highlight {
+  position: absolute;
+  z-index: 4;
+  box-sizing: border-box;
+  pointer-events: none;
+  background: rgb(79 140 255 / 55%);
+  box-shadow:
+    0 0 0 1px #fff,
+    0 0 0 2px rgb(0 0 0 / 60%);
+}
+
+.divider-highlight.dragging {
+  background: rgb(79 140 255 / 85%);
+}
+
+/* The drag has reached the smallest a tile may be. */
+.divider-highlight.at-limit {
+  background: rgb(255 96 64 / 90%);
+}
+
+.divider-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.divider-sep {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: none;
+}
+
+.divider-sep:focus {
+  outline: none;
+}
+
+.divider-layer[hidden],
+.divider-sep[hidden],
+.divider-highlight[hidden] {
+  display: none;
+}
+
 .undo-controls {
   display: flex;
   gap: 0.4rem;

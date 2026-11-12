@@ -7,15 +7,30 @@
  * and returns freshly built values, never the parsed objects themselves.
  */
 import { validateEditorState, type EditorState } from '../editor/state';
+import { checkTileSizes } from '../layout';
 
 /** Marks a project.json as ours. */
 export const FORMAT_ID = 'co-larger-project';
 
 /**
- * The format version this build writes and reads. Bump it for a change an
+ * The highest format version this build reads. Bump it for a change an
  * older build could not read; a build refuses any higher version.
+ *
+ * - 1: since the first release (2026.11.0).
+ * - 2 (#16): a plan resized by hand with a tile beyond the planner's aspect
+ *   limit, which 2026.11.0 would refuse as "squashed". Written only for such
+ *   a plan (see versionFor); everything else is still written as version 1,
+ *   so that 2026.11.0 opens it.
  */
-export const FORMAT_VERSION = 1;
+export const FORMAT_VERSION = 2;
+
+/**
+ * The version written for `state`: 2 only when its plan has a tile that
+ * only hand resizing makes (checkTileSizes is 'resized'), else 1.
+ */
+export function versionFor(state: EditorState): number {
+  return checkTileSizes(state.plan) === 'resized' ? 2 : 1;
+}
 
 /** The manifest's path inside the zip. */
 export const PROJECT_FILE = 'project.json';
@@ -172,7 +187,7 @@ export function buildProject(
   const paths = photoPaths(photos);
   return {
     format: FORMAT_ID,
-    version: FORMAT_VERSION,
+    version: versionFor(state),
     state,
     photos: photos.map((photo, index) => ({
       id: photo.id,

@@ -1,4 +1,10 @@
-import type { LayoutNode, LayoutPlan, PlaceOptions, Tile } from './types';
+import type {
+  LayoutNode,
+  LayoutPlan,
+  PlaceOptions,
+  SplitNode,
+  Tile,
+} from './types';
 import { validatePlan } from './validate';
 
 /**
@@ -37,6 +43,52 @@ const ASPECT_TOLERANCE = Math.log(1.02);
  * (count 0) gives an empty array.
  */
 export function placeLayout(plan: LayoutPlan, options: PlaceOptions): Tile[] {
+  const tiles = new Array<Tile>(plan.count);
+  walkPlaced(plan, options, (tile) => {
+    tiles[tile.slot] = tile;
+  });
+  return tiles;
+}
+
+/** A split node as placed: see walkPlaced. */
+export interface PlacedSplit {
+  readonly node: SplitNode;
+  /**
+   * The node's path from the root: one character per level, '0' for
+   * `first` and '1' for `second` ('' is the root).
+   */
+  readonly path: string;
+  /** Nesting depth: 0 for the root. */
+  readonly depth: number;
+  /** The node's region as drawn (snapped when placing with `snap`). */
+  readonly x0: number;
+  readonly y0: number;
+  readonly x1: number;
+  readonly y1: number;
+  /**
+   * The node's region along its axis before snapping: the cut's unsnapped
+   * position is `start + (end - start - border) * fraction`.
+   */
+  readonly start: number;
+  readonly end: number;
+  /** The drawn cut: the gap runs from `cut` to `cut + border` along the axis. */
+  readonly cut: number;
+  /** The gap width as placed (rounded when placing with `snap`). */
+  readonly border: number;
+}
+
+/**
+ * The traversal behind placeLayout, with exactly its checks and geometry:
+ * calls `leaf` with every tile and `split` (if given) with every split node,
+ * parents before children and `first` before `second`. For code that needs
+ * the cuts as drawn (the dividers of #16).
+ */
+export function walkPlaced(
+  plan: LayoutPlan,
+  options: PlaceOptions,
+  leaf: (tile: Tile) => void,
+  split?: (placed: PlacedSplit) => void,
+): void {
   validatePlan(plan);
   const snap = options.snap ?? false;
   checkCanvas(options.width, options.height);
@@ -49,7 +101,7 @@ export function placeLayout(plan: LayoutPlan, options: PlaceOptions): Tile[] {
   }
   const border = snap ? Math.round(rawBorder) : rawBorder;
 
-  if (plan.root === null) return [];
+  if (plan.root === null) return;
   if (Math.abs(Math.log(width / height / plan.aspect)) > ASPECT_TOLERANCE) {
     throw new RangeError(
       `the plan was made for a width/height ratio of ${plan.aspect.toFixed(4)}, ` +
@@ -68,7 +120,6 @@ export function placeLayout(plan: LayoutPlan, options: PlaceOptions): Tile[] {
     }
   }
 
-  const tiles = new Array<Tile>(plan.count);
   const round = snap ? Math.round : (v: number) => v;
   // Each rectangle is carried as its unsnapped edges plus its actual (possibly
   // snapped) edges. Cuts are rounded from the unsnapped position, so rounding
@@ -76,6 +127,7 @@ export function placeLayout(plan: LayoutPlan, options: PlaceOptions): Tile[] {
   // actual outer edges, so neighbours always share an edge exactly.
   const visit = (
     node: LayoutNode,
+    path: string,
     fx0: number,
     fy0: number,
     fx1: number,
@@ -86,32 +138,82 @@ export function placeLayout(plan: LayoutPlan, options: PlaceOptions): Tile[] {
     y1: number,
   ): void => {
     if (node.kind === 'leaf') {
-      tiles[node.slot] = {
+      leaf({
         slot: node.slot,
         x: x0,
         y: y0,
         width: x1 - x0,
         height: y1 - y0,
-      };
+      });
       return;
     }
     const f = node.fraction;
+    const depth = path.length;
     if (node.axis === 'x') {
       const cut = fx0 + (fx1 - fx0 - border) * f;
       const c = Math.min(x1 - border, Math.max(x0, round(cut)));
-      visit(node.first, fx0, fy0, cut, fy1, x0, y0, c, y1);
-      visit(node.second, cut + border, fy0, fx1, fy1, c + border, y0, x1, y1);
+      split?.({
+        node,
+        path,
+        depth,
+        x0,
+        y0,
+        x1,
+        y1,
+        start: fx0,
+        end: fx1,
+        cut: c,
+        border,
+      });
+      visit(node.first, `${path}0`, fx0, fy0, cut, fy1, x0, y0, c, y1);
+      visit(
+        node.second,
+        `${path}1`,
+        cut + border,
+        fy0,
+        fx1,
+        fy1,
+        c + border,
+        y0,
+        x1,
+        y1,
+      );
     } else {
       const cut = fy0 + (fy1 - fy0 - border) * f;
       const c = Math.min(y1 - border, Math.max(y0, round(cut)));
-      visit(node.first, fx0, fy0, fx1, cut, x0, y0, x1, c);
-      visit(node.second, fx0, cut + border, fx1, fy1, x0, c + border, x1, y1);
+      split?.({
+        node,
+        path,
+        depth,
+        x0,
+        y0,
+        x1,
+        y1,
+        start: fy0,
+        end: fy1,
+        cut: c,
+        border,
+      });
+      visit(node.first, `${path}0`, fx0, fy0, fx1, cut, x0, y0, x1, c);
+      visit(
+        node.second,
+        `${path}1`,
+        fx0,
+        cut + border,
+        fx1,
+        fy1,
+        x0,
+        c + border,
+        x1,
+        y1,
+      );
     }
   };
   const right = width - border;
   const bottom = height - border;
   visit(
     plan.root,
+    '',
     border,
     border,
     right,
@@ -121,7 +223,6 @@ export function placeLayout(plan: LayoutPlan, options: PlaceOptions): Tile[] {
     right,
     bottom,
   );
-  return tiles;
 }
 
 /** Options for the border limit functions. */
@@ -133,6 +234,16 @@ export interface BorderLimitOptions {
    * Defaults to 1 (one pixel when the canvas is in pixels).
    */
   readonly minTileSize?: number;
+  /**
+   * maxBorderForAspect only: tiles that are already more stretched than
+   * `above` with no border (measured in the plan's own geometry, as
+   * validateEditorState measures them) may be stretched by the border up to
+   * `factor` times their own aspect instead of `maxAspect`, when that is
+   * more. For tiles stretched by hand (dividers, #16), which no aspect limit
+   * applies to: without this, one such tile would forbid any border at all.
+   * Tiles at or below `above` keep `maxAspect` exactly.
+   */
+  readonly stretched?: { readonly above: number; readonly factor: number };
 }
 
 /**
@@ -201,9 +312,21 @@ export function maxBorderForAspect(
   const h = snap ? Math.round(height) : height;
   // Snapped sides may each be one unit off, so require (long + 1) <=
   // maxAspect * (short - 1): the unsnapped condition with this much slack.
-  const slack = snap ? maxAspect + 1 : 0;
+  const stretched = options.stretched;
   let limit = Infinity;
   forEachLeafLength(plan.root, w, h, (wa, wb, ha, hb) => {
+    // A tile stretched by hand beyond `stretched.above` (measured in the
+    // plan's own geometry, so the same at every size) has its own limit.
+    let tileMax = maxAspect;
+    if (stretched) {
+      const pw = (wa / w) * plan.aspect;
+      const ph = ha / h;
+      const own = Math.max(pw, ph) / Math.min(pw, ph);
+      if (own > stretched.above) {
+        tileMax = Math.max(maxAspect, own * stretched.factor);
+      }
+    }
+    const slack = snap ? tileMax + 1 : 0;
     // width(g) = wa - wb*g and height(g) = ha - hb*g. width <= maxAspect *
     // height becomes g * (maxAspect*hb - wb) <= maxAspect*ha - wa - slack,
     // and the same with width and height swapped.
@@ -211,8 +334,8 @@ export function maxBorderForAspect(
       [wa, wb, ha, hb],
       [ha, hb, wa, wb],
     ] as const) {
-      const c = maxAspect * sb - lb;
-      const d = maxAspect * sa - la - slack;
+      const c = tileMax * sb - lb;
+      const d = tileMax * sa - la - slack;
       if (d < 0) limit = -Infinity;
       else if (c > 0) limit = Math.min(limit, d / c);
     }

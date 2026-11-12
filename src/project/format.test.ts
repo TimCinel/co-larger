@@ -136,7 +136,9 @@ describe('buildProject', () => {
   it('lists every photo in order, marking the ones the collage uses', () => {
     const project = good();
     expect(project.format).toBe(FORMAT_ID);
-    expect(project.version).toBe(FORMAT_VERSION);
+    // A collage not resized by hand is written as version 1 (#16), so the
+    // first release (2026.11.0) still opens it.
+    expect(project.version).toBe(1);
     expect(project.photos.map((p) => [p.id, p.included])).toEqual([
       ['photo-1', true],
       ['photo-2', false],
@@ -369,9 +371,15 @@ describe('parseProject', () => {
   }
 
   it('says so clearly for a newer version', () => {
-    expect(() => parseProject(tampered((j) => (j.version = 2)))).toThrow(
-      'This project was saved by a newer version of co-larger',
-    );
+    expect(() =>
+      parseProject(tampered((j) => (j.version = FORMAT_VERSION + 1))),
+    ).toThrow('This project was saved by a newer version of co-larger');
+  });
+
+  it('reads version 2 (#16) as well as version 1', () => {
+    expect(FORMAT_VERSION).toBe(2);
+    expect(parseProject(tampered((j) => (j.version = 2))).version).toBe(2);
+    expect(parseProject(text()).version).toBe(1);
   });
 
   it('accepts an empty project', () => {
