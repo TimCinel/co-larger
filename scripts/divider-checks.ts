@@ -1565,6 +1565,9 @@ export async function checkDividers(
       Array.from({ length: 6 }, () => [1200, 800] as const),
     );
     await act(w.p, 'setCanvasSize', 4000, 2500);
+    // A fixed arrangement (#54): on some random ones the drag changes no
+    // warning level, which is not a failure of the live update.
+    await act(w.p, 'shuffle', Number(process.env.DIVIDER_SEED ?? 16016));
     const levels = (): Promise<string> =>
       w.p.evaluate(() => {
         const app = (window as any).__app;
