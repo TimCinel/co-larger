@@ -13,6 +13,8 @@ import {
   createUndoControls,
   createTileSelection,
   createResolutionWarnings,
+  createFeatureMarkers,
+  isFeatured,
   SELECTION_DEFERRED,
   EditorStore,
   FrameScheduler,
@@ -170,6 +172,16 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
     emptyFocus: () => addButton,
     warningFor: (id) => resolution.describe(id),
   });
+  // Stars on featured tiles (#14): not focusable, under the menu and badges.
+  const featureMarkers = createFeatureMarkers({
+    doc,
+    view,
+    hasBadge: (id) => resolution.warningFor(id) !== undefined,
+  });
+  resolution.onChange(() => {
+    featureMarkers.refresh();
+  });
+  view.element.querySelector('.tile-outline')?.before(featureMarkers.element);
   // After the selection's menu in the DOM: Tab from the canvas reaches the
   // menu first, then the badges.
   view.element.append(...resolution.overlay);
@@ -196,11 +208,26 @@ export function renderApp(root: HTMLElement, options: AppOptions = {}): App {
   dropOverlay.textContent = 'Drop photos to add them';
   main.append(view.element, dropOverlay);
 
-  const tray = createTray(doc, store, {
-    levelOf: (id) => resolution.warningFor(id)?.level,
-    describe: (id) => resolution.describe(id),
-    onChange: (listener) => resolution.onChange(listener),
-  });
+  const tray = createTray(
+    doc,
+    store,
+    {
+      levelOf: (id) => resolution.warningFor(id)?.level,
+      describe: (id) => resolution.describe(id),
+      onChange: (listener) => resolution.onChange(listener),
+    },
+    {
+      isFeatured: (id) => isFeatured(editor.getState(), id),
+      onChange: (listener) => {
+        let last = editor.getState().featured;
+        return editor.subscribe((state) => {
+          if (state.featured === last) return;
+          last = state.featured;
+          listener();
+        });
+      },
+    },
+  );
 
   // Notices sit in the tray, so they never cover the collage.
   tray.append(notices.element);

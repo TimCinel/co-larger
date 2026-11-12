@@ -5,6 +5,7 @@
  * path; on this branch it compares. It uses only actions that existed then.
  *
  *   RECORD_MASTER=$PWD/tests/fixtures/master-arrangements.json npx vitest run src/editor/featured.master.test.ts
+ *   npx prettier --write tests/fixtures/master-arrangements.json
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';

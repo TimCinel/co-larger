@@ -155,6 +155,13 @@ export {
 } from './store';
 export { createCollageView, type CollageView } from './view';
 export {
+  createFeatureMarkers,
+  MIN_STAR_TILE,
+  starCorner,
+  type FeatureMarkers,
+  type StarCorner,
+} from './feature-markers';
+export {
   createTileSelection,
   SELECTION_DEFERRED,
   type TileSelection,

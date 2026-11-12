@@ -67,7 +67,8 @@ collage-project.colarger.zip
     "photos": [],
     "plan": {},
     "assignment": [],
-    "crops": {}
+    "crops": {},
+    "featured": ["photo-1"]
   },
   "photos": [
     {
@@ -96,6 +97,32 @@ collage-project.colarger.zip
   is: nothing is laid out or assigned again, so the collage is identical, even
   in another browser or at another screen size. It is checked with
   `validateEditorState` before anything is used.
+- `state.featured` (optional, since #14) lists the ids of the featured photos:
+  photos that re-rolls keep in the largest tiles. It is written sorted (any order is read), has no
+  repeats, and every id must be a photo in `photos` (an excluded photo can be
+  featured; it takes no tile until included again). It is left out when no
+  photo is featured, so a project with nothing featured is written exactly as
+  before. A missing field or an empty list means nothing is featured; any
+  other value is refused.
+
+### Compatibility of `state.featured`
+
+The field was added without changing `version`, because readers ignore fields
+they do not know: `validateEditorState` reads the fields it knows and builds a
+fresh state from them, and `parseProject` does the same for the top level.
+That has been true since the first release (2026.11.0), so:
+
+- A project saved before #14 (no `featured`) opens with nothing featured and
+  exactly the saved collage: the stored plan and assignment are used as they
+  are.
+- A project with featured photos opens in 2026.11.0 with the same collage
+  (plan, assignment, crops), and the marks are ignored. Saving it again from
+  2026.11.0 drops them; nothing else is lost.
+
+Both directions are covered by `node scripts/browser-check.ts --feature-only
+--feature-compat <a 2026.11.0 checkout>`. Bump `version` instead if a later
+field must not be silently dropped by an older build.
+
 - `photos` lists every photo in tray order. `included` says whether the
   collage uses it, and must agree with `state.photos`. `width`, `height` and
   `aspect` are the size after EXIF orientation; opening decodes each photo

@@ -16,6 +16,20 @@ that starts at 0 each month. Tags have no `v` prefix. See
   Export counts the affected photos and highlights them. "Show resolution
   warnings" turns it off for the session. Export is never blocked and the
   warnings are not saved in the project.
+- Feature a photo so it stays large: "Feature" in a tile's menu (or F on the
+  selected tile) moves the photo into the largest tile, and from then on
+  Shuffle, the dial, the canvas ratio and including or excluding photos keep
+  every featured photo in the largest tiles. A star marks featured tiles and
+  their tray thumbnails; it is not exported. "Unfeature" clears the mark
+  without moving anything. Featuring is one undo step, and the marks are saved
+  in the project. With nothing featured, arrangements are unchanged.
+
+### Project files
+
+- Projects now record featured photos in an optional `state.featured` list.
+  The format version stays 1: projects saved by 2026.11.0 open with nothing
+  featured, and 2026.11.0 opens newer projects, ignoring the marks (saving
+  there drops them).
 
 ## 2026.11.0 - 2026-11-12
 

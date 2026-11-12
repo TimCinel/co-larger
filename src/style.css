@@ -1179,3 +1179,53 @@ button.primary:hover:not(:disabled) {
   bottom: 4px;
   left: 4px;
 }
+
+/* Featured photos (#14): a star in a dark disc, top-left of the tile (the
+   low-resolution badge takes the top-right), and bottom-right of the tray
+   thumbnail (below). Editor chrome only. */
+.feat-layer {
+  position: absolute;
+  pointer-events: none;
+  contain: strict;
+}
+
+.feat-layer[hidden],
+.feat-star[hidden] {
+  display: none;
+}
+
+.feat-star {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 20px;
+  height: 20px;
+  pointer-events: none;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Ccircle cx='10' cy='10' r='9.5' fill='%23202838' stroke='%23fff' stroke-width='1'/%3E%3Cpath d='M10 3.6l1.9 4 4.3.5-3.2 2.9.9 4.3L10 13.1l-3.9 2.2.9-4.3-3.2-2.9 4.3-.5Z' fill='%23ffd75e'/%3E%3C/svg%3E")
+    center / 100% 100% no-repeat;
+}
+
+/* On a thumbnail: bottom-right, below the include tick (top-right) and beside
+   the warning (bottom-left), a little smaller. A thumbnail too narrow for the
+   star beside a warning (portrait photos in the one-row tray) shows only the
+   warning: the button's description still says "Featured", and the expanded
+   tray and the tile show the star. */
+.thumb {
+  container-type: size;
+}
+
+.feat-star-tray {
+  top: auto;
+  left: auto;
+  right: 4px;
+  bottom: 4px;
+  width: 16px;
+  height: 16px;
+}
+
+@container (max-width: 45.9px) {
+  .res-badge-tray ~ .feat-star-tray,
+  .feat-star-tray:has(~ .res-badge-tray) {
+    display: none;
+  }
+}

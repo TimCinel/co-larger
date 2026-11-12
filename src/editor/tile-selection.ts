@@ -1,6 +1,7 @@
 /**
  * Tile selection on the collage: pointer and keyboard handling, the outline
- * drawn over the selected tile, and the Swap / Remove menu. The state
+ * drawn over the selected tile, and the Swap / Remove / Feature menu (F on
+ * the selected tile toggles Feature, #14). The state
  * machine is in selection.ts (pure); this module is the DOM around it.
  *
  * Everything is drawn as overlay elements over the canvas, never into it, so
@@ -27,7 +28,7 @@ import {
   type SelectionEvent,
   type SelectionState,
 } from './selection';
-import { swapTiles, type EditorState } from './state';
+import { isFeatured, setFeatured, swapTiles, type EditorState } from './state';
 import type { EditorStore, ImportActivity } from './store';
 import type { FrameScheduler } from './frames';
 import { createTileCrop } from './tile-crop';
@@ -116,9 +117,12 @@ export function createTileSelection(
   removeButton.type = 'button';
   removeButton.textContent = 'Remove';
   removeButton.title = 'Take this photo out of the collage';
+  const featureButton = doc.createElement('button');
+  featureButton.type = 'button';
+  featureButton.className = 'tile-menu-feature';
   const actions = doc.createElement('div');
   actions.className = 'tile-menu-actions';
-  actions.append(swapButton, removeButton);
+  actions.append(swapButton, removeButton, featureButton);
   const hint = doc.createElement('p');
   hint.className = 'tile-menu-hint';
   hint.textContent = 'Choose a tile to swap with. Esc to cancel.';
@@ -236,6 +240,7 @@ export function createTileSelection(
       text += ', selected, waiting for a tile to swap with';
     }
     // After the state, so what comes first stays as it was.
+    if (isFeatured(editor.getState(), photoId)) text += ', featured';
     const warning = options.warningFor?.(photoId);
     if (warning) text += `. ${warning.replace(/\.$/, '')}`;
     return text;
@@ -303,6 +308,12 @@ export function createTileSelection(
     if (tile && picked !== null) {
       const name = photos.getPhoto(picked)?.file.name ?? 'photo';
       menu.setAttribute('aria-label', `Actions for ${name}`);
+      const featured = isFeatured(editor.getState(), picked);
+      featureButton.textContent = featured ? 'Unfeature' : 'Feature';
+      featureButton.setAttribute('aria-pressed', String(featured));
+      featureButton.title = featured
+        ? 'Stop keeping this photo in a large tile (F)'
+        : 'Keep this photo in a large tile when the collage is re-arranged (F)';
       placeMenu(tile);
     }
 
@@ -328,7 +339,7 @@ export function createTileSelection(
     crop.refresh();
     if (next.kind === 'selected') {
       announce(
-        `${describe(next.photoId)}. Tab for Swap, Remove, Zoom and Reset. Shift and the arrow keys pan, plus and minus zoom.`,
+        `${describe(next.photoId)}. Tab for Swap, Remove, Feature, Zoom and Reset. F features or unfeatures it. Shift and the arrow keys pan, plus and minus zoom.`,
       );
     } else if (next.kind === 'swapping') {
       announce(
@@ -413,12 +424,48 @@ export function createTileSelection(
     canvas.focus();
   });
 
+  /**
+   * Features or unfeatures the selected photo: one commit, which may move it
+   * into a large tile (setFeatured). The photo stays selected in its new
+   * tile, so the menu shows the new label.
+   */
+  let keepSelection = false;
+  function toggleFeature(): void {
+    if (selection.kind !== 'selected') return;
+    const { photoId } = selection;
+    const name = photos.getPhoto(photoId)?.file.name ?? 'photo';
+    const on = !isFeatured(editor.getState(), photoId);
+    const before = editor.getState().assignment;
+    keepSelection = true;
+    try {
+      editor.dispatch((state) => setFeatured(state, photoId, on));
+    } finally {
+      keepSelection = false;
+    }
+    const moved = editor.getState().assignment !== before;
+    refresh();
+    announce(
+      on
+        ? `Featured ${name}${moved ? ', moved to a large tile' : ''}. It stays in a large tile when the collage is re-arranged.`
+        : `Unfeatured ${name}.`,
+    );
+  }
+  featureButton.addEventListener('click', toggleFeature);
+
   // --- Keyboard ---
   canvas.addEventListener('keydown', (event) => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const last = view.lastRender();
     if (!last || last.tiles.length === 0) return;
     if (crop.handleKey(event)) return;
+    if (
+      (event.key === 'f' || event.key === 'F') &&
+      selection.kind === 'selected'
+    ) {
+      event.preventDefault();
+      toggleFeature();
+      return;
+    }
     const direction = ARROWS[event.key];
     if (direction && !event.shiftKey) {
       event.preventDefault();
@@ -484,7 +531,9 @@ export function createTileSelection(
       state.assignment !== arrangement.assignment
     ) {
       arrangement = state;
-      if (selection.kind !== 'idle') send({ type: 'dismiss' });
+      // Featuring moves the photo it acts on, which stays selected.
+      if (selection.kind !== 'idle' && !keepSelection)
+        send({ type: 'dismiss' });
     }
   });
   view.onRender(() => {

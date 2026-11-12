@@ -13,6 +13,15 @@ export interface ResolutionMarks {
 }
 
 /**
+ * What the tray needs of the featured photos (#14): whether a photo is
+ * featured, and a notice when that may have changed.
+ */
+export interface FeatureMarks {
+  isFeatured(photoId: string): boolean;
+  onChange(listener: () => void): () => void;
+}
+
+/**
  * The tray: a toolbar ("N / M selected", add/remove all, and a button to
  * expand or collapse it) and the thumbnails, each a toggle button showing
  * whether the photo is included. Collapsed (the default) the thumbnails are
@@ -23,6 +32,7 @@ export function createTray(
   doc: Document,
   store: PhotoStore,
   resolution?: ResolutionMarks,
+  featured?: FeatureMarks,
 ): HTMLElement {
   const tray = doc.createElement('section');
   tray.className = 'tray';
@@ -88,6 +98,8 @@ export function createTray(
     mark: HTMLElement | null;
     said: HTMLElement | null;
     level: ResolutionLevel | undefined;
+    /** The featured star (#14), made when first needed. */
+    star: HTMLElement | null;
   }
   const items = new Map<string, Item>();
 
@@ -139,6 +151,7 @@ export function createTray(
       mark: null,
       said: null,
       level: undefined,
+      star: null,
     };
     items.set(photo.id, item);
     // The explanation is worked out when asked for: its numbers change
@@ -164,7 +177,8 @@ export function createTray(
       if (level === undefined) {
         item.mark?.remove();
         item.mark = null;
-        item.button.removeAttribute('aria-describedby');
+        item.said = null;
+        describedBy(item);
         item.button.title = name;
         continue;
       }
@@ -184,7 +198,7 @@ export function createTray(
         item.mark = mark;
         item.said = said;
         item.button.append(mark);
-        item.button.setAttribute('aria-describedby', said.id);
+        describedBy(item);
       }
       item.mark.dataset.level = level;
       const glyph = item.mark.firstElementChild;
@@ -193,6 +207,38 @@ export function createTray(
         item.said.textContent =
           level === 'very-low' ? 'Very low resolution' : 'Low resolution';
       }
+    }
+  }
+
+  /** The button is described by its warning and its star, whichever it has. */
+  function describedBy(item: Item): void {
+    const ids = [item.said?.id, item.star?.id].filter(Boolean).join(' ');
+    if (ids) item.button.setAttribute('aria-describedby', ids);
+    else item.button.removeAttribute('aria-describedby');
+  }
+
+  /** Shows or clears each thumbnail's featured star (#14). */
+  function syncStars(): void {
+    if (!featured) return;
+    for (const [id, item] of items) {
+      const on = featured.isFeatured(id);
+      if (on === (item.star !== null)) continue;
+      if (on) {
+        const star = doc.createElement('span');
+        star.className = 'feat-star feat-star-tray';
+        star.id = `feat-said-${id}`;
+        // Said after the photo's name, like the warning.
+        const said = doc.createElement('span');
+        said.className = 'sr-only';
+        said.textContent = 'Featured';
+        star.append(said);
+        item.star = star;
+        item.button.append(star);
+      } else {
+        item.star?.remove();
+        item.star = null;
+      }
+      describedBy(item);
     }
   }
 
@@ -228,6 +274,7 @@ export function createTray(
     expand.hidden = total === 0;
     grid.hidden = total === 0;
     syncMarks();
+    syncStars();
   }
 
   grid.addEventListener('keydown', (event) => {
@@ -271,6 +318,7 @@ export function createTray(
 
   store.subscribe(sync);
   resolution?.onChange(syncMarks);
+  featured?.onChange(syncStars);
   sync();
   // Remaining object URLs are released with the page.
   doc.defaultView?.addEventListener('pagehide', () => {

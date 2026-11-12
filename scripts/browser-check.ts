@@ -14,6 +14,8 @@
  *   node scripts/browser-check.ts --crop-screenshot  # and docs/screenshots/issue-9-*.png
  *   node scripts/browser-check.ts --undo-screenshot  # and docs/screenshots/issue-10-undo.png
  *   node scripts/browser-check.ts --resolution-only [--resolution-screenshot]  # just the #15 checks, and docs/screenshots/issue-15-*.png
+ *   node scripts/browser-check.ts --feature-only [--feature-screenshot]  # just the #14 checks, and docs/screenshots/issue-14-*.png
+ *   node scripts/browser-check.ts --feature-compat <2026.11.0 checkout>  # also open projects across the release (#14)
  *   node scripts/browser-check.ts --tray-screenshot  # and docs/screenshots/photo-tray.png
  *   node scripts/browser-check.ts --port 5301     # another dev server port (or BROWSER_CHECK_PORT)
  *   node scripts/browser-check.ts --only sharp,cap,drag  # the editor image checks (#27)
@@ -30,6 +32,7 @@ import { createServer } from 'vite';
 import { checkA2, checkExport, exportRealFolder } from './export-checks.ts';
 import { checkProject, projectRealFolder } from './project-checks.ts';
 import { checkResolution } from './resolution-checks.ts';
+import { checkFeature } from './feature-checks.ts';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtures = join(root, 'tests', 'fixtures');
@@ -5518,6 +5521,44 @@ if (process.argv.includes('--a2-only')) {
 const browser = await chromium.launch({ channel: 'chrome' });
 console.log(`Browser: Chrome ${browser.version()}`);
 
+// `--feature-compat <dir>`: serve a checkout of the release beside this one.
+const compatIndex = process.argv.indexOf('--feature-compat');
+const releaseServer =
+  compatIndex >= 0
+    ? await createServer({
+        root: resolve(process.argv[compatIndex + 1] ?? ''),
+        configFile: join(
+          resolve(process.argv[compatIndex + 1] ?? ''),
+          'vite.config.ts',
+        ),
+        server: { port: port + 1, strictPort: true },
+        logLevel: 'error',
+      })
+    : null;
+await releaseServer?.listen();
+const featureOptions = {
+  screenshots: process.argv.includes('--feature-screenshot')
+    ? join(root, 'docs', 'screenshots')
+    : undefined,
+  releaseOrigin: releaseServer
+    ? `http://localhost:${String(port + 1)}`
+    : undefined,
+};
+
+// `--feature-only`: just the featured photos (#14).
+if (process.argv.includes('--feature-only')) {
+  await checkFeature(browser, origin, check, featureOptions);
+  await browser.close();
+  await releaseServer?.close();
+  await server.close();
+  console.log(
+    failures === 0
+      ? '\nAll checks passed'
+      : `\n${String(failures)} check(s) FAILED`,
+  );
+  process.exit(failures === 0 ? 0 : 1);
+}
+
 // `--resolution-only`: just the low-resolution warnings (#15).
 if (process.argv.includes('--resolution-only')) {
   await checkResolution(
@@ -5589,6 +5630,7 @@ if (process.argv.includes('--project-only')) {
 
 // `--export-only`: just the export checks (without A2), while working on them.
 if (process.argv.includes('--export-only')) {
+  await checkFeature(browser, origin, check, featureOptions);
   await checkExport(browser, origin, check, {
     screenshots: process.argv.includes('--export-screenshot')
       ? join(root, 'docs', 'screenshots')
@@ -6388,6 +6430,7 @@ check(
 );
 
 await browser.close();
+await releaseServer?.close();
 await server.close();
 console.log(
   failures === 0
