@@ -281,6 +281,76 @@ function editorAction(
   );
 }
 
+/**
+ * A fixed arrangement (Shuffle with a fixed seed), so checks that assert on
+ * geometry do not depend on the random arrangement a run happens to get
+ * (#54). `BROWSER_CHECK_SEED` tries another seed everywhere a check uses
+ * this; the seed used is printed.
+ */
+function checkSeed(fallback: number): number {
+  const fromEnv = process.env.BROWSER_CHECK_SEED;
+  return fromEnv === undefined ? fallback : Number(fromEnv);
+}
+
+async function fixArrangement(p: Page, fallback: number): Promise<number> {
+  const seed = checkSeed(fallback);
+  await editorAction(p, 'shuffle', seed);
+  await waitDrawn(p);
+  return seed;
+}
+
+/**
+ * The border the app draws at the canvas's drawn size, from the app's own
+ * borderAt: requested, effective (clamped to what the arrangement allows)
+ * and the maximum, in pixels.
+ */
+function borderAtDrawn(
+  p: Page,
+): Promise<{ requested: number; effective: number; max: number }> {
+  return p.evaluate(async (module) => {
+    const { borderAt } = await import(/* @vite-ignore */ module);
+    const app = (window as any).__app;
+    const c = document.querySelector<HTMLCanvasElement>('.collage-canvas')!;
+    const at = borderAt(app.editor.getState(), {
+      width: c.width,
+      height: c.height,
+    });
+    return { requested: at.requested, effective: at.effective, max: at.max };
+  }, STATE_MODULE);
+}
+
+/**
+ * How many drawn tiles are larger than the preview and so need a decode of
+ * the original, and how many distinct photos those are, by the app's own
+ * chooseSource (tiles are in device pixels).
+ */
+function tilesNeedingOriginals(
+  p: Page,
+): Promise<{ tiles: number; photos: number }> {
+  return p.evaluate(async (module) => {
+    const { chooseSource } = await import(/* @vite-ignore */ module);
+    const app = (window as any).__app;
+    const { tiles, state } = app.view.lastRender();
+    const byId = new Map(app.store.getPhotos().map((x: any) => [x.id, x]));
+    const need = new Set<string>();
+    let n = 0;
+    for (const t of tiles) {
+      const id = state.assignment[t.slot];
+      const photo = byId.get(id);
+      if (!photo) continue;
+      const crop = state.crops[id];
+      const level = (
+        crop ? chooseSource(photo, t, crop) : chooseSource(photo, t, undefined)
+      ).level;
+      if (level === 'detail') {
+        n++;
+        need.add(id);
+      }
+    }
+    return { tiles: n, photos: need.size };
+  }, '/src/editor/image-source.ts');
+}
+
 async function checkEditor(p: Page): Promise<void> {
   const included = (): Promise<number> =>
     p.evaluate(() => (window as any).__app.store.getSelectedCount());
@@ -1995,7 +2065,10 @@ async function checkPhysicalSizes(p: Page): Promise<void> {
   // 6. DPI: the pixel size changes, the layout and the relative border do not.
   await editorAction(p, 'setBackground', '#000000');
   await editorAction(p, 'setBorder', 0.02);
-  await waitDrawn(p);
+  // A fixed arrangement (#54): the app caps the border for some random ones
+  // (borderAt), which this check would otherwise have to tell from a bug.
+  const dpiSeed = await fixArrangement(p, 54001);
+  console.log(`INFO  DPI check: seed ${String(dpiSeed)}`);
   const arr0 = await arrangementOf(p);
   const tiles0 = await tilePhotos(p);
   const edge0 = await borderPixels(p, [0, 0, 0]);
@@ -2029,6 +2102,18 @@ async function checkPhysicalSizes(p: Page): Promise<void> {
       dpiProblems.push(`${String(d)}: re-rolled`);
     if ((await tilePhotos(p)) !== tiles0)
       dpiProblems.push(`${String(d)}: photos moved`);
+    // The drawn margin is the border the app reports for this state at the
+    // drawn size, and on this fixed arrangement that is the requested 2%
+    // (the cap does not bite), so the margin is 2% of the shorter side too.
+    const at = await borderAtDrawn(p);
+    if (Math.abs(edge.margin - at.effective) > 1)
+      dpiProblems.push(
+        `${String(d)}: margin ${String(edge.margin)} px vs effective ${String(at.effective)} px`,
+      );
+    if (at.effective !== Math.round(at.requested))
+      dpiProblems.push(
+        `${String(d)}: border capped to ${String(at.effective)} of ${String(Math.round(at.requested))} px on the fixed arrangement`,
+      );
     if (Math.abs(rel - rel0) > 0.004 || Math.abs(rel - 0.02) > 0.004)
       dpiProblems.push(
         `${String(d)}: relative border ${rel.toFixed(4)} vs ${rel0.toFixed(4)}`,
@@ -5289,6 +5374,10 @@ async function checkDialDrag(
     undefined,
     { timeout: 120000 },
   );
+  // A fixed arrangement (#54): the check needs tiles larger than their
+  // previews, which some random arrangements do not have.
+  const dragSeed = checkSeed(3);
+  await editorAction(p, 'shuffle', dragSeed);
   await waitDrawn(p, 120000);
   const medians: number[] = [];
   const p95s: number[] = [];
@@ -5356,10 +5445,19 @@ async function checkDialDrag(
   );
   check('dial drag: every tile is final once the drag has settled', settledOk);
   const after = await cacheStats(p);
+  const needing = await tilesNeedingOriginals(p);
+  console.log(
+    `INFO  dial drag: seed ${String(dragSeed)}, ${String(needing.tiles)} tiles of ${String(needing.photos)} photos need an original`,
+  );
+  check(
+    'dial drag: the arrangement has tiles larger than their preview (so decodes are expected)',
+    needing.tiles > 0,
+    `seed ${String(dragSeed)}: ${String(needing.tiles)} tiles`,
+  );
   check(
     'dial drag: originals are decoded for the large tiles once it has settled',
-    after !== null && after.detailDecodes > 0,
-    `${String(after?.detailDecodes ?? 0)} decodes of originals`,
+    after !== null && after.detailDecodes >= needing.photos,
+    `${String(after?.detailDecodes ?? 0)} decodes of originals, ${String(needing.photos)} photos need one (seed ${String(dragSeed)})`,
   );
   await ctx.close();
 }
